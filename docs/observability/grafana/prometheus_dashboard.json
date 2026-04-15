@@ -1,0 +1,139 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "title": "CSC Goals Processed",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "sum by(status) (csc_goals_total)", "legendFormat": "{{status}}"}
+      ]
+    },
+    {
+      "title": "CSC Planning Latency (p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(csc_plan_latency_seconds_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.9, rate(csc_plan_latency_seconds_bucket[5m]))", "legendFormat": "p90"},
+        {"expr": "histogram_quantile(0.99, rate(csc_plan_latency_seconds_bucket[5m]))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "DAF Tasks Processed",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 7, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "sum by(status) (daf_tasks_total)", "legendFormat": "{{status}}"}
+      ]
+    },
+    {
+      "title": "DAF Task Latency (p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 7, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(daf_task_latency_seconds_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.9, rate(daf_task_latency_seconds_bucket[5m]))", "legendFormat": "p90"},
+        {"expr": "histogram_quantile(0.99, rate(daf_task_latency_seconds_bucket[5m]))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "DAF Queue Depth by Agent Type",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "daf_queue_depth", "legendFormat": "{{agent_type}}"}
+      ]
+    },
+    {
+      "title": "WIL Requests by Tool/Status",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "sum by(tool_id, status) (rate(wil_requests_total[5m]))", "legendFormat": "{{tool_id}}/{{status}}"}
+      ]
+    },
+    {
+      "title": "WIL Request Latency (p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 21, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(wil_request_latency_seconds_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.9, rate(wil_request_latency_seconds_bucket[5m]))", "legendFormat": "p90"},
+        {"expr": "histogram_quantile(0.99, rate(wil_request_latency_seconds_bucket[5m]))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "WIL Errors by Category",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 21, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "sum by(tool_id, category) (rate(wil_errors_total[5m]))", "legendFormat": "{{tool_id}}/{{category}}"}
+      ]
+    },
+    {
+      "title": "WIL Inflight by Domain",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 28, "w": 24, "h": 7},
+      "targets": [
+        {"expr": "wil_domain_inflight", "legendFormat": "{{domain}}"}
+      ]
+    }
+    ,
+    {
+      "title": "CSC MCTS Depths",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 35, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "rate(csc_mcts_depth_bucket[5m])", "legendFormat": "depth"}
+      ]
+    },
+    {
+      "title": "WIL Retry-After Delays",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 35, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "sum by(tool_id) (rate(wil_retry_after_seconds_sum[5m]) / rate(wil_retry_after_seconds_count[5m]))", "legendFormat": "avg {{tool_id}}"}
+      ]
+    },
+    {
+      "title": "CSC MCTS Branch Factor (avg)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 42, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "rate(csc_mcts_branch_factor_sum[5m]) / rate(csc_mcts_branch_factor_count[5m])", "legendFormat": "avg branch"}
+      ]
+    },
+    {
+      "title": "CSC MCTS Branch Factor (p50/p90)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 49, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(csc_mcts_branch_factor_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.9, rate(csc_mcts_branch_factor_bucket[5m]))", "legendFormat": "p90"}
+      ]
+    },
+    {
+      "title": "DAF Queue Wait (p50/p90)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 42, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(daf_queue_wait_seconds_bucket[5m])) by (le,agent_type))", "legendFormat": "p50 {{agent_type}}"},
+        {"expr": "histogram_quantile(0.9, sum(rate(daf_queue_wait_seconds_bucket[5m])) by (le,agent_type))", "legendFormat": "p90 {{agent_type}}"}
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["prometheus", "prometheus-dashboard", "prometheus-services"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "version": 1
+}

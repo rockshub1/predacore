@@ -1,0 +1,62 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: daf-service-monitor
+  labels:
+    release: prometheus-operator
+spec:
+  selector:
+    matchLabels:
+      app: prometheus
+      component: dynamic-agent-fabric
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+    metricRelabelings:
+    - action: keep
+      regex: 'grpc_server_handled_total|grpc_server_started_total|process_cpu_seconds_total|process_resident_memory_bytes'
+      sourceLabels: [__name__]
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: daf-service-dashboard
+data:
+  daf-dashboard.json: |-
+    {
+      "title": "DAF Service Dashboard",
+      "panels": [
+        {
+          "title": "gRPC Requests",
+          "type": "graph",
+          "targets": [{
+            "expr": "rate(grpc_server_handled_total[1m])",
+            "legendFormat": "{{method}}"
+          }]
+        },
+        {
+          "title": "Resource Usage",
+          "type": "row",
+          "panels": [
+            {
+              "title": "CPU",
+              "type": "graph",
+              "targets": [{
+                "expr": "rate(process_cpu_seconds_total[1m])",
+                "legendFormat": "CPU Usage"
+              }]
+            },
+            {
+              "title": "Memory",
+              "type": "graph",
+              "targets": [{
+                "expr": "process_resident_memory_bytes",
+                "legendFormat": "Memory Usage"
+              }]
+            }
+          ]
+        }
+      ]
+    }

@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: prometheus
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - api.prometheus.ai
+    secretName: prometheus-tls-secret
+  rules:
+  - host: api.prometheus.ai
+    http:
+      paths:
+      - path: /daf
+        pathType: Prefix
+        backend:
+          service:
+            name: daf-service
+            port:
+              number: 50055
+      - path: /wil
+        pathType: Prefix
+        backend:
+          service:
+            name: wil-service
+            port:
+              number: 50054
+      - path: /monitoring
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000

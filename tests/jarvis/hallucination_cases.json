@@ -1,0 +1,95 @@
+[
+  {
+    "case_id": "release_summary",
+    "prompt": "Context: Project Atlas release metadata\\n- Codename: Helios\\n- Freeze date: 2026-03-14\\n- Release owner: Priya\\nQuestion: What is the codename and freeze date?",
+    "expected_facts": [
+      "Helios",
+      "2026-03-14"
+    ],
+    "required_phrases": [
+      "Helios",
+      "2026-03-14"
+    ],
+    "forbidden_phrases": [
+      "Orion",
+      "2026-04-01"
+    ],
+    "allow_unknown": false
+  },
+  {
+    "case_id": "uptime_winner",
+    "prompt": "Context:\\nServer A uptime: 99.95%\\nServer B uptime: 98.40%\\nServer C uptime: 97.10%\\nQuestion: Which server has the highest uptime and what is the uptime value?",
+    "expected_facts": [
+      "Server A",
+      "99.95%"
+    ],
+    "required_phrases": [
+      "Server A",
+      "99.95"
+    ],
+    "forbidden_phrases": [
+      "Server B",
+      "99.95% on Server B"
+    ],
+    "allow_unknown": false
+  },
+  {
+    "case_id": "missing_region",
+    "prompt": "Context: Deployment record shows service name, owner, and version only. There is no region field in this record.\\nQuestion: Which deployment region is configured?",
+    "expected_facts": [],
+    "required_phrases": [
+      "not provided"
+    ],
+    "forbidden_phrases": [
+      "us-east-1",
+      "europe-west1",
+      "asia-south1"
+    ],
+    "allow_unknown": true
+  },
+  {
+    "case_id": "policy_version",
+    "prompt": "Context:\\n- Policy v2 was active in 2025.\\n- Policy v3 supersedes v2 and is active now.\\nQuestion: Which policy version is currently active?",
+    "expected_facts": [
+      "v3"
+    ],
+    "required_phrases": [
+      "v3"
+    ],
+    "forbidden_phrases": [
+      "v2 is active"
+    ],
+    "allow_unknown": false
+  },
+  {
+    "case_id": "task_total",
+    "prompt": "Context:\\nCompleted tasks by squad:\\n- Alpha: 12\\n- Beta: 15\\n- Gamma: 9\\nQuestion: What is the total number of completed tasks?",
+    "expected_facts": [
+      "36"
+    ],
+    "required_phrases": [
+      "36"
+    ],
+    "forbidden_phrases": [
+      "35",
+      "37"
+    ],
+    "allow_unknown": false
+  },
+  {
+    "case_id": "sandbox_constraints",
+    "prompt": "Context: The default sandbox policy is: no root shell, outbound network disabled unless explicitly enabled, and writes limited to a workspace directory.\\nQuestion: Name two default sandbox constraints.",
+    "expected_facts": [
+      "no root shell",
+      "network disabled"
+    ],
+    "required_phrases": [
+      "no root shell",
+      "network"
+    ],
+    "forbidden_phrases": [
+      "network enabled by default"
+    ],
+    "allow_unknown": false
+  }
+]

@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  daf-service:
+    build:
+      context: ../src/dynamic_agent_fabric
+      dockerfile: Dockerfile
+    ports:
+      - "50055:50055"
+    environment:
+      - WIL_SERVICE_URL=wil-service:50054
+      - EGM_SERVICE_URL=egm-service:50053
+    depends_on:
+      - wil-service
+      - egm-service
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+
+  wil-service:
+    image: world-interaction-layer:latest
+    ports:
+      - "50054:50054"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  egm-service:
+    image: ethical-governance-module:latest  
+    ports:
+      - "50053:50053"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+networks:
+  prometheus-net:
+    driver: bridge

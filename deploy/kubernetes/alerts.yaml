@@ -1,0 +1,46 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: prometheus-daf-alerts
+  namespace: prometheus
+  labels:
+    release: prometheus-operator
+spec:
+  groups:
+  - name: daf-service-alerts
+    rules:
+    - alert: DAFHighErrorRate
+      expr: sum(rate(grpc_server_handled_total{grpc_code!="OK"}[5m])) / sum(rate(grpc_server_handled_total[5m])) > 0.05
+      for: 10m
+      labels:
+        severity: critical
+      annotations:
+        summary: "DAF service high error rate"
+        description: "DAF service error rate is above 5% for 10 minutes."
+
+    - alert: DAFHighLatency
+      expr: histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket[5m])) by (le)) > 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "DAF service high latency"
+        description: "DAF service P99 latency is above 1 second for 5 minutes."
+
+    - alert: DAFCPUThrottlingHigh
+      expr: rate(container_cpu_cfs_throttled_seconds_total{container="daf-service"}[5m]) > 0.1
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "DAF service CPU throttling high"
+        description: "DAF service pods are being CPU throttled."
+
+    - alert: DAFMemoryUsageHigh
+      expr: sum(container_memory_working_set_bytes{container="daf-service"}) / sum(kube_pod_container_resource_limits{resource="memory", container="daf-service"}) > 0.85
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "DAF service memory usage high"
+        description: "DAF service memory usage is above 85% of limits."

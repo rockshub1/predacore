@@ -1,0 +1,137 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-prometheus"
+version = "0.1.0"
+description = "Next-generation hyper-autonomous AI Agent System (JARVIS)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Shubham" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core dependencies — HARD dependencies, no optional fallbacks.
+# jarvis_core is the Rust compute kernel (vector search, BM25, fuzzy,
+# embeddings, entity extraction, relation classification). Install locally
+# from the workspace with `maturin develop --release --manifest-path src/jarvis_core_crate/Cargo.toml`.
+dependencies = [
+    "jarvis_core>=0.1.0",           # Rust compute kernel — MANDATORY, no Python fallbacks
+    "httpx>=0.27",                  # Async HTTP client for API/tools
+    "jsonschema>=4.18",             # Tool parameter validation
+    "pydantic>=2.6",                # Data modelling
+    "python-dotenv>=1.0",           # Environment configuration
+    "numpy>=1.26",                  # Used by world_model.py and embedding adapters
+    "pyyaml>=6.0",                  # Config file parsing
+    "rich>=13.7",                   # Terminal UI (required for CLI)
+    "prompt-toolkit>=3.0.43",       # Terminal input (required for CLI)
+    "ddgs>=9.0",                    # Web search backend for web_search / deep_search tools
+    # All LLM providers (Claude, OpenAI-compatibles, Gemini) run on JARVIS's
+    # in-house Prometheus SDK layer (src/jarvis/llm_providers/prometheus_sdk.py)
+    # — httpx-only, no vendor SDK dependency.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.30",
+    "pytest-cov>=4.1",
+    "pytest-mock>=3.12",
+    "ruff>=0.6",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+]
+api = [
+    "fastapi>=0.110",     # Framework for REST API
+    "uvicorn[standard]>=0.29", # ASGI server
+]
+server = [
+    "fastapi>=0.110,<1.0",          # API gateway and webchat
+    "uvicorn[standard]>=0.29",      # ASGI server
+    "grpcio>=1.78.1",               # gRPC runtime (matches generated stubs)
+    "grpcio-tools>=1.78.1",         # Proto generation
+    "redis>=5.0",                   # Rate limiting / caching
+    "prometheus-client>=0.20",      # Metrics
+    "docker>=7.0",                  # Sandbox manager
+]
+llm = [
+    # Vendor SDKs removed — all providers use JARVIS's in-house Prometheus
+    # SDK layer (httpx-only). This group is kept empty for backwards compat
+    # with any `pip install project-prometheus[llm]` callers.
+]
+nlp = [
+    "spacy>=3.7",                   # Goal parsing (CSE planner)
+]
+# Add dependencies for specific components later, e.g.:
+# kn = ["neo4j", "torch"] # Example KN dependencies
+wil = [
+    "beautifulsoup4>=4.12",
+    "playwright>=1.41",
+]
+docs = [
+    "pdfminer.six>=20240706",
+]
+desktop = [
+    "pyautogui>=0.9.54",
+    "pyobjc-framework-ApplicationServices>=12.1",
+]
+android = [
+    "uiautomator2>=3.0",             # Persistent ATX agent — 5-10x faster than `adb shell input`
+]
+
+[project.urls]
+"Homepage" = "https://github.com/rockshub1/project-prometheus" # Placeholder
+"Bug Tracker" = "https://github.com/rockshub1/project-prometheus/issues" # Placeholder
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "I", "UP", "N", "C4", "B"] # Common useful rules
+ignore = []
+exclude = ["src/common/protos/*_pb2.py", "src/common/protos/*_pb2_grpc.py"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true # Start permissive, tighten later
+# Add strict options gradually:
+# disallow_untyped_defs = true
+# disallow_any_unimported = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+markers = [
+    # Tests that hit real external APIs (Anthropic, OpenAI, Gemini).
+    # Skipped by default. Enable with `pytest --real` or `pytest -m real`.
+    # Requires credentials in env / macOS Keychain. Costs real dollars.
+    "real: hits a live external API — requires credentials, costs money",
+]
+
+[project.scripts]
+prometheus = "jarvis.cli:main"
+jarvis = "jarvis.cli:main"
+prometheus-chat = "prometheus_chat:main"

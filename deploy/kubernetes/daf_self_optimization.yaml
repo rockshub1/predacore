@@ -1,0 +1,163 @@
+# DAF Self-Optimization Service Deployment
+# ---------------------------------------
+# This manifest deploys the DAF Self-Optimization service in a Kubernetes cluster
+# with proper resource limits, health checks, and security configuration
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: daf-system
+  labels:
+    app: dynamic-agent-fabric
+
+---
+# Service Account with minimal permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: daf-self-opt-service-account
+  namespace: daf-system
+
+---
+# Role for core service permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: daf-self-opt-role
+  namespace: daf-system
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+
+---
+# Role Binding for service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daf-self-opt-role-binding
+  namespace: daf-system
+subjects:
+- kind: ServiceAccount
+  name: daf-self-opt-service-account
+  namespace: daf-system
+roleRef:
+  kind: Role
+  name: daf-self-opt-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment for DAF Self-Optimization Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daf-self-optimization
+  namespace: daf-system
+  labels:
+    app: daf-self-optimization
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: daf-self-optimization
+  template:
+    metadata:
+      labels:
+        app: daf-self-optimization
+        version: "1.0.0"
+    spec:
+      serviceAccountName: daf-self-opt-service-account
+      containers:
+      - name: daf-self-optimization
+        image: registry.example.com/daf-self-optimization:1.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc
+        resources:
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+        envFrom:
+        - configMapRef:
+            name: daf-config
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        readinessProbe:
+          grpc:
+            port: 50051
+            service: daf-self-optimization
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          grpc:
+            port: 50051
+            service: daf-self-optimization
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+
+---
+# Service definition for DAF Self-Optimization
+apiVersion: v1
+kind: Service
+metadata:
+  name: daf-self-optimization
+  namespace: daf-system
+  labels:
+    app: daf-self-optimization
+    version: "1.0.0"
+spec:
+  type: ClusterIP
+  selector:
+    app: daf-self-optimization
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: 50051
+      name: grpc
+
+---
+# Network Policy to restrict traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: daf-self-opt-network-policy
+  namespace: daf-system
+spec:
+  podSelector:
+    matchLabels:
+      app: daf-self-optimization
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 50051
+  policyTypes:
+  - Ingress
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: daf-system
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: daf-system

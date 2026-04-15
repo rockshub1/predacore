@@ -1,0 +1,176 @@
+# DAF Self-Optimization API Documentation
+# Generated from protobuf definitions using protoc-gen-swagger
+
+swagger: "2.0"
+info:
+  title: "DAF Self-Optimization API"
+  description: "API for Dynamic Agent Fabric Self-Optimization capabilities including performance monitoring, adaptive configuration, and agent lifecycle management"
+  version: "1.0.0"
+host: "localhost:50051"
+basePath: "/"
+schemes:
+  - "http"
+produces:
+  - "application/json"
+
+paths:
+  /PerformanceMonitor/CollectMetrics:
+    post:
+      summary: "Collect real-time metrics from an agent"
+      request:
+        body:
+          required: true
+          schema:
+            $ref: "#/definitions/PerformanceMetricsRequest"
+      responses:
+        "200":
+          description: "Performance metrics collected successfully"
+          schema:
+            $ref: "#/definitions/PerformanceMetrics"
+        "500":
+          description: "Internal server error"
+
+  /AdaptiveConfiguration/OptimizeConfiguration:
+    post:
+      summary: "Optimize agent configuration based on performance metrics"
+      request:
+        body:
+          required: true
+          schema:
+            $ref: "#/definitions/OptimizationRequest"
+      responses:
+        "200":
+          description: "Configuration optimization completed successfully"
+          schema:
+            $ref: "#/definitions/OptimizationResponse"
+        "400":
+          description: "Invalid optimization request"
+
+  /AgentLifecycleManager/CreateAgent:
+    post:
+      summary: "Create a new agent with specified configuration"
+      request:
+        body:
+          required: true
+          schema:
+            $ref: "#/definitions/AgentConfig"
+      responses:
+        "200":
+          description: "Agent created successfully"
+          schema:
+            $ref: "#/definitions/AgentStatus"
+        "503":
+          description: "Resource allocation failed"
+
+definitions:
+  PerformanceMetricsRequest:
+    type: "object"
+    properties:
+      agent_id:
+        type: "string"
+        description: "Unique identifier for the agent"
+    required:
+      - "agent_id"
+
+  PerformanceMetrics:
+    type: "object"
+    properties:
+      agent_id:
+        type: "string"
+        description: "Unique identifier for the agent"
+      cpu_usage:
+        type: "number"
+        format: "double"
+        description: "CPU usage percentage"
+      memory_usage:
+        type: "number"
+        format: "double"
+        description: "Memory usage percentage"
+      task_count:
+        type: "integer"
+        description: "Number of tasks completed"
+      avg_response_time:
+        type: "number"
+        format: "double"
+        description: "Average response time in seconds"
+      error_count:
+        type: "integer"
+        description: "Number of errors encountered"
+    required:
+      - "agent_id"
+      - "cpu_usage"
+      - "memory_usage"
+
+  OptimizationRequest:
+    type: "object"
+    properties:
+      agent_id:
+        type: "string"
+        description: "Unique identifier for the agent"
+      metrics:
+        $ref: "#/definitions/PerformanceMetrics"
+      constraints:
+        type: "object"
+        properties:
+          max_memory:
+            type: "string"
+            description: "Maximum memory allocation constraint"
+    required:
+      - "agent_id"
+      - "metrics"
+
+  OptimizationResponse:
+    type: "object"
+    properties:
+      optimized_config:
+        $ref: "#/definitions/AgentConfig"
+      optimization_score:
+        type: "number"
+        format: "double"
+        description: "Score indicating optimization effectiveness"
+    required:
+      - "optimized_config"
+
+  AgentConfig:
+    type: "object"
+    properties:
+      name:
+        type: "string"
+        description: "Name of the agent"
+      role:
+        type: "string"
+        description: "Role/functional purpose of the agent"
+      capabilities:
+        type: "array"
+        items:
+          type: "string"
+        description: "List of capabilities the agent possesses"
+      resource_limits:
+        type: "object"
+        properties:
+          cpu:
+            type: "string"
+            description: "CPU allocation limit"
+          memory:
+            type: "string"
+            description: "Memory allocation limit"
+    required:
+      - "name"
+      - "role"
+      - "capabilities"
+
+  AgentStatus:
+    type: "object"
+    properties:
+      agent_id:
+        type: "string"
+        description: "Unique identifier for the agent"
+      status:
+        type: "string"
+        description: "Current status of the agent (active/terminated/error)"
+      last_error:
+        type: "string"
+        description: "Description of last error if any"
+    required:
+      - "agent_id"
+      - "status"
