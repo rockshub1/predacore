@@ -4,14 +4,14 @@ Integration tests for DynamicAgentFabricControllerService.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from jarvis._vendor.common.protos import daf_pb2, wil_pb2
+from predacore._vendor.common.protos import daf_pb2, wil_pb2
 from google.protobuf.struct_pb2 import Struct, Value
 
-from jarvis.agents.daf.agent_registry import (
+from predacore.agents.daf.agent_registry import (
     ActiveAgentInstanceRegistry,
     StaticAgentTypeRegistry,
 )
-from jarvis.agents.daf.service import DynamicAgentFabricControllerService
+from predacore.agents.daf.service import DynamicAgentFabricControllerService
 
 
 @pytest.fixture

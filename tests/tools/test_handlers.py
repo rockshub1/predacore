@@ -1,18 +1,17 @@
 """
-Tests for JARVIS Tool Handlers — focused on security, error handling,
+Tests for PredaCore Tool Handlers — focused on security, error handling,
 and the ToolError hierarchy.
 
 Tests handler behavior without full subsystem init — uses minimal
 ToolContext mocks.
 """
-import asyncio
 import os
 import tempfile
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from jarvis.tools.handlers._context import (
+from predacore.tools.handlers._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
@@ -25,10 +24,6 @@ from jarvis.tools.handlers._context import (
     SENSITIVE_WRITE_PATHS,
     SENSITIVE_WRITE_FILES,
 )
-
-
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 def _make_ctx(**overrides):
@@ -144,76 +139,85 @@ class TestConvenienceConstructors:
 
 
 class TestFileOpsHandler:
-    def test_read_file_success(self):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+    @pytest.mark.asyncio
+    async def test_read_file_success(self):
+        from predacore.tools.handlers.file_ops import handle_read_file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("hello world")
             f.flush()
             try:
                 ctx = _make_ctx()
-                result = _run(handle_read_file({"path": f.name}, ctx))
+                result = await handle_read_file({"path": f.name}, ctx)
                 assert "hello world" in result
             finally:
                 os.unlink(f.name)
 
-    def test_read_file_missing_path(self):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+    @pytest.mark.asyncio
+    async def test_read_file_missing_path(self):
+        from predacore.tools.handlers.file_ops import handle_read_file
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_read_file({}, ctx))
+            await handle_read_file({}, ctx)
         assert exc_info.value.kind == ToolErrorKind.MISSING_PARAM
 
-    def test_read_file_not_found(self):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+    @pytest.mark.asyncio
+    async def test_read_file_not_found(self):
+        from predacore.tools.handlers.file_ops import handle_read_file
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_read_file({"path": "/nonexistent/file.txt"}, ctx))
+            await handle_read_file({"path": "/nonexistent/file.txt"}, ctx)
         assert exc_info.value.kind == ToolErrorKind.NOT_FOUND
 
-    def test_read_file_sensitive_path_blocked(self):
+    @pytest.mark.asyncio
+    async def test_read_file_sensitive_path_blocked(self):
         """Reading sensitive files should be blocked."""
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
         ctx = _make_ctx()
         # Try to read .ssh/id_rsa (sensitive)
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_read_file({"path": os.path.expanduser("~/.ssh/id_rsa")}, ctx))
+            await handle_read_file({"path": os.path.expanduser("~/.ssh/id_rsa")}, ctx)
         # Should be blocked OR not found — either is acceptable
         assert exc_info.value.kind in (ToolErrorKind.BLOCKED, ToolErrorKind.NOT_FOUND)
 
-    def test_write_file_success(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+    @pytest.mark.asyncio
+    async def test_write_file_success(self):
+        from predacore.tools.handlers.file_ops import handle_write_file
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.txt")
             ctx = _make_ctx()
-            result = _run(handle_write_file({"path": path, "content": "test content"}, ctx))
+            result = await handle_write_file({"path": path, "content": "test content"}, ctx)
             assert os.path.exists(path)
             assert open(path).read() == "test content"
 
-    def test_write_file_missing_params(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+    @pytest.mark.asyncio
+    async def test_write_file_missing_params(self):
+        from predacore.tools.handlers.file_ops import handle_write_file
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_write_file({}, ctx))
+            await handle_write_file({}, ctx)
         assert exc_info.value.kind == ToolErrorKind.MISSING_PARAM
 
-    def test_write_file_sensitive_path_blocked(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+    @pytest.mark.asyncio
+    async def test_write_file_sensitive_path_blocked(self):
+        from predacore.tools.handlers.file_ops import handle_write_file
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_write_file({"path": "/etc/passwd", "content": "evil"}, ctx))
+            await handle_write_file({"path": "/etc/passwd", "content": "evil"}, ctx)
         assert exc_info.value.kind == ToolErrorKind.BLOCKED
 
-    def test_list_directory_success(self):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+    @pytest.mark.asyncio
+    async def test_list_directory_success(self):
+        from predacore.tools.handlers.file_ops import handle_list_directory
         ctx = _make_ctx()
-        result = _run(handle_list_directory({"path": "/tmp"}, ctx))
+        result = await handle_list_directory({"path": "/tmp"}, ctx)
         assert isinstance(result, str)
 
-    def test_list_directory_missing_path(self):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+    @pytest.mark.asyncio
+    async def test_list_directory_missing_path(self):
+        from predacore.tools.handlers.file_ops import handle_list_directory
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_list_directory({}, ctx))
+            await handle_list_directory({}, ctx)
         assert exc_info.value.kind == ToolErrorKind.MISSING_PARAM
 
 
@@ -223,17 +227,19 @@ class TestFileOpsHandler:
 
 
 class TestShellHandler:
-    def test_run_command_success(self):
-        from jarvis.tools.handlers.shell import handle_run_command
+    @pytest.mark.asyncio
+    async def test_run_command_success(self):
+        from predacore.tools.handlers.shell import handle_run_command
         ctx = _make_ctx()
-        result = _run(handle_run_command({"command": "echo hello"}, ctx))
+        result = await handle_run_command({"command": "echo hello"}, ctx)
         assert "hello" in result
 
-    def test_run_command_missing_param(self):
-        from jarvis.tools.handlers.shell import handle_run_command
+    @pytest.mark.asyncio
+    async def test_run_command_missing_param(self):
+        from predacore.tools.handlers.shell import handle_run_command
         ctx = _make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            _run(handle_run_command({}, ctx))
+            await handle_run_command({}, ctx)
         assert exc_info.value.kind == ToolErrorKind.MISSING_PARAM
 
 

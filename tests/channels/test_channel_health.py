@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from src.jarvis.channels.health import (
+from src.predacore.channels.health import (
     CIRCUIT_BREAK_ERROR_RATE,
     DEFAULT_RATE_LIMITS,
     DEGRADED_ERROR_RATE,

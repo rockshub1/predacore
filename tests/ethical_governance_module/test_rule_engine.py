@@ -1,7 +1,7 @@
 import pytest
 
-import jarvis._vendor.ethical_governance_module.rule_engine as rule_engine_module
-from jarvis._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+import predacore._vendor.ethical_governance_module.rule_engine as rule_engine_module
+from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
 
 
 @pytest.fixture

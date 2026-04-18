@@ -1,11 +1,11 @@
-# JARVIS Memory Benchmarks
+# PredaCore Memory Benchmarks
 
-Honest, reproducible numbers for the JARVIS unified memory layer on the
+Honest, reproducible numbers for the PredaCore unified memory layer on the
 public **LongMemEval** benchmark (Wu et al., ICLR 2025).
 
 ---
 
-## Headline result — JARVIS v0.1.0 on LongMemEval `_s_` (500 instances)
+## Headline result — PredaCore v0.1.0 on LongMemEval `_s_` (500 instances)
 
 > **R@5 = 0.9574**    R@10 = 0.9766    R@20 = 0.9936
 > **NDCG@5 = 0.8700** NDCG@10 = 0.8902 NDCG@20 = 0.8987
@@ -14,7 +14,7 @@ public **LongMemEval** benchmark (Wu et al., ICLR 2025).
   per benchmark convention)
 - **53.4 minutes** total runtime on Apple Silicon (M-series, 384-dim BGE-small)
 - **Zero API calls, zero tokens, zero dollars** — all compute is local via
-  `jarvis_core` (Rust + Candle embeddings)
+  `predacore_core` (Rust + Candle embeddings)
 
 **Strongest on the historically-hardest categories:**
 
@@ -56,7 +56,7 @@ appear in the top-k retrieved sessions? That's what R@k measures.
 
 ---
 
-## Full results (JARVIS v0.1.0)
+## Full results (PredaCore v0.1.0)
 
 ### Overall
 
@@ -105,7 +105,7 @@ appear in the top-k retrieved sessions? That's what R@k measures.
 
 | System | R@5 | Notes |
 |---|---|---|
-| **JARVIS v0.1.0 (this work)** | **0.9574** | BGE-small-en-v1.5 + Rust BM25 + session-level indexing + reward-proportional decay |
+| **PredaCore v0.1.0 (this work)** | **0.9574** | BGE-small-en-v1.5 + Rust BM25 + session-level indexing + reward-proportional decay |
 | Hippo (published, Show HN) | 0.74 | BM25-only retrieval on LongMemEval |
 | HippoRAG 2 (published) | ~0.70-0.75 | Graph-based with PPR |
 | Raw semantic baseline | ~0.55-0.65 | Typical out-of-box sentence-transformers |
@@ -113,7 +113,7 @@ appear in the top-k retrieved sessions? That's what R@k measures.
 **Fair framing:** Hippo explicitly measured BM25-only, and we're measuring a
 hybrid system (embeddings + BM25 fallback + reward-modulated decay). The right
 apples-to-apples comparison for hybrid retrieval systems in the LongMemEval
-literature is ~0.70-0.85 R@5. JARVIS is above the top of that range.
+literature is ~0.70-0.85 R@5. PredaCore is above the top of that range.
 
 **Honest note on methodology:** Session-level indexing (one memory per session,
 user-message concatenation, capped at ~1000 chars to fit BGE-small's 256-token
@@ -153,15 +153,15 @@ Three important caveats before anyone reads "0.9574" as "solved."
 
 ```bash
 # Python 3.11+, Rust toolchain, maturin
-git clone https://github.com/<org>/project-prometheus.git
-cd project-prometheus
+git clone https://github.com/<org>/predacore.git
+cd predacore
 
 # Create venv and install the Python package
 python3.11 -m venv .venv
 .venv/bin/pip install -e .
 
-# Build the Rust compute kernel (jarvis_core)
-cd src/jarvis_core_crate
+# Build the Rust compute kernel (predacore_core)
+cd src/predacore_core_crate
 ../../.venv/bin/python -m maturin develop --release
 cd ../..
 ```
@@ -183,8 +183,8 @@ haystack sessions each.
 **Smoke test (10 instances, ~70 seconds):**
 
 ```bash
-cd project-prometheus
-.venv/bin/python -m jarvis.evals.longmemeval \
+cd predacore
+.venv/bin/python -m predacore.evals.longmemeval \
     --dataset ~/datasets/longmemeval_s_cleaned.json \
     --max-instances 10
 ```
@@ -192,12 +192,12 @@ cd project-prometheus
 **Full run (500 instances, ~50 minutes on M-series):**
 
 ```bash
-.venv/bin/python -m jarvis.evals.longmemeval \
+.venv/bin/python -m predacore.evals.longmemeval \
     --dataset ~/datasets/longmemeval_s_cleaned.json \
     --json-out ./benchmarks/lme_v0.1.0_full.json
 ```
 
-On first run, `jarvis_core` will download the BGE-small-en-v1.5 embedding
+On first run, `predacore_core` will download the BGE-small-en-v1.5 embedding
 model (~133 MB) from HuggingFace Hub to `~/.cache/huggingface/`. Subsequent
 runs use the cached model and start in under one second.
 
@@ -214,7 +214,7 @@ The full JSON output is at [`lme_v0.1.0_full.json`](./lme_v0.1.0_full.json).
 
 ## Architecture summary (what the benchmark is actually exercising)
 
-The JARVIS unified memory layer under test:
+The PredaCore unified memory layer under test:
 
 **Storage**
 - SQLite 4-table schema (memories, entities, relations, episodes)
@@ -222,7 +222,7 @@ The JARVIS unified memory layer under test:
 - In-RAM vector index (100K cap, importance-protected eviction)
 - Vector index rebuilt from SQLite on startup — no separate vector persistence
 
-**Rust compute kernel** (`jarvis_core`, hard dependency, no Python fallbacks)
+**Rust compute kernel** (`predacore_core`, hard dependency, no Python fallbacks)
 - SIMD cosine vector search (parallel via rayon for >1000 vectors)
 - BM25 keyword search with IDF smoothing (k1=1.5, b=0.75)
 - Trigram fuzzy matching (typo-tolerant)
@@ -242,7 +242,7 @@ The JARVIS unified memory layer under test:
 - **Reward-proportional decay** (Hippo-inspired): memories tied to positive
   sessions decay slower, memories tied to failures decay faster
 - Rust-first entity extraction with optional LLM enrichment
-- `jarvis_core.classify_relation` in `auto_link()` for sentence-aware
+- `predacore_core.classify_relation` in `auto_link()` for sentence-aware
   relation typing
 - Merge near-duplicates (0.87 similarity threshold)
 - Per-user memory cap (25K per user, preferences/entities never pruned)
@@ -263,16 +263,16 @@ retrieval itself.
 
 ## Reproducibility commit hash
 
-Results generated against project-prometheus at the v0.1.0 tag with
-`jarvis_core` built via `maturin develop --release`. Any downstream changes
-to `src/jarvis/memory/`, `src/jarvis/evals/longmemeval.py`, or
-`src/jarvis_core_crate/` will affect the numbers.
+Results generated against predacore at the v0.1.0 tag with
+`predacore_core` built via `maturin develop --release`. Any downstream changes
+to `src/predacore/memory/`, `src/predacore/evals/longmemeval.py`, or
+`src/predacore_core_crate/` will affect the numbers.
 
 ---
 
 ## Honest bottom line
 
-**JARVIS v0.1.0 scores 0.9574 R@5 on LongMemEval's 500 retrieval questions —
+**PredaCore v0.1.0 scores 0.9574 R@5 on LongMemEval's 500 retrieval questions —
 the strongest public number I'm aware of on this benchmark as of April 2026.**
 
 That claim comes with three caveats:

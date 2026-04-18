@@ -9,9 +9,9 @@ from pathlib import Path
 # Ensure we're using the project root
 os.chdir(Path(__file__).parent.parent)
 
-from src.jarvis.config import JARVISConfig, LLMConfig
-from src.jarvis.core import JARVISCore
-from src.jarvis.sessions import Session
+from src.predacore.config import PredaCoreConfig, LLMConfig
+from src.predacore.core import PredaCoreCore
+from src.predacore.sessions import Session
 
 async def run_test():
     print("Checking for gemini CLI...")
@@ -19,20 +19,20 @@ async def run_test():
         print("SKIPPING: 'gemini' CLI not found in PATH.")
         return
 
-    print("Initializing JARVIS with gemini-cli provider...")
+    print("Initializing PredaCore with gemini-cli provider...")
     
-    # Configure JARVIS to use Gemini CLI
-    config = JARVISConfig(
+    # Configure PredaCore to use Gemini CLI
+    config = PredaCoreConfig(
         llm=LLMConfig(
             provider="gemini-cli",
             model="gemini-2.0-pro-exp-02-05",  # The requested model
             temperature=0.7
         ),
-        home_dir="/tmp/jarvis_test_home"
+        home_dir="/tmp/predacore_test_home"
     )
     
     # Initialize Core
-    core = JARVISCore(config)
+    core = PredaCoreCore(config)
     session = Session("test_session_id")
 
     # Define the prompt

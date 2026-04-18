@@ -1,7 +1,7 @@
 # Test Coverage Status
 
 ## Overview
-This document tracks the test coverage status for Project Prometheus components. The goal is to achieve 90%+ test coverage as specified in the ROADMAP.md.
+This document tracks the test coverage status for PredaCore components. The goal is to achieve 90%+ test coverage as specified in the ROADMAP.md.
 
 ## API Gateway Coverage
 ### Authentication

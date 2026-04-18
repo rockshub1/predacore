@@ -1,8 +1,8 @@
-"""Tests for jarvis.tools.resilience — Circuit Breaker, Cache, ExecutionHistory."""
+"""Tests for predacore.tools.resilience — Circuit Breaker, Cache, ExecutionHistory."""
 import time
 import pytest
 
-from jarvis.tools.resilience import (
+from predacore.tools.resilience import (
     CircuitState,
     ExecutionHistory,
     ToolCircuitBreaker,

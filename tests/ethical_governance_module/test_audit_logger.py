@@ -1,7 +1,7 @@
 import pytest
 """
 try:
-    from jarvis._vendor.common import schemas  # test import
+    from predacore._vendor.common import schemas  # test import
 except ImportError:
     pytest.skip("Module not vendored", allow_module_level=True)
 
@@ -12,9 +12,9 @@ import logging
 from pathlib import Path
 
 import pytest
-from jarvis._vendor.common.protos import egm_pb2  # For LogEventRequest
+from predacore._vendor.common.protos import egm_pb2  # For LogEventRequest
 
-from jarvis._vendor.ethical_governance_module.audit_logger import FileAuditLogger
+from predacore._vendor.ethical_governance_module.audit_logger import FileAuditLogger
 
 # Use pytest-asyncio for async functions
 pytestmark = pytest.mark.asyncio

@@ -1,8 +1,8 @@
-# JARVIS — Production Operations Guide
+# PredaCore — Production Operations Guide
 
 ## Architecture Overview
 
-JARVIS is built as a modular AI agent framework with the following layers:
+PredaCore is built as a modular AI agent framework with the following layers:
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -10,7 +10,7 @@ JARVIS is built as a modular AI agent framework with the following layers:
 ├─────────────────────────────────────────────┤
 │  Gateway → Auth Middleware → Rate Limiter   │
 ├─────────────────────────────────────────────┤
-│              JARVIS Core Engine             │
+│              PredaCore Core Engine             │
 │   ┌─────────┬──────────┬─────────────────┐  │
 │   │ Plugins │ Sandbox  │  Voice / TTS    │  │
 │   │ SDK     │ Sessions │  STT Interface  │  │
@@ -33,20 +33,20 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run
-jarvis start --provider openai --model gpt-4o
+predacore start --provider openai --model gpt-4o
 
 # Health check
-jarvis doctor
+predacore doctor
 ```
 
 ## Authentication
 
 ### JWT Tokens
 
-JARVIS supports HS256 JWT authentication:
+PredaCore supports HS256 JWT authentication:
 
 ```python
-from jarvis.auth_middleware import AuthMiddleware, create_jwt_hs256
+from predacore.auth_middleware import AuthMiddleware, create_jwt_hs256
 
 # Create middleware
 auth = AuthMiddleware(jwt_secret="your-secret-key")
@@ -83,7 +83,7 @@ ctx = auth.authenticate({"x-api-key": "sk-your-api-key"})
 Redis-backed rate limiting with automatic in-memory fallback:
 
 ```python
-from jarvis.rate_limiter import RateLimiter, RateLimitConfig
+from predacore.rate_limiter import RateLimiter, RateLimitConfig
 
 limiter = RateLimiter(redis_url="redis://localhost:6379")
 limiter.add_rule(RateLimitConfig("per_user", max_requests=100, window_seconds=60))
@@ -96,7 +96,7 @@ if not result.allowed:
 
 ## Monitoring (Grafana)
 
-Import the dashboard from `deploy/grafana/jarvis-dashboard.json`.
+Import the dashboard from `deploy/grafana/predacore-dashboard.json`.
 
 **Panels included:**
 - Request rate (req/s)
@@ -113,7 +113,7 @@ Import the dashboard from `deploy/grafana/jarvis-dashboard.json`.
 ## Alerting
 
 ```python
-from jarvis.alerting import AlertManager, Alert, AlertSeverity
+from predacore.alerting import AlertManager, Alert, AlertSeverity
 
 alerts = AlertManager(
     slack_url="https://hooks.slack.com/services/...",
@@ -136,7 +136,7 @@ alerts.fire(Alert(
 kubectl apply -f deploy/kubernetes/
 
 # Check status
-kubectl get pods -l app=jarvis
+kubectl get pods -l app=predacore
 kubectl get services
 ```
 
@@ -144,15 +144,15 @@ kubectl get services
 - `deployment.yaml` — Main service (3 replicas, rolling update)
 - `hpa.yaml` — Horizontal Pod Autoscaler
 - `ingress.yaml` — Ingress with TLS
-- `monitoring.yaml` — Jarvis ServiceMonitor
-- `alerts.yaml` — JarvisRule alerts
+- `monitoring.yaml` — PredaCore ServiceMonitor
+- `alerts.yaml` — PredaCoreRule alerts
 - `alertmanager-config.yaml` — AlertManager routing
 - `api_gateway.yaml` — API Gateway configuration
 
 ## Plugins
 
 ```python
-from jarvis.plugins import Plugin, tool, hook
+from predacore.plugins import Plugin, tool, hook
 
 class WeatherPlugin(Plugin):
     name = "weather"
@@ -172,7 +172,7 @@ class WeatherPlugin(Plugin):
 ## Load Testing
 
 ```python
-from jarvis.load_test import LoadTestRunner, LoadTestConfig, RequestResult
+from predacore.load_test import LoadTestRunner, LoadTestConfig, RequestResult
 import time
 
 async def simulate_request(user_id: int) -> RequestResult:
@@ -193,16 +193,16 @@ print(report.print_summary())
 
 | Command | Description |
 |---------|-------------|
-| `jarvis start` | Start JARVIS |
-| `jarvis chat` | Interactive chat |
-| `jarvis doctor` | System diagnostics |
-| `jarvis --help` | All commands |
+| `predacore start` | Start PredaCore |
+| `predacore chat` | Interactive chat |
+| `predacore doctor` | System diagnostics |
+| `predacore --help` | All commands |
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `JARVIS_JWT_SECRET` | JWT signing key | (required for auth) |
+| `PREDACORE_JWT_SECRET` | JWT signing key | (required for auth) |
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `SLACK_WEBHOOK_URL` | Slack alert webhook | (optional) |
 | `PAGERDUTY_ROUTING_KEY` | PagerDuty routing key | (optional) |

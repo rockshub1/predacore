@@ -3,48 +3,79 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "project-prometheus"
+name = "predacore"
 version = "0.1.0"
-description = "Next-generation hyper-autonomous AI Agent System (JARVIS)."
+description = "PredaCore — the apex autonomous agent. Hybrid Rust memory kernel, topped LongMemEval R@5 = 0.9574."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-  { name = "Shubham" },
+  { name = "Shubham Pingle" },
 ]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
     "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Shells",
+    "Topic :: Communications :: Chat",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
+    "Natural Language :: English",
+    "Typing :: Typed",
 ]
 
-# Core dependencies — HARD dependencies, no optional fallbacks.
-# jarvis_core is the Rust compute kernel (vector search, BM25, fuzzy,
-# embeddings, entity extraction, relation classification). Install locally
-# from the workspace with `maturin develop --release --manifest-path src/jarvis_core_crate/Cargo.toml`.
+# Core dependencies — everything needed for a capable agent on any OS.
+# Pip-installable Python libs that are either cross-platform, lightweight, or
+# required for the default feature set ship here. Heavy / platform-specific /
+# deployment-only concerns live under optional extras.
+#
+# `predacore_core` is the Rust compute kernel (vector search, BM25, fuzzy,
+# BGE-small-en-v1.5 embeddings via Candle, entity extraction). Shipped as
+# pre-built wheels for macos-universal2, manylinux-x86_64, manylinux-aarch64,
+# and win-amd64. Source fallback via `maturin develop --release`.
 dependencies = [
-    "jarvis_core>=0.1.0",           # Rust compute kernel — MANDATORY, no Python fallbacks
-    "httpx>=0.27",                  # Async HTTP client for API/tools
-    "jsonschema>=4.18",             # Tool parameter validation
-    "pydantic>=2.6",                # Data modelling
-    "python-dotenv>=1.0",           # Environment configuration
-    "numpy>=1.26",                  # Used by world_model.py and embedding adapters
-    "pyyaml>=6.0",                  # Config file parsing
-    "rich>=13.7",                   # Terminal UI (required for CLI)
-    "prompt-toolkit>=3.0.43",       # Terminal input (required for CLI)
-    "ddgs>=9.0",                    # Web search backend for web_search / deep_search tools
-    # All LLM providers (Claude, OpenAI-compatibles, Gemini) run on JARVIS's
-    # in-house Prometheus SDK layer (src/jarvis/llm_providers/prometheus_sdk.py)
-    # — httpx-only, no vendor SDK dependency.
+    "predacore_core>=0.1.0",        # Rust kernel + BGE embeddings (pre-built wheels)
+    "httpx>=0.27",                   # Async HTTP client for API/tools/LLM SDK
+    "aiohttp>=3.9",                  # WebSocket server (webchat) + CLI chat client
+    "jsonschema>=4.18",              # Tool parameter validation
+    "pydantic>=2.6",                 # Data modelling
+    "python-dotenv>=1.0",            # Environment configuration
+    "numpy>=1.26",                   # World model + embedding adapters
+    "pyyaml>=6.0",                   # Config file parsing
+    "rich>=13.7",                    # Terminal UI
+    "prompt-toolkit>=3.0.43",        # Terminal input
+    "ddgs>=9.0",                     # Web search backend
+    # ── Channels (pure-Python, tiny, cross-platform — default on) ──
+    "python-telegram-bot>=21.0",     # Telegram channel
+    "discord.py>=2.3",               # Discord channel
+    # ── Browser automation (Playwright lib ships, Chromium binary via bootstrap) ──
+    "playwright>=1.41",              # Browser automation (web_search / browser_control)
+    "beautifulsoup4>=4.12",          # HTML parsing for web_scrape
+    # ── Document reading (lightweight) ──
+    "pdfminer.six>=20240706",        # PDF text extraction
+    # ── Voice SDKs (system sox/ffmpeg still needed — bootstrap detects) ──
+    "edge-tts>=7.0",                 # Microsoft Edge TTS (free, no API key)
+    # ── Sandbox client (actual Docker daemon installed separately) ──
+    "docker>=7.0",                   # Python client for Docker sandbox
+    # ── All LLM providers use PredaCore's in-house httpx SDK — no vendor SDKs needed ──
 ]
 
 [project.optional-dependencies]
+# ── Development-only ──
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
@@ -55,50 +86,134 @@ dev = [
     "mypy>=1.8",
     "pre-commit>=3.6",
 ]
-api = [
-    "fastapi>=0.110",     # Framework for REST API
-    "uvicorn[standard]>=0.29", # ASGI server
-]
+
+# ── Server / daemon deployment (not needed for personal use) ──
 server = [
-    "fastapi>=0.110,<1.0",          # API gateway and webchat
-    "uvicorn[standard]>=0.29",      # ASGI server
-    "grpcio>=1.78.1",               # gRPC runtime (matches generated stubs)
-    "grpcio-tools>=1.78.1",         # Proto generation
-    "redis>=5.0",                   # Rate limiting / caching
-    "prometheus-client>=0.20",      # Metrics
-    "docker>=7.0",                  # Sandbox manager
-]
-llm = [
-    # Vendor SDKs removed — all providers use JARVIS's in-house Prometheus
-    # SDK layer (httpx-only). This group is kept empty for backwards compat
-    # with any `pip install project-prometheus[llm]` callers.
-]
-nlp = [
-    "spacy>=3.7",                   # Goal parsing (CSE planner)
-]
-# Add dependencies for specific components later, e.g.:
-# kn = ["neo4j", "torch"] # Example KN dependencies
-wil = [
-    "beautifulsoup4>=4.12",
-    "playwright>=1.41",
-]
-docs = [
-    "pdfminer.six>=20240706",
-]
-desktop = [
-    "pyautogui>=0.9.54",
-    "pyobjc-framework-ApplicationServices>=12.1",
-]
-android = [
-    "uiautomator2>=3.0",             # Persistent ATX agent — 5-10x faster than `adb shell input`
+    "fastapi>=0.110,<1.0",           # API gateway + webchat server
+    "uvicorn[standard]>=0.29",       # ASGI server
+    "grpcio>=1.78.1",                # gRPC runtime (matches vendored stubs)
+    "grpcio-tools>=1.78.1",          # Proto generation
+    "redis>=5.0",                    # Rate limiting / distributed cache
+    "prometheus-client>=0.20",       # Metrics library (distinct from predacore product)
 ]
 
+# ── Heavy NLP: spaCy models for goal parsing ──
+ml = [
+    "spacy>=3.7",                    # Goal parsing (CSE planner)
+]
+
+# ── Desktop automation (macOS + Linux for now; Windows operator is
+#     unimplemented — no point shipping Windows deps until the operator
+#     exists, so this extra is a no-op on Windows).
+desktop = [
+    "pyautogui>=0.9.54; sys_platform == 'darwin' or sys_platform == 'linux'",
+    "pyobjc-framework-ApplicationServices>=12.1; sys_platform == 'darwin'",
+]
+
+# ── Android control (requires `adb` binary in PATH) ──
+android = [
+    "uiautomator2>=3.0",             # Persistent ATX agent
+]
+
+# ── Slack channel (optional; lazy-imported by channels/slack.py) ──
+slack = [
+    "slack-sdk>=3.27",
+]
+
+# ── Email channel (IMAP in + SMTP out) ──
+email = [
+    "aioimaplib>=1.1",
+    "aiosmtplib>=3.0",
+]
+
+# ── "I want it all" — every extra that pip can install, cross-platform ──
+# Only leaves out `server` (deployment concern) and `dev` (not user-facing).
+full = [
+    "predacore[ml]",
+    "predacore[desktop]",
+    "predacore[android]",
+    "predacore[slack]",
+    "predacore[email]",
+]
+
+# ── Legacy aliases (kept so existing install commands keep working) ──
+api = ["predacore[server]"]
+wil = ["predacore[server]"]
+docs = []                            # PDF reading is in core now
+nlp = ["predacore[ml]"]
+llm = []                             # Providers use the in-house httpx SDK
+
 [project.urls]
-"Homepage" = "https://github.com/rockshub1/project-prometheus" # Placeholder
-"Bug Tracker" = "https://github.com/rockshub1/project-prometheus/issues" # Placeholder
+"Homepage" = "https://github.com/rockshub1/predacore"
+"Bug Tracker" = "https://github.com/rockshub1/predacore/issues"
+"Source" = "https://github.com/rockshub1/predacore"
+"Changelog" = "https://github.com/rockshub1/predacore/blob/main/CHANGELOG.md"
+"Security" = "https://github.com/rockshub1/predacore/security/policy"
+
+# uv source override: predacore_core is a local Rust crate built via maturin.
+# It isn't on PyPI, so resolvers must look at the workspace path instead.
+# After publishing the wheel to PyPI, remove this section.
+[tool.uv.sources]
+predacore_core = { path = "src/predacore_core_crate", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# Explicit allowlist — only ship `predacore` and its subpackages. The
+# `predacore_core_crate/` directory holds the Rust kernel's source (shipped
+# as its own separate wheel via maturin), so it must NEVER end up in the
+# main `predacore` wheel as a stray top-level package.
+include = ["predacore", "predacore.*"]
+# Exclude test / eval / benchmark modules from the published wheel. Without this,
+# setuptools auto-discovers them and ships them to PyPI — including fixtures
+# that may contain example credentials, which trip security scanners and embed
+# an unnecessarily large attack surface in user installs.
+exclude = [
+    "predacore.tests",
+    "predacore.tests.*",
+    "predacore.evals",
+    "predacore.evals.*",
+    "predacore._vendor.tests",
+    "predacore._vendor.tests.*",
+    "tests",
+    "tests.*",
+]
+
+# Defense against the Claude Code-style "accidentally shipped debug artifacts"
+# leak. Explicit allowlist for identity files that MUST ship; explicit blocklist
+# for everything else that must never end up in the wheel.
+[tool.setuptools.package-data]
+predacore = [
+    "identity/SOUL_SEED.md",
+    "identity/EVENT_HORIZON.md",
+    "identity/defaults/*.md",
+    "identity/defaults/*.yaml",
+    "py.typed",
+]
+
+[tool.setuptools.exclude-package-data]
+"*" = [
+    "tests/*",
+    "tests/**/*",
+    "**/test_*.py",
+    "**/*_test.py",
+    "**/conftest.py",
+    "**/__pycache__/*",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.pyd",
+    "*.env",
+    ".env*",
+    "**/.env*",
+    "**/debug/*",
+    "**/*.map",
+    "**/*.log",
+    "**/node_modules/*",
+    "**/.DS_Store",
+    "**/target/*",
+    "**/*.rs.bk",
+    "**/fixtures/*",
+    "**/benchmarks/*",
+]
 
 [tool.ruff]
 line-length = 88
@@ -132,6 +247,47 @@ markers = [
 ]
 
 [project.scripts]
-prometheus = "jarvis.cli:main"
-jarvis = "jarvis.cli:main"
-prometheus-chat = "prometheus_chat:main"
+predacore = "predacore.cli:main"
+
+# Channel plugin discovery — third-party packages register their adapters here:
+#   [project.entry-points."predacore.channels"]
+#   slack = "predacore_slack.adapter:SlackAdapter"
+# PredaCore's gateway scans this group at startup (plus ~/.predacore/channels/)
+# so any installed channel package is auto-registered without core edits.
+[project.entry-points."predacore.channels"]
+telegram = "predacore.channels.telegram:TelegramAdapter"
+discord  = "predacore.channels.discord:DiscordAdapter"
+whatsapp = "predacore.channels.whatsapp:WhatsAppAdapter"
+webchat  = "predacore.channels.webchat:WebChatAdapter"
+slack    = "predacore.channels.slack:SlackAdapter"
+signal   = "predacore.channels.signal:SignalAdapter"
+imessage = "predacore.channels.imessage:IMessageAdapter"
+email    = "predacore.channels.email:EmailAdapter"
+
+[tool.coverage.run]
+source = ["src/predacore"]
+omit = [
+    # Vendored microservice scaffolding — reference-only, not part of public surface
+    "src/predacore/_vendor/*",
+    # Hardware-dependent operators — manually verified against real devices
+    "src/predacore/operators/desktop.py",
+    "src/predacore/operators/android.py",
+    "src/predacore/operators/browser_bridge.py",
+    "src/predacore/operators/native_service.py",
+    "src/predacore/operators/smart_input.py",
+    # Channel adapters — require external service credentials to test meaningfully
+    "src/predacore/channels/telegram.py",
+    "src/predacore/channels/whatsapp.py",
+    "src/predacore/channels/webchat.py",
+    # Generated protobuf stubs
+    "src/predacore/**/*_pb2.py",
+    "src/predacore/**/*_pb2_grpc.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

@@ -1,10 +1,10 @@
-"""Tests for jarvis.tools.pipeline — ToolPipeline sequential + parallel execution."""
+"""Tests for predacore.tools.pipeline — ToolPipeline sequential + parallel execution."""
 from __future__ import annotations
 
 import asyncio
 import pytest
 
-from jarvis.tools.pipeline import (
+from predacore.tools.pipeline import (
     PipelineStep,
     PipelineResult,
     ToolPipeline,

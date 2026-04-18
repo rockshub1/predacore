@@ -4,9 +4,9 @@ Unit tests for the DAF Agent Registry implementations.
 from uuid import uuid4
 
 import pytest
-from jarvis._vendor.common.protos import daf_pb2  # For AgentStatus enum
+from predacore._vendor.common.protos import daf_pb2  # For AgentStatus enum
 
-from jarvis.agents.daf.agent_registry import (
+from predacore.agents.daf.agent_registry import (
     ActiveAgentInstanceRegistry,
     StaticAgentTypeRegistry,
 )
@@ -67,9 +67,11 @@ def test_find_agent_for_capability_no_match(type_registry: StaticAgentTypeRegist
     assert agent_id is None
 
 # --- Tests for ActiveAgentInstanceRegistry ---
+# Module-level pytestmark would also tag the sync tests above, so each async
+# test is marked individually instead.
 
-pytestmark = pytest.mark.asyncio # Mark tests as async
 
+@pytest.mark.asyncio
 async def test_register_instance(instance_registry: ActiveAgentInstanceRegistry):
     """Test registering a new agent instance."""
     instance_id = str(uuid4())
@@ -87,6 +89,7 @@ async def test_register_instance(instance_registry: ActiveAgentInstanceRegistry)
     stored_instance = await instance_registry.get_instance(instance_id)
     assert stored_instance == instance_info
 
+@pytest.mark.asyncio
 async def test_register_existing_instance(instance_registry: ActiveAgentInstanceRegistry):
     """Test registering an instance that already exists."""
     instance_id = str(uuid4())
@@ -97,6 +100,7 @@ async def test_register_existing_instance(instance_registry: ActiveAgentInstance
     assert instance_info["type_id"] == "type1"
     assert instance_info["config"] == {}
 
+@pytest.mark.asyncio
 async def test_unregister_instance(instance_registry: ActiveAgentInstanceRegistry):
     """Test unregistering an existing instance."""
     instance_id = str(uuid4())
@@ -106,11 +110,13 @@ async def test_unregister_instance(instance_registry: ActiveAgentInstanceRegistr
     assert unregistered is True
     assert await instance_registry.get_instance(instance_id) is None
 
+@pytest.mark.asyncio
 async def test_unregister_nonexistent_instance(instance_registry: ActiveAgentInstanceRegistry):
     """Test unregistering an instance that doesn't exist."""
     unregistered = await instance_registry.unregister_instance(str(uuid4()))
     assert unregistered is False
 
+@pytest.mark.asyncio
 async def test_list_instances(instance_registry: ActiveAgentInstanceRegistry):
     """Test listing active instances, optionally filtered by type."""
     id1 = str(uuid4())
@@ -133,6 +139,7 @@ async def test_list_instances(instance_registry: ActiveAgentInstanceRegistry):
     typeC_instances = await instance_registry.list_instances(type_id="typeC")
     assert len(typeC_instances) == 0
 
+@pytest.mark.asyncio
 async def test_update_instance_status(instance_registry: ActiveAgentInstanceRegistry):
     """Test updating the status and task info of an instance."""
     instance_id = str(uuid4())
@@ -154,6 +161,7 @@ async def test_update_instance_status(instance_registry: ActiveAgentInstanceRegi
     )
     assert updated_nonexistent is False
 
+@pytest.mark.asyncio
 async def test_find_idle_instance(instance_registry: ActiveAgentInstanceRegistry):
     """Test finding an idle instance of a specific type."""
     id_idle_A = str(uuid4())

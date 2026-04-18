@@ -1,6 +1,6 @@
 import pytest
 
-from jarvis.agents.daf.task_store import MemoryTaskStore
+from predacore.agents.daf.task_store import MemoryTaskStore
 
 pytestmark = pytest.mark.asyncio
 

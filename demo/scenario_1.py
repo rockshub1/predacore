@@ -1,5 +1,5 @@
 """
-Project Prometheus Demo Scenario: 
+PredaCore Demo Scenario: 
 "Global Supply Chain Optimization"
 """
 import time
@@ -86,7 +86,7 @@ class SupplyChainSimulator:
         print(f"- Agents deployed: {len(self.agents_active)}")
         print(f"- Response time: {timedelta(seconds=len(events)*2)}")
         
-        print("\nDEMO COMPLETE - Project Prometheus successfully mitigated supply chain disruption")
+        print("\nDEMO COMPLETE - PredaCore successfully mitigated supply chain disruption")
 
 if __name__ == "__main__":
     simulator = SupplyChainSimulator()

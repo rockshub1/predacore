@@ -1,5 +1,5 @@
 #!/bin/bash
-# Project Prometheus Development Sprint Initiator
+# PredaCore Development Sprint Initiator
 
 # Configuration
 SPRINT_GOALS=(
@@ -11,7 +11,7 @@ SPRINT_DURATION=7 # days
 CODE_REVIEWERS=("lead-engineer" "qa-specialist")
 
 # Initialize sprint
-echo "🚀 Starting Project Prometheus Development Sprint"
+echo "🚀 Starting PredaCore Development Sprint"
 echo "📅 Duration: $SPRINT_DURATION days"
 echo "🎯 Goals:"
 for goal in "${SPRINT_GOALS[@]}"; do

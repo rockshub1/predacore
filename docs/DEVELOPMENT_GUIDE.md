@@ -1,4 +1,4 @@
-# Project Prometheus Development Guide
+# PredaCore Development Guide
 
 ## Current Focus Areas (Q3 2025)
 

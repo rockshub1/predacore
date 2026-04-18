@@ -1,12 +1,12 @@
 import pytest
 
 try:
-    from jarvis.agents.daf.agent_registry import StaticAgentTypeRegistry
+    from predacore.agents.daf.agent_registry import StaticAgentTypeRegistry
 except ImportError:
-    pytest.skip("jarvis.agents.daf.agent_registry not available", allow_module_level=True)
+    pytest.skip("predacore.agents.daf.agent_registry not available", allow_module_level=True)
 
 try:
-    from jarvis._vendor.world_interaction_layer.tool_registry import SimpleToolRegistry
+    from predacore._vendor.world_interaction_layer.tool_registry import SimpleToolRegistry
 except ImportError:
     pytest.skip("world_interaction_layer.tool_registry not available in _vendor", allow_module_level=True)
 

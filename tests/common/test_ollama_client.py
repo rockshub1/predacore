@@ -7,7 +7,7 @@ a running Ollama server — uses monkeypatch and mocking.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jarvis._vendor.common.llm import LLMClient, OllamaClient, get_default_llm_client
+from predacore._vendor.common.llm import LLMClient, OllamaClient, get_default_llm_client
 
 
 class TestOllamaClientCreation:

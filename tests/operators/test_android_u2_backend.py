@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jarvis.operators import android as android_mod
-from jarvis.operators.android import AndroidOperator
+from predacore.operators import android as android_mod
+from predacore.operators.android import AndroidOperator
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ class TestTapShellFirst:
         assert result == {"x": 100, "y": 200, "backend": "shell"}
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -174,7 +174,7 @@ class TestTapShellFirst:
         assert result == {"x": 50, "y": 60, "backend": "u2"}
 
     def test_raises_when_both_fail(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         dev.click.side_effect = RuntimeError("agent dead")
@@ -196,7 +196,7 @@ class TestSwipeShellFirst:
         assert result["backend"] == "shell"
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -218,7 +218,7 @@ class TestLongPressShellFirst:
         assert result["backend"] == "shell"
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -265,7 +265,7 @@ class TestTypeTextRouting:
         assert result == {"typed_chars": 3, "backend": "shell"}
 
     def test_simple_ascii_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -299,7 +299,7 @@ class TestPressKeyShellFirst:
         shell.assert_called_once_with("input keyevent 4", timeout=5)
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -360,7 +360,7 @@ class TestScreenSizeShellFirst:
         assert result == {"width": 1440, "height": 3120, "backend": "shell"}
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -392,7 +392,7 @@ class TestScreenStateShellFirst:
         assert result["backend"] == "shell"
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         dev.info = {"screenOn": True}
@@ -430,7 +430,7 @@ class TestLaunchAppShellFirst:
         shell.assert_called_once_with("am start -n com.example.app/.MainActivity", timeout=10)
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -452,7 +452,7 @@ class TestStopAppShellFirst:
         assert result["backend"] == "shell"
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -481,7 +481,7 @@ class TestCurrentAppShellFirst:
         assert result["backend"] == "shell"
 
     def test_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -516,7 +516,7 @@ class TestWakeSleepShellFirst:
         assert result == {"sleeping": True, "backend": "shell"}
 
     def test_wake_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \
@@ -526,7 +526,7 @@ class TestWakeSleepShellFirst:
         assert result == {"woke": True, "backend": "u2"}
 
     def test_sleep_falls_back_to_u2_when_shell_fails(self) -> None:
-        from jarvis.operators.android import ADBError
+        from predacore.operators.android import ADBError
         op = _make_operator()
         dev = _fake_u2_device()
         with patch.object(op, "_u2_or_none", return_value=dev), \

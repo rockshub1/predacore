@@ -11,8 +11,8 @@ Validates that:
 import pytest
 
 try:
-    from jarvis._vendor.world_interaction_layer.mcp_server import _dispatch_tool, create_mcp_server
-    from jarvis._vendor.world_interaction_layer.tool_registry import SimpleToolRegistry
+    from predacore._vendor.world_interaction_layer.mcp_server import _dispatch_tool, create_mcp_server
+    from predacore._vendor.world_interaction_layer.tool_registry import SimpleToolRegistry
 except ImportError:
     pytest.skip("world_interaction_layer not available in _vendor", allow_module_level=True)
 

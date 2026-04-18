@@ -1,4 +1,4 @@
-"""Tests for jarvis.tools.handlers — unit tests with mock ToolContext.
+"""Tests for predacore.tools.handlers — unit tests with mock ToolContext.
 
 Tests file_ops, memory, identity, stats, and pipeline_handler modules,
 plus ToolError formatting and convenience constructors.
@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jarvis.tools.handlers._context import (
+from predacore.tools.handlers._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
@@ -145,7 +145,7 @@ class TestConvenienceConstructors:
 class TestReadFileHandler:
     @pytest.mark.asyncio
     async def test_read_existing_file(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("hello world")
@@ -156,16 +156,16 @@ class TestReadFileHandler:
 
     @pytest.mark.asyncio
     async def test_read_missing_file(self):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
-            await handle_read_file({"path": "/tmp/nonexistent_jarvis_test_xyz.txt"}, ctx)
+            await handle_read_file({"path": "/tmp/nonexistent_predacore_test_xyz.txt"}, ctx)
         assert exc_info.value.kind == ToolErrorKind.NOT_FOUND
 
     @pytest.mark.asyncio
     async def test_read_no_path(self):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -174,7 +174,7 @@ class TestReadFileHandler:
 
     @pytest.mark.asyncio
     async def test_read_directory_fails(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -183,7 +183,7 @@ class TestReadFileHandler:
 
     @pytest.mark.asyncio
     async def test_read_sensitive_file_blocked(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_read_file
+        from predacore.tools.handlers.file_ops import handle_read_file
 
         # Create a file that matches sensitive patterns
         ssh_dir = tmp_path / ".ssh"
@@ -199,7 +199,7 @@ class TestReadFileHandler:
 class TestWriteFileHandler:
     @pytest.mark.asyncio
     async def test_write_new_file(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+        from predacore.tools.handlers.file_ops import handle_write_file
 
         target = tmp_path / "output.txt"
         ctx = make_ctx()
@@ -212,7 +212,7 @@ class TestWriteFileHandler:
 
     @pytest.mark.asyncio
     async def test_write_creates_parent_dirs(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+        from predacore.tools.handlers.file_ops import handle_write_file
 
         target = tmp_path / "deep" / "nested" / "file.txt"
         ctx = make_ctx()
@@ -223,7 +223,7 @@ class TestWriteFileHandler:
 
     @pytest.mark.asyncio
     async def test_write_no_path(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+        from predacore.tools.handlers.file_ops import handle_write_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -232,7 +232,7 @@ class TestWriteFileHandler:
 
     @pytest.mark.asyncio
     async def test_write_no_content(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+        from predacore.tools.handlers.file_ops import handle_write_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -241,7 +241,7 @@ class TestWriteFileHandler:
 
     @pytest.mark.asyncio
     async def test_write_sensitive_path_blocked(self):
-        from jarvis.tools.handlers.file_ops import handle_write_file
+        from predacore.tools.handlers.file_ops import handle_write_file
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -254,7 +254,7 @@ class TestWriteFileHandler:
 class TestListDirectoryHandler:
     @pytest.mark.asyncio
     async def test_list_directory(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+        from predacore.tools.handlers.file_ops import handle_list_directory
 
         (tmp_path / "a.txt").write_text("a")
         (tmp_path / "b.txt").write_text("b")
@@ -268,18 +268,18 @@ class TestListDirectoryHandler:
 
     @pytest.mark.asyncio
     async def test_list_nonexistent(self):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+        from predacore.tools.handlers.file_ops import handle_list_directory
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
             await handle_list_directory(
-                {"path": "/tmp/jarvis_nonexistent_dir_test"}, ctx
+                {"path": "/tmp/predacore_nonexistent_dir_test"}, ctx
             )
         assert exc_info.value.kind == ToolErrorKind.NOT_FOUND
 
     @pytest.mark.asyncio
     async def test_list_empty_dir(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+        from predacore.tools.handlers.file_ops import handle_list_directory
 
         ctx = make_ctx()
         result = await handle_list_directory({"path": str(tmp_path)}, ctx)
@@ -287,7 +287,7 @@ class TestListDirectoryHandler:
 
     @pytest.mark.asyncio
     async def test_list_recursive(self, tmp_path):
-        from jarvis.tools.handlers.file_ops import handle_list_directory
+        from predacore.tools.handlers.file_ops import handle_list_directory
 
         sub = tmp_path / "sub"
         sub.mkdir()
@@ -306,7 +306,7 @@ class TestListDirectoryHandler:
 class TestMemoryStoreHandler:
     @pytest.mark.asyncio
     async def test_store_basic(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         ctx = make_ctx()
         result = await handle_memory_store(
@@ -317,7 +317,7 @@ class TestMemoryStoreHandler:
 
     @pytest.mark.asyncio
     async def test_store_missing_key(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -326,7 +326,7 @@ class TestMemoryStoreHandler:
 
     @pytest.mark.asyncio
     async def test_store_missing_content(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -335,7 +335,7 @@ class TestMemoryStoreHandler:
 
     @pytest.mark.asyncio
     async def test_store_key_too_long(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -346,7 +346,7 @@ class TestMemoryStoreHandler:
 
     @pytest.mark.asyncio
     async def test_store_with_tags(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         ctx = make_ctx()
         await handle_memory_store(
@@ -356,7 +356,7 @@ class TestMemoryStoreHandler:
 
     @pytest.mark.asyncio
     async def test_store_with_unified_memory(self):
-        from jarvis.tools.handlers.memory import handle_memory_store
+        from predacore.tools.handlers.memory import handle_memory_store
 
         mock_unified = AsyncMock()
         mock_unified.store = AsyncMock(return_value="mem-123")
@@ -372,7 +372,7 @@ class TestMemoryStoreHandler:
 class TestMemoryRecallHandler:
     @pytest.mark.asyncio
     async def test_recall_from_session(self):
-        from jarvis.tools.handlers.memory import handle_memory_recall
+        from predacore.tools.handlers.memory import handle_memory_recall
 
         ctx = make_ctx()
         ctx.memory["architecture"] = {
@@ -385,7 +385,7 @@ class TestMemoryRecallHandler:
 
     @pytest.mark.asyncio
     async def test_recall_no_match(self):
-        from jarvis.tools.handlers.memory import handle_memory_recall
+        from predacore.tools.handlers.memory import handle_memory_recall
 
         ctx = make_ctx()
         result = await handle_memory_recall({"query": "nonexistent"}, ctx)
@@ -393,7 +393,7 @@ class TestMemoryRecallHandler:
 
     @pytest.mark.asyncio
     async def test_recall_missing_query(self):
-        from jarvis.tools.handlers.memory import handle_memory_recall
+        from predacore.tools.handlers.memory import handle_memory_recall
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -402,7 +402,7 @@ class TestMemoryRecallHandler:
 
     @pytest.mark.asyncio
     async def test_recall_by_tag(self):
-        from jarvis.tools.handlers.memory import handle_memory_recall
+        from predacore.tools.handlers.memory import handle_memory_recall
 
         ctx = make_ctx()
         ctx.memory["item1"] = {"content": "something", "tags": ["deploy"]}
@@ -418,7 +418,7 @@ class TestMemoryRecallHandler:
 class TestStatsHandler:
     @pytest.mark.asyncio
     async def test_stats_no_dispatcher(self):
-        from jarvis.tools.handlers.stats import handle_tool_stats
+        from predacore.tools.handlers.stats import handle_tool_stats
 
         ctx = make_ctx()
         result = await handle_tool_stats({"section": "all"}, ctx)
@@ -426,7 +426,7 @@ class TestStatsHandler:
 
     @pytest.mark.asyncio
     async def test_stats_invalid_section(self):
-        from jarvis.tools.handlers.stats import handle_tool_stats
+        from predacore.tools.handlers.stats import handle_tool_stats
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -436,8 +436,8 @@ class TestStatsHandler:
     @pytest.mark.asyncio
     async def test_stats_with_mock_dispatcher(self):
         import json
-        from jarvis.tools.handlers.stats import handle_tool_stats
-        from jarvis.tools.resilience import (
+        from predacore.tools.handlers.stats import handle_tool_stats
+        from predacore.tools.resilience import (
             ToolCircuitBreaker,
             ToolResultCache,
             ExecutionHistory,
@@ -445,7 +445,7 @@ class TestStatsHandler:
 
         ctx = make_ctx()
         # Simulate dispatcher reference with real resilience objects
-        from jarvis.tools.dispatcher import AdaptiveTimeoutTracker
+        from predacore.tools.dispatcher import AdaptiveTimeoutTracker
         mock_dispatcher = MagicMock()
         mock_dispatcher.circuit_breaker = ToolCircuitBreaker()
         mock_dispatcher.result_cache = ToolResultCache()
@@ -468,8 +468,8 @@ class TestStatsHandler:
 
 class TestWebCache:
     def test_put_and_get(self):
-        web_cache_put("test_key_jarvis", "cached_value")
-        assert web_cache_get("test_key_jarvis") == "cached_value"
+        web_cache_put("test_key_predacore", "cached_value")
+        assert web_cache_get("test_key_predacore") == "cached_value"
 
     def test_miss(self):
         assert web_cache_get("nonexistent_cache_key_xyz") is None
@@ -487,7 +487,7 @@ class TestWebCache:
 class TestPipelineHandler:
     @pytest.mark.asyncio
     async def test_missing_steps(self):
-        from jarvis.tools.handlers.pipeline_handler import handle_tool_pipeline
+        from predacore.tools.handlers.pipeline_handler import handle_tool_pipeline
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -496,7 +496,7 @@ class TestPipelineHandler:
 
     @pytest.mark.asyncio
     async def test_invalid_steps_type(self):
-        from jarvis.tools.handlers.pipeline_handler import handle_tool_pipeline
+        from predacore.tools.handlers.pipeline_handler import handle_tool_pipeline
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -505,7 +505,7 @@ class TestPipelineHandler:
 
     @pytest.mark.asyncio
     async def test_invalid_mode(self):
-        from jarvis.tools.handlers.pipeline_handler import handle_tool_pipeline
+        from predacore.tools.handlers.pipeline_handler import handle_tool_pipeline
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
@@ -516,7 +516,7 @@ class TestPipelineHandler:
 
     @pytest.mark.asyncio
     async def test_no_dispatcher_ref(self):
-        from jarvis.tools.handlers.pipeline_handler import handle_tool_pipeline
+        from predacore.tools.handlers.pipeline_handler import handle_tool_pipeline
 
         ctx = make_ctx()
         with pytest.raises(ToolError) as exc_info:
