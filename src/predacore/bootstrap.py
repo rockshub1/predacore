@@ -8,7 +8,7 @@ Idempotent, safe to rerun. It:
 - Installs Playwright's Chromium binary if Playwright is available.
 - Detects system binaries (Docker, sox, ffmpeg, adb, Chrome) and prints the
   exact per-OS command to install any missing ones.
-- Pulls the ``predacore/sandbox`` Docker image when Docker is present.
+- Warns if Docker is missing (only needed for the optional ``execute_code`` tool).
 - Writes ``~/.predacore/.bootstrapped`` so subsequent runs skip the heavy work.
 
 Output is a beautiful glass-panel status table consistent with the rest of
@@ -351,10 +351,10 @@ def _pull_sandbox_image() -> _StepResult:
         pass
     return _StepResult(
         name="Sandbox image (predacore/sandbox)",
-        ok=False,
-        severity="warn",
-        detail="pull failed — will retry on first use",
-        hint="docker pull predacore/sandbox:latest",
+        ok=True,
+        severity="ok",
+        detail="skipped — build locally if you need execute_code",
+        hint="cd docker/sandbox && docker build -t predacore/sandbox:latest .",
     )
 
 
