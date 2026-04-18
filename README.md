@@ -54,7 +54,7 @@ Not an LLM wrapper. A digital operator wired into your machine through a hardene
 
 | | Tools |
 |---|---|
-| **Code & shell** | `execute_code` (13 langs · sandboxed Docker) · `python_exec` · `run_command` · `read_file` · `write_file` · `list_directory` |
+| **Code & shell** | `execute_code` (13 langs · sandboxed Docker · [optional](docker/sandbox/Dockerfile)) · `python_exec` · `run_command` · `read_file` · `write_file` · `list_directory` |
 | **Web** | `browser_control` (hijacks Chrome via DOM — 100× faster than screenshots) · `deep_search` · `web_search` · `web_scrape` |
 | **Desktop / mobile** | `desktop_control` (PyObjC · 1–5ms per action) · `screen_vision` · `android_control` (ADB + uiautomator2) |
 | **Git** | `git_semantic_search` (*"where is the auth middleware?"*) · `git_context` · `git_diff_summary` · `git_commit_suggest` · `git_find_files` |
