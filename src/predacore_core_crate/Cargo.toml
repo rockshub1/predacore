@@ -21,7 +21,7 @@ candle-core = "0.10"
 candle-nn = "0.10"
 candle-transformers = "0.10"
 tokenizers = "0.22"
-hf-hub = "0.4"
+hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 
 [profile.release]
 opt-level = 3
