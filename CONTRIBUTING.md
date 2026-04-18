@@ -1,6 +1,6 @@
-# Contributing to Project Prometheus
+# Contributing to PredaCore
 
-Thank you for your interest in contributing! Prometheus is an open-source
+Thank you for your interest in contributing! PredaCore is an open-source
 AI agent framework, and we welcome contributions of all kinds.
 
 ## Getting Started
@@ -8,15 +8,15 @@ AI agent framework, and we welcome contributions of all kinds.
 ### Prerequisites
 
 - Python 3.10+
-- Rust toolchain (for the `jarvis_core` crate)
+- Rust toolchain (for the `predacore_core` crate)
 - macOS (primary platform; Linux support is in progress)
 
 ### Setup
 
 ```bash
 # Clone the repo
-git clone https://github.com/anthropic-ai/project-prometheus.git
-cd project-prometheus
+git clone https://github.com/rockshub1/predacore.git
+cd predacore
 
 # Create virtual environment
 python -m venv .venv
@@ -26,7 +26,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Build the Rust crate
-cd src/jarvis_core_crate
+cd src/predacore_core_crate
 maturin develop --release
 cd ../..
 
@@ -79,7 +79,7 @@ refactor: simplify LLM provider router
 ## Architecture Overview
 
 ```
-src/jarvis/
+src/predacore/
 ├── agents/          # Multi-agent orchestration, DAF bridge
 ├── auth/            # JWT, API keys, sandbox security
 ├── channels/        # Telegram, Discord, WhatsApp, webchat
@@ -103,10 +103,10 @@ src/jarvis/
 pytest
 
 # Run with coverage
-pytest --cov=src/jarvis
+pytest --cov=src/predacore
 
 # Run specific test module
-pytest tests/jarvis/test_memory.py
+pytest tests/predacore/test_memory.py
 
 # Run tests that hit real APIs (requires credentials)
 pytest -m real

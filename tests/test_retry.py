@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from jarvis.operators.retry import with_retry, async_with_retry
+from predacore.operators.retry import with_retry, async_with_retry
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +191,8 @@ class TestWithRetry:
 class TestAsyncWithRetry:
     """Test the async_with_retry wrapper."""
 
-    def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
-
-    def test_async_no_retry_on_success(self):
+    @pytest.mark.asyncio
+    async def test_async_no_retry_on_success(self):
         """Async function succeeds on first try."""
         call_count = {"n": 0}
 
@@ -202,15 +200,16 @@ class TestAsyncWithRetry:
             call_count["n"] += 1
             return "async ok"
 
-        result = self._run(async_with_retry(
+        result = await async_with_retry(
             my_coro,
             max_attempts=3,
             backoff_base=0.01,
-        ))
+        )
         assert result == "async ok"
         assert call_count["n"] == 1
 
-    def test_async_retry_on_transient(self):
+    @pytest.mark.asyncio
+    async def test_async_retry_on_transient(self):
         """Async function retries on transient error."""
         call_count = {"n": 0}
 
@@ -220,15 +219,16 @@ class TestAsyncWithRetry:
                 raise RuntimeError("timed out")
             return "recovered"
 
-        result = self._run(async_with_retry(
+        result = await async_with_retry(
             my_coro,
             max_attempts=5,
             backoff_base=0.01,
-        ))
+        )
         assert result == "recovered"
         assert call_count["n"] == 3
 
-    def test_async_max_attempts_exhausted(self):
+    @pytest.mark.asyncio
+    async def test_async_max_attempts_exhausted(self):
         """Async raises after exhausting retries."""
         call_count = {"n": 0}
 
@@ -237,14 +237,15 @@ class TestAsyncWithRetry:
             raise RuntimeError("timed out forever")
 
         with pytest.raises(RuntimeError, match="timed out"):
-            self._run(async_with_retry(
+            await async_with_retry(
                 my_coro,
                 max_attempts=3,
                 backoff_base=0.01,
-            ))
+            )
         assert call_count["n"] == 3
 
-    def test_async_no_retry_on_permanent(self):
+    @pytest.mark.asyncio
+    async def test_async_no_retry_on_permanent(self):
         """Async doesn't retry on non-transient error."""
         call_count = {"n": 0}
 
@@ -253,11 +254,11 @@ class TestAsyncWithRetry:
             raise RuntimeError("invalid argument: x must be positive")
 
         with pytest.raises(RuntimeError, match="invalid argument"):
-            self._run(async_with_retry(
+            await async_with_retry(
                 my_coro,
                 max_attempts=3,
                 backoff_base=0.01,
-            ))
+            )
         assert call_count["n"] == 1
 
 

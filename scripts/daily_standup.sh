@@ -1,5 +1,5 @@
 #!/bin/bash
-# Project Prometheus Daily Standup Manager
+# PredaCore Daily Standup Manager
 
 echo "🔄 Generating standup report for $(date +%Y-%m-%d)"
 

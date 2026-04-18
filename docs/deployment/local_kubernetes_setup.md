@@ -68,7 +68,7 @@ istioctl install --set profile=demo -y
 
 ### 1. Build Docker Image
 ```bash
-docker build -t project-prometheus/api-gateway:latest \
+docker build -t predacore/api-gateway:latest \
   -f project_prometheus/src/api_gateway/Dockerfile.api_gateway .
 ```
 
@@ -91,7 +91,7 @@ minikube service api-gateway --url
 
 ## Troubleshooting
 - If Docker Desktop is not running: Start Docker from Applications
-- For image pull errors: `minikube image load project-prometheus/api-gateway:latest`
+- For image pull errors: `minikube image load predacore/api-gateway:latest`
 - Check ingress: `kubectl get ingress`
 
 ## Resource Management

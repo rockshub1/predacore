@@ -7,15 +7,15 @@ from uuid import uuid4
 import grpc
 import grpc.aio
 import pytest
-from jarvis._vendor.common.protos import daf_pb2, egm_pb2_grpc, wil_pb2, wil_pb2_grpc
+from predacore._vendor.common.protos import daf_pb2, egm_pb2_grpc, wil_pb2, wil_pb2_grpc
 from google.protobuf.struct_pb2 import Struct, Value
 
-from jarvis.agents.daf.agent_registry import (
+from predacore.agents.daf.agent_registry import (
     AbstractAgentTypeRegistry as AbstractAgentRegistry,
 )
 
 # Import components to be tested
-from jarvis.agents.daf.service import DynamicAgentFabricControllerService
+from predacore.agents.daf.service import DynamicAgentFabricControllerService
 
 # Use pytest-asyncio for async functions
 pytestmark = pytest.mark.asyncio

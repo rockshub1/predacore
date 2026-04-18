@@ -71,7 +71,9 @@ def main() -> int:
 
     # Orchestrator
     orch_env = base_env.copy()
-    orch_cmd = [sys.executable, '-m', 'uvicorn', 'src.orchestrator.server:app', '--host', '0.0.0.0', '--port', str(args.port)]
+    # Default to loopback for safety. Pass --public to bind all interfaces.
+    _host = '0.0.0.0' if getattr(args, 'public', False) else '127.0.0.1'
+    orch_cmd = [sys.executable, '-m', 'uvicorn', 'src.orchestrator.server:app', '--host', _host, '--port', str(args.port)]
     if args.reload:
         orch_cmd.append('--reload')
 

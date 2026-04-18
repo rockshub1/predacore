@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from jarvis._vendor.common.models import PlanStep, StatusEnum
+from predacore._vendor.common.models import PlanStep, StatusEnum
 
-from jarvis._vendor.core_strategic_engine.llm_planner import (
+from predacore._vendor.core_strategic_engine.llm_planner import (
     LLMStrategicPlanner,
     OpenRouterLLMClient,
 )

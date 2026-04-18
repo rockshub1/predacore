@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool & Operator Enums.
+Tests for PredaCore Tool & Operator Enums.
 
 Validates enum completeness, string compatibility, cross-module re-exports,
 and that HANDLER_MAP keys, WRITE_TOOLS, and READ_ONLY_TOOLS all use valid
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 # ── Tool-level enums ──────────────────────────────────────────────────
-from jarvis.tools.enums import (
+from predacore.tools.enums import (
     ToolName,
     ToolStatus,
     WRITE_TOOLS,
@@ -26,7 +26,7 @@ from jarvis.tools.enums import (
 )
 
 # ── Operator-level enums (canonical source) ───────────────────────────
-from jarvis.operators.enums import (
+from predacore.operators.enums import (
     DesktopAction as OpDesktopAction,
     AndroidAction as OpAndroidAction,
     VisionAction as OpVisionAction,
@@ -34,7 +34,7 @@ from jarvis.operators.enums import (
 )
 
 # ── HANDLER_MAP for cross-validation ─────────────────────────────────
-from jarvis.tools.handlers import HANDLER_MAP
+from predacore.tools.handlers import HANDLER_MAP
 
 
 # =====================================================================

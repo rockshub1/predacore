@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool Health Dashboard — unified system monitoring.
+Tests for PredaCore Tool Health Dashboard — unified system monitoring.
 
 Covers:
   - Full health report generation
@@ -19,13 +19,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from jarvis.tools.enums import ToolStatus
-from jarvis.tools.handlers._context import ToolContext, ToolError, ToolErrorKind
-from jarvis.tools.resilience import ToolCircuitBreaker, ToolResultCache, ExecutionHistory
-from jarvis.tools.dispatcher import ToolDispatcher, AdaptiveTimeoutTracker
-from jarvis.tools.middleware import MiddlewareStack, MetricsMiddleware
-from jarvis.tools.health import HealthDashboard
-from jarvis.tools.trust_policy import TrustPolicyEvaluator
+from predacore.tools.enums import ToolStatus
+from predacore.tools.handlers._context import ToolContext, ToolError, ToolErrorKind
+from predacore.tools.resilience import ToolCircuitBreaker, ToolResultCache, ExecutionHistory
+from predacore.tools.dispatcher import ToolDispatcher, AdaptiveTimeoutTracker
+from predacore.tools.middleware import MiddlewareStack, MetricsMiddleware
+from predacore.tools.health import HealthDashboard
+from predacore.tools.trust_policy import TrustPolicyEvaluator
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ class MockSecurity:
 @dataclass
 class MockConfig:
     security: MockSecurity = field(default_factory=MockSecurity)
-    home_dir: str = "/tmp/jarvis_test"
+    home_dir: str = "/tmp/predacore_test"
 
 
 @dataclass
@@ -108,7 +108,7 @@ class TestHealthDashboardWithData:
         dashboard, dispatcher = make_dashboard()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="content")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/a"})
@@ -123,7 +123,7 @@ class TestHealthDashboardWithData:
         dashboard, dispatcher = make_dashboard()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="content")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/a"})
@@ -140,7 +140,7 @@ class TestHealthDashboardWithData:
             raise RuntimeError("boom")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"broken_tool": failing},
         ):
             for _ in range(3):
@@ -158,7 +158,7 @@ class TestHealthDashboardWithData:
             raise RuntimeError("service down")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"broken_tool": failing},
         ):
             for _ in range(3):
@@ -174,7 +174,7 @@ class TestHealthDashboardWithData:
         dashboard, dispatcher = make_dashboard()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="content")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/test"})
@@ -189,7 +189,7 @@ class TestHealthDashboardWithData:
         dashboard, dispatcher = make_dashboard()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="ok")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/test"})
@@ -203,7 +203,7 @@ class TestHealthDashboardWithData:
         dashboard, dispatcher = make_dashboard()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="ok")},
         ):
             for i in range(5):
@@ -229,7 +229,7 @@ class TestHealthScore:
             raise RuntimeError("fail")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"t1": failing, "t2": failing, "t3": failing},
         ):
             for t in ["t1", "t2", "t3"]:
@@ -255,7 +255,7 @@ class TestHealthScore:
             return "ok"
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"mixed": sometimes_fails},
         ):
             for i in range(9):

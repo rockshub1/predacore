@@ -1,5 +1,5 @@
 """
-End-to-end integration test for Project Prometheus:
+End-to-end integration test for PredaCore:
 Simulates a real user workflow spanning LLM planning, agent dispatch, tool execution, and EGM compliance.
 Uses mocked LLM responses to ensure deterministic testing without requiring API keys.
 """
@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from jarvis._vendor.common.models import PlanStep, StatusEnum
-from jarvis._vendor.common.protos import csc_pb2
+from predacore._vendor.common.models import PlanStep, StatusEnum
+from predacore._vendor.common.protos import csc_pb2
 
-from jarvis._vendor.core_strategic_engine.llm_planner import LLMStrategicPlanner
-from jarvis._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+from predacore._vendor.core_strategic_engine.llm_planner import LLMStrategicPlanner
+from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
 
 
 @pytest.mark.asyncio

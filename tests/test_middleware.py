@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool Middleware — pluggable pre/post dispatch hooks.
+Tests for PredaCore Tool Middleware — pluggable pre/post dispatch hooks.
 
 Covers:
   - MiddlewareContext creation and fields
@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from jarvis.tools.middleware import (
+from predacore.tools.middleware import (
     AuditTrailMiddleware,
     InputSanitizerMiddleware,
     LoggingMiddleware,

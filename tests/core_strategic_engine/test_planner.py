@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from jarvis._vendor.common.models import StatusEnum
-from jarvis._vendor.common.protos import knowledge_nexus_pb2, knowledge_nexus_pb2_grpc
+from predacore._vendor.common.models import StatusEnum
+from predacore._vendor.common.protos import knowledge_nexus_pb2, knowledge_nexus_pb2_grpc
 
-from jarvis._vendor.core_strategic_engine.planner import HierarchicalStrategicPlannerV1
+from predacore._vendor.core_strategic_engine.planner import HierarchicalStrategicPlannerV1
 
 pytestmark = pytest.mark.asyncio
 
@@ -100,14 +100,14 @@ async def test_htn_plan_query_knowledge_ambiguous(planner: HierarchicalStrategic
 async def test_htn_plan_add_relation(planner: HierarchicalStrategicPlannerV1):
     """Test HTN plan for an 'add_relation' intent."""
     goal_id = uuid4()
-    goal_input = "Project Prometheus uses Python language"
+    goal_input = "PredaCore uses Python language"
     user_context = {}
 
     # Mock _parse_goal to return properly structured add_relation intent
     planner._parse_goal = AsyncMock(return_value=[
         {"raw": goal_input, "intent": "add_relation",
-         "entities": ["Project Prometheus", "Python language"],
-         "subject": "Project Prometheus", "relation": "USES", "object": "Python language"}
+         "entities": ["PredaCore", "Python language"],
+         "subject": "PredaCore", "relation": "USES", "object": "Python language"}
     ])
 
     plan = await planner.create_plan(goal_id, goal_input, user_context)

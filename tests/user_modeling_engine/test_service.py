@@ -1,6 +1,6 @@
 import json
 
-from jarvis._vendor.user_modeling_engine.service import UserModelingEngineService, UserProfile
+from predacore._vendor.user_modeling_engine.service import UserModelingEngineService, UserProfile
 
 
 def test_profile_round_trip_and_deep_merge(tmp_path):

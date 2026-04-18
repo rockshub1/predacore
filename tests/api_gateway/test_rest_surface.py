@@ -1,7 +1,7 @@
 import pytest
 from types import SimpleNamespace
 try:
-    from jarvis._vendor.common import schemas  # test import
+    from predacore._vendor.common import schemas  # test import
 except ImportError:
     pytest.skip("Module not vendored", allow_module_level=True)
 

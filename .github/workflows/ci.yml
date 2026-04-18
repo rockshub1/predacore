@@ -30,8 +30,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src/jarvis_core_crate/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src/jarvis_core_crate/Cargo.toml') }}
+            src/predacore_core_crate/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src/predacore_core_crate/Cargo.toml') }}
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -47,7 +47,7 @@ jobs:
 
       - name: Build Rust crate
         run: |
-          cd src/jarvis_core_crate
+          cd src/predacore_core_crate
           maturin develop --release
 
       - name: Lint with Ruff
@@ -56,7 +56,7 @@ jobs:
       - name: Run tests
         run: pytest --tb=short -q
         env:
-          JARVIS_TEST_MODE: "1"
+          PREDACORE_TEST_MODE: "1"
 
   rust:
     runs-on: macos-latest
@@ -72,20 +72,20 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src/jarvis_core_crate/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src/jarvis_core_crate/Cargo.toml') }}
+            src/predacore_core_crate/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src/predacore_core_crate/Cargo.toml') }}
 
       - name: Run Rust tests
         run: |
-          cd src/jarvis_core_crate
+          cd src/predacore_core_crate
           cargo test --release
 
       - name: Check Rust formatting
         run: |
-          cd src/jarvis_core_crate
+          cd src/predacore_core_crate
           cargo fmt --check
 
       - name: Clippy lints
         run: |
-          cd src/jarvis_core_crate
+          cd src/predacore_core_crate
           cargo clippy -- -D warnings

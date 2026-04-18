@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Project Prometheus will be documented in this file.
+All notable changes to PredaCore will be documented in this file.
 
 ## [0.1.0] - 2026-04-15
 
@@ -72,5 +72,5 @@ All notable changes to Project Prometheus will be documented in this file.
 - Prometheus metrics
 
 **Benchmarks**
-- LongMemEval: 0.9574 R@5 (22 points ahead of SOTA)
+- LongMemEval: 0.9574 R@5 (SOTA-class retrieval (within 3 points of the current leader))
 - Full evaluation harness for ALE-bench, SWE-bench

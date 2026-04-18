@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool Dispatcher — full pipeline coverage.
+Tests for PredaCore Tool Dispatcher — full pipeline coverage.
 
 Tests the dispatch pipeline: alias resolution → rate limiting → circuit breaker →
 cache → confirmation → blocked/allowed → handler execution → adaptive timeout →
@@ -15,11 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jarvis.tools.enums import ToolName, ToolStatus, WRITE_TOOLS
-from jarvis.tools.handlers._context import ToolContext, ToolError, ToolErrorKind
-from jarvis.tools.resilience import ToolCircuitBreaker, ToolResultCache, ExecutionHistory
-from jarvis.tools.dispatcher import ToolDispatcher, AdaptiveTimeoutTracker
-from jarvis.tools.trust_policy import TrustPolicyEvaluator
+from predacore.tools.enums import ToolName, ToolStatus, WRITE_TOOLS
+from predacore.tools.handlers._context import ToolContext, ToolError, ToolErrorKind
+from predacore.tools.resilience import ToolCircuitBreaker, ToolResultCache, ExecutionHistory
+from predacore.tools.dispatcher import ToolDispatcher, AdaptiveTimeoutTracker
+from predacore.tools.trust_policy import TrustPolicyEvaluator
 
 
 # ── Test Fixtures ─────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ class MockSecurity:
 class MockConfig:
     """Minimal config for ToolContext."""
     security: MockSecurity = field(default_factory=MockSecurity)
-    home_dir: str = "/tmp/jarvis_test"
+    home_dir: str = "/tmp/predacore_test"
 
 
 @dataclass
@@ -138,11 +138,11 @@ class TestDispatcherPipeline:
 
     @pytest.mark.asyncio
     async def test_alias_resolution(self, dispatcher):
-        """Gemini CLI aliases are resolved to JARVIS tool names."""
+        """Gemini CLI aliases are resolved to PredaCore tool names."""
         # run_in_terminal → run_command
         # We patch the handler to verify the resolved name is used
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"run_command": AsyncMock(return_value="executed")},
         ):
             result = await dispatcher.dispatch("run_in_terminal", {"command": "echo hi"})
@@ -152,7 +152,7 @@ class TestDispatcherPipeline:
     async def test_run_shell_command_alias(self, dispatcher):
         """Legacy alias run_shell_command → run_command works."""
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"run_command": AsyncMock(return_value="ok")},
         ):
             result = await dispatcher.dispatch("run_shell_command", {"command": "ls"})
@@ -163,7 +163,7 @@ class TestDispatcherPipeline:
         """Successful tool execution returns the handler's result."""
         mock_handler = AsyncMock(return_value="file contents here")
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": mock_handler},
         ):
             result = await dispatcher.dispatch("read_file", {"path": "/tmp/test.txt"})
@@ -177,7 +177,7 @@ class TestDispatcherPipeline:
             raise ToolError("File not found: /tmp/missing.txt", kind=ToolErrorKind.NOT_FOUND)
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": raise_tool_error},
         ):
             result = await dispatcher.dispatch("read_file", {"path": "/tmp/missing.txt"})
@@ -190,7 +190,7 @@ class TestDispatcherPipeline:
             raise RuntimeError("connection refused")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"web_search": raise_error},
         ):
             result = await dispatcher.dispatch("web_search", {"query": "test"})
@@ -235,7 +235,7 @@ class TestDispatcherCircuitBreaker:
             raise RuntimeError("service down")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"web_search": failing_handler},
         ):
             # 3 failures to trip the circuit
@@ -259,7 +259,7 @@ class TestDispatcherCircuitBreaker:
             return "success"
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"web_search": sometimes_fails},
         ):
             # 2 failures (not enough to trip)
@@ -276,7 +276,7 @@ class TestDispatcherCircuitBreaker:
             raise ToolError("Missing 'path'", kind=ToolErrorKind.MISSING_PARAM)
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": missing_param},
         ):
             # Even 10 user errors shouldn't trip the circuit
@@ -310,7 +310,7 @@ class TestDispatcherCache:
             return f"result-{call_count}"
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": counting_handler},
         ):
             r1 = await dispatcher.dispatch("read_file", {"path": "/tmp/test"})
@@ -330,7 +330,7 @@ class TestDispatcherCache:
             return f"result-{call_count}"
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": counting_handler},
         ):
             r1 = await dispatcher.dispatch("read_file", {"path": "/tmp/a.txt"})
@@ -352,7 +352,7 @@ class TestDispatcherCache:
             return "written"
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": read_handler, "write_file": write_handler},
         ):
             # Read and cache
@@ -384,7 +384,7 @@ class TestDispatcherHistory:
     async def test_records_successful_execution(self, dispatcher):
         """Successful execution is recorded in history."""
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="content")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/test"})
@@ -402,7 +402,7 @@ class TestDispatcherHistory:
             raise RuntimeError("boom")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"web_search": failing},
         ):
             await dispatcher.dispatch("web_search", {"query": "test"})
@@ -419,7 +419,7 @@ class TestDispatcherHistory:
             dispatcher.circuit_breaker.record_failure("broken_tool")
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"broken_tool": AsyncMock(return_value="ok")},
         ):
             await dispatcher.dispatch("broken_tool", {})
@@ -432,7 +432,7 @@ class TestDispatcherHistory:
     async def test_records_cached_result(self, dispatcher):
         """Cache hit is recorded in history."""
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="cached content")},
         ):
             # First call — miss
@@ -449,7 +449,7 @@ class TestDispatcherHistory:
     async def test_stats_aggregation(self, dispatcher):
         """History stats aggregate correctly across calls."""
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {
                 "read_file": AsyncMock(return_value="ok"),
                 "web_search": AsyncMock(return_value="results"),
@@ -482,7 +482,7 @@ class TestDispatcherRateLimit:
         dispatcher = ToolDispatcher(trust, ctx, rate_max=2)
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="ok")},
         ):
             r1 = await dispatcher.dispatch("read_file", {"path": "/a"})
@@ -506,7 +506,7 @@ class TestDispatcherOrigin:
         dispatcher = make_dispatcher()
 
         with patch.dict(
-            "jarvis.tools.handlers.HANDLER_MAP",
+            "predacore.tools.handlers.HANDLER_MAP",
             {"read_file": AsyncMock(return_value="ok")},
         ):
             await dispatcher.dispatch("read_file", {"path": "/tmp/test"}, origin="gemini_cli")

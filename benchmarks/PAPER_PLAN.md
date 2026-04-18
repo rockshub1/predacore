@@ -1,6 +1,6 @@
 # Paper Plan — LongMemEval v0.1.0 → Paper-Level
 
-_Plan for turning the JARVIS memory benchmark (`lme_v0.1.0_full.json`, R@5 = 0.9574)
+_Plan for turning the PredaCore memory benchmark (`lme_v0.1.0_full.json`, R@5 = 0.9574)
 from a GitHub benchmark write-up into a paper-level submission. Honest gap analysis
 and a 4-week work plan._
 
@@ -29,13 +29,13 @@ _Written: 2026-04-14. Based on: `benchmarks/README.md` v0.1.0._
 
 | System | R@5 | Delta |
 |---|---|---|
-| **JARVIS v0.1.0** | **0.9574** | — |
+| **PredaCore v0.1.0** | **0.9574** | — |
 | Hippo (Show HN, BM25-only) | 0.74 | +22 points |
 | HippoRAG 2 (graph-based, PPR) | 0.70-0.75 | +22 points |
 | Raw sentence-transformers baseline | 0.55-0.65 | +35 points |
 
 Published hybrid retrieval on LongMemEval lives in the 0.70-0.85 range.
-JARVIS is above the top of that range. A 22-point delta over the next-best
+PredaCore is above the top of that range. A 22-point delta over the next-best
 published system is the kind of delta that reviewers pay attention to.
 
 ### 2. Architecture has genuine novelty (not just standard IR)
@@ -81,7 +81,7 @@ Without this, the paper gets rejected for inability to isolate the contribution.
 ```
 Configuration                                R@5     ΔR@5
 ─────────────────────────────────────────── ─────   ──────
-Full JARVIS                                 0.9574    —
+Full PredaCore                                 0.9574    —
   − reward-proportional decay               0.????  -0.???
   − BM25 (semantic only)                    0.????  -0.???
   − semantic (BM25 only)                    0.????  -0.???
@@ -122,13 +122,13 @@ The current run is single-seed. Papers need:
 - **3-5 runs with different seeds**, reporting mean ± std
 - **Bootstrap confidence intervals** on the R@5 metric
 - **Wilcoxon signed-rank test** on the per-instance R@5 differences between
-  systems (JARVIS vs each baseline)
+  systems (PredaCore vs each baseline)
 - Pairwise paired tests wherever a comparison is made
 
 For your benchmark specifically, non-determinism comes from floating-point
 ordering in parallel Rust vector search for close score ties (the README notes
 ±1%). Running it 5 times and reporting `0.957 ± 0.003` + a p-value on the
-JARVIS-vs-Hippo comparison makes the claim bulletproof.
+PredaCore-vs-Hippo comparison makes the claim bulletproof.
 
 **Effort:** 2-3 days. Run 5 seeds of the full config (~5 hours of compute),
 compute confidence intervals and run the significance tests.
@@ -232,7 +232,7 @@ the math out cleanly with derivations.
 
 ### Gap 7: No related work section
 
-README mentions Hippo and HippoRAG 2 but does not situate JARVIS in the broader
+README mentions Hippo and HippoRAG 2 but does not situate PredaCore in the broader
 literature. A paper's related work section needs:
 
 - **Memory-augmented agents:** Voyager, Generative Agents, MemGPT, Reflexion,
@@ -253,7 +253,7 @@ literature. A paper's related work section needs:
   PageRank approach
 
 **Effort:** 2-3 days. Read broadly, cite thoroughly, identify which systems
-are closest to JARVIS and explain the delta.
+are closest to PredaCore and explain the delta.
 
 ---
 
@@ -319,8 +319,8 @@ statistical significance to the existing result.
 | 1 | Implement config flags for each ablation (8 total). Each flag disables one component cleanly without breaking downstream. |
 | 2 | Run full 500-instance ablation for 4 configurations (reward decay off, BM25 only, semantic only, 5-section off). ~4 hours of compute. |
 | 3 | Run remaining 4 ablations (turn-level indexing, no fuzzy, no in-RAM index, no rerank). |
-| 4 | Run the full JARVIS config 5 times with different seeds. Compute mean/std/bootstrap CI. |
-| 5 | Run paired Wilcoxon signed-rank tests between JARVIS and each ablation, and between JARVIS and the published baselines. |
+| 4 | Run the full PredaCore config 5 times with different seeds. Compute mean/std/bootstrap CI. |
+| 5 | Run paired Wilcoxon signed-rank tests between PredaCore and each ablation, and between PredaCore and the published baselines. |
 
 **Deliverables:**
 - `benchmarks/ablation_v0.1.1.json` — full ablation table with mean ± std and CIs
@@ -329,13 +329,13 @@ statistical significance to the existing result.
 
 ### Week 2 — Second dataset + head-to-head baselines
 
-**Goal:** show JARVIS generalizes beyond LongMemEval and controls for hardware
+**Goal:** show PredaCore generalizes beyond LongMemEval and controls for hardware
 / seed by re-running prior work.
 
 | Day | Task |
 |---|---|
 | 1 | Build MTEB retrieval adapter (or MemoryBench adapter). Wire into the evals harness. |
-| 2 | Run JARVIS on the chosen 2nd dataset. Full run. |
+| 2 | Run PredaCore on the chosen 2nd dataset. Full run. |
 | 3 | Re-run Hippo on LongMemEval under identical conditions (same hardware, same seeds). |
 | 4 | Re-run BGE-M3 hybrid and ColBERTv2 on LongMemEval under identical conditions. |
 | 5 | Run the long-context baseline: feed full haystacks to Claude-Opus-4 (or GPT-4-Turbo) with no retrieval. Measure answer accuracy (skip R@k — undefined for no-retrieval). |
@@ -393,7 +393,7 @@ Clarifying what this plan explicitly does **not** include, to keep scope honest:
   plausibly improve the weak `single-session-preference` category, but it
   also doubles memory and slows retrieval. Worth ablating with BGE-large as
   a sensitivity test, but not worth rewriting the primary config.
-- **Agent end-to-end case study.** Running JARVIS in production on a real
+- **Agent end-to-end case study.** Running PredaCore in production on a real
   user's data for weeks, then measuring outcome quality. Would strengthen
   a "production deployment" framing, but adds a month of time and requires
   user consent. Skip unless Framing #3 is the chosen angle and the reviewer

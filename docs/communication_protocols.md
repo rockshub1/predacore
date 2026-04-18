@@ -1,9 +1,9 @@
-# Project Prometheus: Inter-Component Communication Protocols (v1)
+# PredaCore: Inter-Component Communication Protocols (v1)
 
 **Version:** 0.1
 **Date:** 2025-04-10
 
-This document outlines the initial decisions regarding communication protocols between the core internal components of Project Prometheus and for external interactions.
+This document outlines the initial decisions regarding communication protocols between the core internal components of PredaCore and for external interactions.
 
 ---
 

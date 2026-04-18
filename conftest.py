@@ -22,9 +22,8 @@ if src_dir not in sys.path:
 #     pytest -m real --real       # runs ONLY real tests
 #     pytest -m "not real"        # explicitly excludes (same as default)
 #
-# Per-test credential checks live in src/jarvis/tests/real/conftest.py
-# and skip individual tests when their specific credential is missing
-# (e.g. a Claude Code keychain entry for claude_dev tests).
+# Per-test credential checks live in src/predacore/tests/real/conftest.py
+# and skip individual tests when their specific credential is missing.
 
 
 def pytest_addoption(parser):

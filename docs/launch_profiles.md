@@ -1,6 +1,6 @@
 # Prometheus Launch Profiles
 
-This document defines runtime launch postures for Project Prometheus.
+This document defines runtime launch postures for PredaCore.
 
 ## Profiles
 
@@ -65,16 +65,16 @@ prometheus start --profile enterprise_lockdown --daemon
 You can set profile and launch flags via environment variables:
 
 ```bash
-export JARVIS_PROFILE=public_beast
-export JARVIS_APPROVALS_REQUIRED=0
-export JARVIS_EGM_MODE=off
-export JARVIS_DEFAULT_CODE_NETWORK=1
-export JARVIS_ENABLE_OPENCLAW_BRIDGE=1
-export JARVIS_ENABLE_PLUGIN_MARKETPLACE=1
-export JARVIS_ENABLE_SELF_EVOLUTION=1
-export JARVIS_MAX_SPAWN_DEPTH=0
-export JARVIS_MAX_SPAWN_FANOUT=0
-export JARVIS_MAX_TOOL_ITERATIONS=64
+export PREDACORE_PROFILE=public_beast
+export PREDACORE_APPROVALS_REQUIRED=0
+export PREDACORE_EGM_MODE=off
+export PREDACORE_DEFAULT_CODE_NETWORK=1
+export PREDACORE_ENABLE_OPENCLAW_BRIDGE=1
+export PREDACORE_ENABLE_PLUGIN_MARKETPLACE=1
+export PREDACORE_ENABLE_SELF_EVOLUTION=1
+export PREDACORE_MAX_SPAWN_DEPTH=0
+export PREDACORE_MAX_SPAWN_FANOUT=0
+export PREDACORE_MAX_TOOL_ITERATIONS=64
 
 export OPENCLAW_BRIDGE_URL=https://bridge.example.com
 export OPENCLAW_BRIDGE_TASK_PATH=/v1/responses
@@ -88,9 +88,9 @@ export OPENCLAW_BRIDGE_MAX_RETRIES=2
 export OPENCLAW_BRIDGE_RETRY_BACKOFF=1.0
 export OPENCLAW_BRIDGE_POLL_INTERVAL=1.5
 export OPENCLAW_BRIDGE_MAX_POLL_SECONDS=180
-export JARVIS_ACTION_LEDGER_PATH=~/.jarvis/logs/openclaw_actions.jsonl
-export JARVIS_IDEMPOTENCY_DB_PATH=~/.jarvis/memory/openclaw_idempotency.db
-export JARVIS_KILL_SWITCH=0
+export PREDACORE_ACTION_LEDGER_PATH=~/.predacore/logs/openclaw_actions.jsonl
+export PREDACORE_IDEMPOTENCY_DB_PATH=~/.predacore/memory/openclaw_idempotency.db
+export PREDACORE_KILL_SWITCH=0
 # optional:
 # export OPENCLAW_BRIDGE_API_KEY=...
 ```
@@ -102,6 +102,6 @@ When `load_config()` runs, it syncs policy variables used by service modules:
 - `APPROVALS_REQUIRED`
 - `EGM_MODE`
 - `DEFAULT_CODE_NETWORK`
-- `JARVIS_PROFILE`
+- `PREDACORE_PROFILE`
 
 This keeps CLI and service behavior aligned with the selected launch profile.

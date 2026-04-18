@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jarvis.agents.daf.self_optimization import (
+from predacore.agents.daf.self_optimization import (
     AdaptiveConfiguration,
     OptimizationStrategy,
     PerformanceMetrics,
@@ -47,7 +47,7 @@ def self_optimizer():
         network_threshold=90
     )
 
-@patch("jarvis.agents.daf.self_optimization.psutil")
+@patch("predacore.agents.daf.self_optimization.psutil")
 async def test_resource_monitor_cpu_usage(mock_psutil):
     mock_psutil.cpu_percent.return_value = 75.5
 
@@ -57,7 +57,7 @@ async def test_resource_monitor_cpu_usage(mock_psutil):
     assert cpu_usage == 75.5
     mock_psutil.cpu_percent.assert_called_once_with(interval=0.1)
 
-@patch("jarvis.agents.daf.self_optimization.psutil")
+@patch("predacore.agents.daf.self_optimization.psutil")
 async def test_resource_monitor_memory_usage(mock_psutil):
     mock_psutil.virtual_memory.return_value = MagicMock(percent=65.2)
 
@@ -67,7 +67,7 @@ async def test_resource_monitor_memory_usage(mock_psutil):
     assert memory_usage == 65.2
     mock_psutil.virtual_memory.assert_called_once()
 
-@patch("jarvis.agents.daf.self_optimization.psutil")
+@patch("predacore.agents.daf.self_optimization.psutil")
 async def test_resource_monitor_network_usage(mock_psutil):
     # Return increasing byte counts on successive calls so rate > 0
     mock_psutil.net_io_counters.side_effect = [
@@ -110,8 +110,8 @@ async def test_optimization_strategy_calculation():
     high_cpu_score = await strategy.calculate_optimization_score(resource_usage)
     assert high_cpu_score > score  # Score should be higher due to increased CPU usage
 
-@patch("jarvis.agents.daf.self_optimization.ResourceMonitor")
-@patch("jarvis.agents.daf.self_optimization.OptimizationStrategy")
+@patch("predacore.agents.daf.self_optimization.ResourceMonitor")
+@patch("predacore.agents.daf.self_optimization.OptimizationStrategy")
 async def test_self_optimizer_initialization(mock_strategy_class, mock_monitor_class):
     mock_monitor = AsyncMock()
     mock_strategy = AsyncMock()
@@ -200,8 +200,8 @@ async def test_self_optimizer_threshold_alerts():
         "Resource usage above thresholds: cpu=85% (threshold:80%), memory=90% (threshold:85%), network=95% (threshold:90%)"
     )
 
-@patch("jarvis.agents.daf.self_optimization.ResourceMonitor")
-@patch("jarvis.agents.daf.self_optimization.OptimizationStrategy")
+@patch("predacore.agents.daf.self_optimization.ResourceMonitor")
+@patch("predacore.agents.daf.self_optimization.OptimizationStrategy")
 async def test_self_optimizer_background_task(mock_strategy, mock_monitor):
     mock_monitor.get_resource_usage = AsyncMock(return_value={
         "cpu": 70,

@@ -4,7 +4,7 @@ Unit tests for the DockerSandboxManager in WIL.
 import pytest
 
 try:
-    from jarvis._vendor.world_interaction_layer.sandbox import DockerSandboxManager
+    from predacore._vendor.world_interaction_layer.sandbox import DockerSandboxManager
 except ImportError:
     pytest.skip("world_interaction_layer not available in _vendor", allow_module_level=True)
 
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 @pytest.fixture
 def docker_manager():
     # Patch docker.from_env at the correct import location
-    with patch("jarvis._vendor.world_interaction_layer.sandbox.docker.from_env") as mock_from_env:
+    with patch("predacore._vendor.world_interaction_layer.sandbox.docker.from_env") as mock_from_env:
         mock_client = MagicMock()
         mock_from_env.return_value = mock_client
         manager = DockerSandboxManager(logger=None)

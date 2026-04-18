@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool Enums — ensures enum completeness and sync with HANDLER_MAP.
+Tests for PredaCore Tool Enums — ensures enum completeness and sync with HANDLER_MAP.
 
 Critical invariant: every tool in HANDLER_MAP must have a corresponding
 ToolName enum entry, and vice versa. A mismatch means either the enum
@@ -7,7 +7,7 @@ is stale or a handler wasn't registered.
 """
 import pytest
 
-from jarvis.tools.enums import (
+from predacore.tools.enums import (
     ToolName,
     ToolStatus,
     WRITE_TOOLS,
@@ -17,8 +17,8 @@ from jarvis.tools.enums import (
     VisionAction,
     ScreenshotQuality,
 )
-from jarvis.tools.handlers import HANDLER_MAP
-from jarvis.operators.enums import (
+from predacore.tools.handlers import HANDLER_MAP
+from predacore.operators.enums import (
     SMART_ACTIONS,
     NATIVE_ONLY_ACTIONS,
     NATIVE_CAPABLE_ACTIONS,

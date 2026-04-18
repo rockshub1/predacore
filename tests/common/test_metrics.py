@@ -1,7 +1,7 @@
 """Tests for src/common/metrics.py — Prometheus observability metrics."""
 import pytest
 
-from jarvis._vendor.common.metrics import (
+from predacore._vendor.common.metrics import (
     ACTIVE_SESSIONS,
     CHANNEL_STATUS,
     EGM_EVALUATIONS,

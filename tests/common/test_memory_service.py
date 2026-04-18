@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from jarvis._vendor.common.memory_service import (
+from predacore._vendor.common.memory_service import (
     ImportanceLevel,
     Memory,
     MemoryService,
@@ -48,7 +48,7 @@ class TestMemoryModel:
     def test_to_dict_and_back(self):
         m = Memory(
             content="user likes dark mode",
-            user_id="shubham",
+            user_id="alice",
             memory_type=MemoryType.PREFERENCE,
             importance=ImportanceLevel.HIGH,
             tags=["ui", "preference"],

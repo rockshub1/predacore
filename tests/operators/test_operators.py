@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Operators — Base, Mock, Retry, and Enums.
+Tests for PredaCore Operators — Base, Mock, Retry, and Enums.
 
 Covers:
   - BaseOperator contract (via mock implementations)
@@ -11,15 +11,15 @@ Covers:
 import time
 import pytest
 
-from jarvis.operators.base import (
+from predacore.operators.base import (
     BaseOperator,
     OperatorPlatform,
     OperatorError,
     MacroAbortToken,
     ActionCategory,
 )
-from jarvis.operators.mock import MockDesktopOperator, MockAndroidOperator
-from jarvis.operators.retry import with_retry
+from predacore.operators.mock import MockDesktopOperator, MockAndroidOperator
+from predacore.operators.retry import with_retry
 
 
 # ═══════════════════════════════════════════════════════════════════

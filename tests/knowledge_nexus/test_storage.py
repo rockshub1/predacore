@@ -5,10 +5,10 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from jarvis._vendor.common.models import KnowledgeEdge, KnowledgeNode
+from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
 
 # Assuming the project is installed in editable mode or path is adjusted
-from jarvis._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
 
 # Use pytest-asyncio for async functions
 pytestmark = pytest.mark.asyncio
@@ -200,20 +200,25 @@ async def test_add_edge_duplicate_id(store: InMemoryKnowledgeGraphStore):
     assert retrieved_edge.type == "T1"
 
 async def test_add_edge_missing_node(store: InMemoryKnowledgeGraphStore):
-    """Test adding an edge where a source/target node doesn't exist."""
+    """Test adding an edge where a source/target node doesn't exist.
+
+    The in-memory store is strict: add_edge returns False and logs a warning
+    when either endpoint is missing (see InMemoryKnowledgeGraphStore.add_edge
+    in src/predacore/_vendor/knowledge_nexus/storage.py).
+    """
     node1 = KnowledgeNode()
     await store.add_node(node1)
     missing_node_id = uuid4()
 
     edge1 = KnowledgeEdge(source_node_id=node1.id, target_node_id=missing_node_id, type="T1")
-    # By default, storage allows this, but logs a warning. Test the warning? Or make it strict?
-    # For now, assume it adds successfully based on current storage code.
     success1 = await store.add_edge(edge1)
-    assert success1 is True # Based on current implementation
+    assert success1 is False  # target does not exist — strict reject
+    assert await store.get_edge(edge1.id) is None
 
     edge2 = KnowledgeEdge(source_node_id=missing_node_id, target_node_id=node1.id, type="T2")
     success2 = await store.add_edge(edge2)
-    assert success2 is True # Based on current implementation
+    assert success2 is False  # source does not exist — strict reject
+    assert await store.get_edge(edge2.id) is None
 
 async def test_get_edge_exists(store: InMemoryKnowledgeGraphStore):
     """Test retrieving an existing edge."""

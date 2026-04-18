@@ -1,5 +1,5 @@
 
-from jarvis._vendor.knowledge_nexus.storage import DiskKnowledgeGraphStore
+from predacore._vendor.knowledge_nexus.storage import DiskKnowledgeGraphStore
 
 
 def test_disk_store_init(tmp_path):

@@ -1,0 +1,146 @@
+name: Build Rust wheels (predacore_core)
+
+# Build + publish pre-compiled Rust wheels for predacore_core to PyPI on a
+# version tag. Covers the four platforms most users install on:
+#
+#   - manylinux2014 x86_64
+#   - manylinux2014 aarch64
+#   - macOS universal2 (Intel + Apple Silicon)
+#   - Windows x86_64
+#
+# Plus an sdist fallback for exotic targets (users with a Rust toolchain can
+# still `pip install` from source).
+#
+# Trigger on version tags (v0.1.0, v0.2.3-rc1, etc.). The first job builds
+# all wheels in parallel; the last job publishes the collected artefacts to
+# PyPI via the "Trusted Publishing" OIDC flow (no API token required —
+# configure the project under https://pypi.org/manage/project/predacore-core/).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to PyPI after build"
+        required: false
+        default: "false"
+
+defaults:
+  run:
+    working-directory: src/predacore_core_crate
+
+jobs:
+  # ── Linux x86_64 + aarch64 ────────────────────────────────────────
+  build-linux:
+    name: Build wheels · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build manylinux wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter "python3.10 python3.11 python3.12 python3.13"
+          manylinux: "2014"
+          working-directory: src/predacore_core_crate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: src/predacore_core_crate/dist
+
+  # ── macOS (universal2: Intel + Apple Silicon in one wheel) ────────
+  build-macos:
+    name: Build wheels · macos-universal2
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build universal2 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: universal2-apple-darwin
+          args: --release --out dist --interpreter "python3.10 python3.11 python3.12 python3.13"
+          working-directory: src/predacore_core_crate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-universal2
+          path: src/predacore_core_crate/dist
+
+  # ── Windows x86_64 ────────────────────────────────────────────────
+  build-windows:
+    name: Build wheels · windows-x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --release --out dist --interpreter "python3.10 python3.11 python3.12 python3.13"
+          working-directory: src/predacore_core_crate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: src/predacore_core_crate/dist
+
+  # ── sdist (source fallback) ───────────────────────────────────────
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: src/predacore_core_crate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: src/predacore_core_crate/dist
+
+  # ── Publish: runs only on a version tag (or manual dispatch upload=true) ──
+  publish:
+    name: Publish to PyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload == 'true')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/predacore-core
+    permissions:
+      id-token: write  # Trusted Publishing via PyPI OIDC
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-collect
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-collect

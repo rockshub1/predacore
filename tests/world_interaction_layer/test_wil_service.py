@@ -8,8 +8,8 @@ from uuid import uuid4
 import pytest
 
 try:
-    from jarvis._vendor.common.protos import egm_pb2, egm_pb2_grpc, wil_pb2
-    from jarvis._vendor.world_interaction_layer.service import (
+    from predacore._vendor.common.protos import egm_pb2, egm_pb2_grpc, wil_pb2
+    from predacore._vendor.world_interaction_layer.service import (
         AbstractSandboxManager,
         AbstractToolRegistry,
         WorldInteractionLayerService,

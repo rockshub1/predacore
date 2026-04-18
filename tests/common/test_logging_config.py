@@ -4,13 +4,13 @@ Tests for src/common/logging_config.py — Structured logging with trace_id.
 import json
 import logging
 
-from jarvis._vendor.common.logging_config import (
+from predacore._vendor.common.logging_config import (
     JSONFormatter,
     PrettyFormatter,
     get_logger,
     setup_logging,
 )
-from jarvis._vendor.common.metrics import set_trace_id
+from predacore._vendor.common.metrics import set_trace_id
 
 # ── JSONFormatter Tests ──────────────────────────────────────────────
 
@@ -67,10 +67,10 @@ class TestJSONFormatter:
         assert "file" not in data
 
     def test_extra_fields_included(self):
-        record = self._make_record("user action", user_id="shubham", channel="cli")
+        record = self._make_record("user action", user_id="alice", channel="cli")
         output = self.formatter.format(record)
         data = json.loads(output)
-        assert data["user_id"] == "shubham"
+        assert data["user_id"] == "alice"
         assert data["channel"] == "cli"
 
     def test_exception_info(self):
@@ -101,7 +101,7 @@ class TestPrettyFormatter:
 
     def _make_record(self, msg: str, level: int = logging.INFO, **kwargs):
         record = logging.LogRecord(
-            name="jarvis.core", level=level, pathname="core.py",
+            name="predacore.core", level=level, pathname="core.py",
             lineno=10, msg=msg, args=(), exc_info=None,
         )
         for k, v in kwargs.items():
@@ -124,9 +124,9 @@ class TestPrettyFormatter:
             set_trace_id("")
 
     def test_extras_in_output(self):
-        record = self._make_record("action", user_id="shubham")
+        record = self._make_record("action", user_id="alice")
         output = self.formatter.format(record)
-        assert "user_id=shubham" in output
+        assert "user_id=alice" in output
 
     def test_error_color_code(self):
         record = self._make_record("error occurred", level=logging.ERROR)
@@ -173,8 +173,8 @@ class TestSetupLogging:
 
 class TestGetLogger:
     def test_get_named_logger(self):
-        logger = get_logger("jarvis.core")
-        assert logger.name == "jarvis.core"
+        logger = get_logger("predacore.core")
+        assert logger.name == "predacore.core"
 
     def test_loggers_are_cached(self):
         l1 = get_logger("test.module")

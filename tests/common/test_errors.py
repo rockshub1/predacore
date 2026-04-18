@@ -1,7 +1,7 @@
 """Tests for src/common/errors.py — Prometheus structured error hierarchy."""
 import pytest
 
-from jarvis._vendor.common.errors import (
+from predacore._vendor.common.errors import (
     AgentLifecycleError,
     AuthenticationError,
     AuthorizationError,
@@ -35,8 +35,8 @@ class TestPrometheusErrorBase:
 
     def test_basic_creation(self):
         err = PrometheusError("something broke")
-        assert str(err) == "[PROMETHEUS_ERROR] something broke"
-        assert err.error_code == "PROMETHEUS_ERROR"
+        assert str(err) == "[PREDACORE_ERROR] something broke"
+        assert err.error_code == "PREDACORE_ERROR"
         assert err.context == {}
         assert err.recoverable is False
 
@@ -46,7 +46,7 @@ class TestPrometheusErrorBase:
             context={"trace_id": "abc123", "tool": "shell_exec"},
         )
         s = str(err)
-        assert "[PROMETHEUS_ERROR]" in s
+        assert "[PREDACORE_ERROR]" in s
         assert "trace_id='abc123'" in s
         assert "tool='shell_exec'" in s
 
@@ -65,7 +65,7 @@ class TestPrometheusErrorBase:
 
     def test_empty_message(self):
         err = PrometheusError()
-        assert err.error_code == "PROMETHEUS_ERROR"
+        assert err.error_code == "PREDACORE_ERROR"
 
 
 class TestToolErrors:

@@ -1,20 +1,15 @@
 """
-Tests for JARVIS Tool Dispatcher — the full dispatch pipeline including
+Tests for PredaCore Tool Dispatcher — the full dispatch pipeline including
 alias resolution, rate limiting, circuit breaker, caching, and timeout.
 
 Uses lightweight mocks to avoid requiring full subsystem initialization.
 """
-import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from jarvis.tools.dispatcher import AdaptiveTimeoutTracker, ToolDispatcher
-from jarvis.tools.enums import ToolStatus
-
-
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+from predacore.tools.dispatcher import AdaptiveTimeoutTracker, ToolDispatcher
+from predacore.tools.enums import ToolStatus
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -101,7 +96,7 @@ class TestAdaptiveTimeoutTracker:
 
 def _make_dispatcher():
     """Create a dispatcher with minimal mocks."""
-    from jarvis.tools.handlers._context import ToolContext
+    from predacore.tools.handlers._context import ToolContext
 
     security = SimpleNamespace(
         trust_level="yolo",
@@ -121,29 +116,33 @@ def _make_dispatcher():
 class TestDispatcherAliases:
     """Test tool name alias resolution."""
 
-    def test_gemini_alias_run_in_terminal(self):
+    @pytest.mark.asyncio
+    async def test_gemini_alias_run_in_terminal(self):
         d = _make_dispatcher()
         # run_in_terminal should map to run_command
-        result = _run(d.dispatch("run_in_terminal", {"command": "echo test"}))
+        result = await d.dispatch("run_in_terminal", {"command": "echo test"})
         assert "test" in result or "echo" in result
 
-    def test_gemini_alias_edit_file(self):
+    @pytest.mark.asyncio
+    async def test_gemini_alias_edit_file(self):
         d = _make_dispatcher()
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.txt")
-            result = _run(d.dispatch("edit_file", {"path": path, "content": "hello"}))
+            result = await d.dispatch("edit_file", {"path": path, "content": "hello"})
             # edit_file → write_file
             assert os.path.exists(path)
 
-    def test_legacy_alias_run_shell_command(self):
+    @pytest.mark.asyncio
+    async def test_legacy_alias_run_shell_command(self):
         d = _make_dispatcher()
-        result = _run(d.dispatch("run_shell_command", {"command": "echo legacy"}))
+        result = await d.dispatch("run_shell_command", {"command": "echo legacy"})
         assert "legacy" in result
 
-    def test_unknown_tool(self):
+    @pytest.mark.asyncio
+    async def test_unknown_tool(self):
         d = _make_dispatcher()
-        result = _run(d.dispatch("nonexistent_tool_xyz", {}))
+        result = await d.dispatch("nonexistent_tool_xyz", {})
         assert "Unknown tool" in result
 
 
@@ -153,14 +152,15 @@ class TestDispatcherAliases:
 
 
 class TestDispatcherCircuitBreaker:
-    def test_circuit_breaker_fast_fails(self):
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_fast_fails(self):
         d = _make_dispatcher()
         # Manually trip the circuit
         d.circuit_breaker.record_failure("read_file")
         d.circuit_breaker.record_failure("read_file")
         d.circuit_breaker.record_failure("read_file")
 
-        result = _run(d.dispatch("read_file", {"path": "/tmp/x"}))
+        result = await d.dispatch("read_file", {"path": "/tmp/x"})
         assert "circuit breaker" in result.lower() or "unavailable" in result.lower()
 
 
@@ -184,27 +184,30 @@ class TestDispatcherCache:
 
 
 class TestDispatcherHistory:
-    def test_records_execution(self):
+    @pytest.mark.asyncio
+    async def test_records_execution(self):
         d = _make_dispatcher()
-        _run(d.dispatch("run_command", {"command": "echo test"}))
+        await d.dispatch("run_command", {"command": "echo test"})
         recent = d.execution_history.recent(5)
         assert len(recent) >= 1
         assert recent[-1]["tool"] == "run_command"
         # ToolStatus is (str, Enum) so == "ok" works, but be safe
         assert recent[-1]["status"] == ToolStatus.OK or recent[-1]["status"] == "ok"
 
-    def test_records_unknown_tool(self):
+    @pytest.mark.asyncio
+    async def test_records_unknown_tool(self):
         d = _make_dispatcher()
-        _run(d.dispatch("fake_tool", {}))
+        await d.dispatch("fake_tool", {})
         # Unknown tools don't go through the full pipeline — they return early
         # Check that the result contains the right message
         recent = d.execution_history.recent(5)
         # May or may not be recorded depending on implementation
         # The important thing is it doesn't crash
 
-    def test_history_stats(self):
+    @pytest.mark.asyncio
+    async def test_history_stats(self):
         d = _make_dispatcher()
-        _run(d.dispatch("run_command", {"command": "echo 1"}))
-        _run(d.dispatch("run_command", {"command": "echo 2"}))
+        await d.dispatch("run_command", {"command": "echo 1"})
+        await d.dispatch("run_command", {"command": "echo 2"})
         stats = d.execution_history.stats()
         assert stats["total_calls"] >= 2

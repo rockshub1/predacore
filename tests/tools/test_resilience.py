@@ -1,5 +1,5 @@
 """
-Tests for JARVIS Tool Resilience — Circuit Breaker, Result Cache, Execution History.
+Tests for PredaCore Tool Resilience — Circuit Breaker, Result Cache, Execution History.
 
 Covers:
   - Circuit breaker state machine (CLOSED → OPEN → HALF_OPEN → CLOSED)
@@ -8,7 +8,7 @@ Covers:
 """
 import time
 import pytest
-from jarvis.tools.resilience import (
+from predacore.tools.resilience import (
     CircuitState,
     ExecutionHistory,
     ToolCircuitBreaker,
