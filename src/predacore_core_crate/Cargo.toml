@@ -1,6 +1,6 @@
 [package]
 name = "predacore_core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rust-powered intelligence layer for PredaCore — embeddings, vector search, BM25, fuzzy matching, entity extraction, graph traversal"
 

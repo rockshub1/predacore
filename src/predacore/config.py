@@ -83,7 +83,7 @@ class AgentLLMConfig(LLMConfig):
 class ChannelConfig:
     """Messaging channel settings."""
 
-    enabled: list[str] = field(default_factory=lambda: ["cli"])
+    enabled: list[str] = field(default_factory=lambda: ["webchat"])
     telegram_token: str = ""
     discord_token: str = ""
     whatsapp_token: str = ""
@@ -161,7 +161,7 @@ class OpenClawBridgeConfig:
 PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "balanced": {
         "mode": "personal",
-        "channels": {"enabled": ["cli"]},
+        "channels": {"enabled": ["webchat"]},
         "security": {
             "trust_level": "normal",
             "docker_sandbox": False,
@@ -190,7 +190,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "public_beast": {
         "mode": "public",
-        "channels": {"enabled": ["cli", "webchat"]},
+        "channels": {"enabled": ["webchat"]},
         "security": {
             "trust_level": "yolo",
             "docker_sandbox": True,
@@ -218,7 +218,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "enterprise_lockdown": {
         "mode": "enterprise",
-        "channels": {"enabled": ["cli"]},
+        "channels": {"enabled": ["webchat"]},
         "security": {
             "trust_level": "paranoid",
             "docker_sandbox": True,
@@ -769,17 +769,18 @@ def save_default_config(
         provider: LLM provider name.
         trust_level: yolo | normal | paranoid.
         model: Optional explicit model name (empty = auto-detect).
-        channels: List of channel names to enable. Defaults to ["cli"].
-            Valid values: cli, webchat, telegram, discord, whatsapp.
+        channels: List of channel names to enable. Defaults to ["webchat"].
+            Valid values: webchat, telegram, discord, whatsapp, signal, imessage, email, slack.
     """
     target = Path(path) if path else DEFAULT_CONFIG_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Normalize channel list — cli is always enabled, dedupe, validate
-    enabled_channels = list(channels) if channels else ["cli"]
-    if "cli" not in enabled_channels:
-        enabled_channels.insert(0, "cli")
-    _known_channels = {"cli", "webchat", "telegram", "discord", "whatsapp"}
+    # Normalize channel list — webchat is always enabled (required for
+    # `predacore chat` to attach its WebSocket client), dedupe, validate.
+    enabled_channels = list(channels) if channels else ["webchat"]
+    if "webchat" not in enabled_channels:
+        enabled_channels.insert(0, "webchat")
+    _known_channels = {"webchat", "telegram", "discord", "whatsapp", "signal", "imessage", "email", "slack"}
     enabled_channels = [c for c in enabled_channels if c in _known_channels]
 
     # Build the YAML channel list block

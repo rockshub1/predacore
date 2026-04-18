@@ -691,7 +691,7 @@ async def _run_chat(
 
     _animated_banner_reveal()
 
-    if not await _probe_daemon_port(port):
+    if not await _wait_for_daemon(port, total_timeout=15.0):
         _print_daemon_missing_panel(port)
         return
 
@@ -835,6 +835,22 @@ async def _probe_daemon_port(port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+async def _wait_for_daemon(port: int, total_timeout: float = 15.0) -> bool:
+    """Poll the daemon's webchat port until it's accepting connections.
+
+    The daemon needs a few seconds to spawn the gateway + bind the webchat
+    socket. Retry every 0.5 sec for up to 15 sec so the zero-args flow
+    (spawn daemon → open chat) works without a hardcoded sleep race.
+    """
+    import time as _time
+    deadline = _time.time() + total_timeout
+    while _time.time() < deadline:
+        if await _probe_daemon_port(port, timeout=0.5):
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
 def _resolve_webchat_port(config) -> int:
     """Read the webchat port from config (default 3000)."""
     wc = getattr(config.channels, "webchat", None)
@@ -920,6 +936,8 @@ def _print_chat_banner(config, port: int) -> None:
     console.print()
     console.print(
         "  [glass.text.dim]/help[/glass.text.dim]  "
+        "[glass.text.dim]\u00b7[/glass.text.dim]  "
+        "[glass.text.dim]/model[/glass.text.dim]  "
         "[glass.text.dim]\u00b7[/glass.text.dim]  "
         "[glass.text.dim]/clear[/glass.text.dim]  "
         "[glass.text.dim]\u00b7[/glass.text.dim]  "
@@ -1229,6 +1247,72 @@ async def _run_setup() -> None:
     provider = provider_menu.get(choice, default_provider)
     provider_display = provider_labels.get(provider, (provider,))[0]
 
+    # ── Model picker ──────────────────────────────────────────────
+    # Curated model list per provider. First entry is the recommended default.
+    # Users can also type a custom model name or "auto" to let the provider choose.
+    PROVIDER_MODELS: dict[str, list[tuple[str, str]]] = {
+        "gemini-cli": [
+            ("gemini-2.5-flash",       "fast, cheap (default)"),
+            ("gemini-2.5-pro",         "highest quality, slower"),
+            ("gemini-2.5-flash-lite",  "fastest"),
+        ],
+        "gemini": [
+            ("gemini-2.5-flash",       "fast, cheap (default)"),
+            ("gemini-2.5-pro",         "highest quality"),
+            ("gemini-2.0-flash",       "previous gen, stable"),
+        ],
+        "anthropic": [
+            ("claude-sonnet-4-6",      "balanced speed/quality (default)"),
+            ("claude-opus-4-6",        "max quality, expensive"),
+            ("claude-haiku-4-5",       "fastest, cheapest"),
+        ],
+        "openai": [
+            ("gpt-5",                  "latest flagship (default)"),
+            ("gpt-5-mini",             "faster, cheaper"),
+            ("gpt-4o",                 "previous gen, stable"),
+        ],
+        "openrouter": [
+            ("anthropic/claude-sonnet-4-6",   "Claude via OpenRouter (default)"),
+            ("openai/gpt-5",                  "GPT-5 via OpenRouter"),
+            ("google/gemini-2.5-pro",         "Gemini Pro via OpenRouter"),
+            ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
+        ],
+        "ollama": [
+            ("qwen2.5:3b",             "3B params, fast, runs anywhere (default)"),
+            ("llama3.2:3b",            "Meta's small model"),
+            ("qwen2.5:7b",             "7B, better quality"),
+            ("mistral:7b",             "7B, balanced"),
+        ],
+    }
+    model = ""
+    model_options = PROVIDER_MODELS.get(provider, [])
+    if model_options:
+        console.print()
+        model_table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
+        model_table.add_column("#", style="glass.text.dim", width=2, justify="right")
+        model_table.add_column("name", style="glass.text", min_width=28)
+        model_table.add_column("note", style="glass.text.dim")
+        for i, (mname, mnote) in enumerate(model_options, start=1):
+            model_table.add_row(str(i), Text(mname, style="bold grey85"), mnote)
+        model_table.add_row("0", Text("auto", style="glass.text.dim italic"), "let the provider pick")
+        console.print(_glass_panel(
+            model_table,
+            title=f"[glass.cyan]◆[/glass.cyan]  [bold glass.text]Models for {provider_display}[/bold glass.text]",
+            padding=(1, 2),
+            width=74,
+        ))
+        console.print()
+        m_choice = console.input(
+            "  [glass.violet]❯[/glass.violet]  [glass.text]Choose model[/glass.text] "
+            "[glass.text.dim]\\[1 = default, 0 = auto, or type a custom name]:[/glass.text.dim] "
+        ).strip() or "1"
+        if m_choice == "0":
+            model = ""
+        elif m_choice.isdigit() and 1 <= int(m_choice) <= len(model_options):
+            model = model_options[int(m_choice) - 1][0]
+        else:
+            model = m_choice  # custom model name typed by user
+
     # If provider needs an API key and we don't have one, ask for it
     api_key = ""
     key_env_map = {
@@ -1312,19 +1396,15 @@ async def _run_setup() -> None:
     channels_table.add_column("name", min_width=12)
     channels_table.add_column("desc", style="glass.text")
     channels_table.add_row(
-        "●", Text("terminal (cli)", style="bold #86EFAC"),
-        Text("Always on — you can always chat from a shell", style="glass.text"),
+        "●", Text("webchat", style="bold #86EFAC"),
+        "Always on — powers `predacore chat` + browser UI at [glass.cyan]http://localhost:3000[/glass.cyan]",
     )
     channels_table.add_row(
-        "1", Text("webchat", style="bold #7DD3FC"),
-        "Browser UI at [glass.cyan]http://localhost:3000[/glass.cyan] [glass.text.dim](recommended)[/glass.text.dim]",
-    )
-    channels_table.add_row(
-        "2", Text("telegram", style="bold #C4B5FD"),
+        "1", Text("telegram", style="bold #C4B5FD"),
         "Chat from Telegram [glass.text.dim](needs bot token from @BotFather)[/glass.text.dim]",
     )
     channels_table.add_row(
-        "3", Text("discord", style="bold #F9A8D4"),
+        "2", Text("discord", style="bold #F9A8D4"),
         "Chat from Discord [glass.text.dim](needs bot token from Developer Portal)[/glass.text.dim]",
     )
     console.print(_glass_panel(
@@ -1335,11 +1415,11 @@ async def _run_setup() -> None:
     ))
     console.print()
     ch_choice = console.input(
-        "  [glass.violet]❯[/glass.violet]  [glass.text]Enable channels[/glass.text] "
-        "[glass.text.dim]\\[1 = webchat, comma-separated e.g. '1,2']:[/glass.text.dim] "
-    ).strip() or "1"
-    ch_map = {"1": "webchat", "2": "telegram", "3": "discord"}
-    selected_channels = ["cli"]
+        "  [glass.violet]❯[/glass.violet]  [glass.text]Extra channels to enable[/glass.text] "
+        "[glass.text.dim]\\[Enter = none, or e.g. '1,2' for telegram + discord]:[/glass.text.dim] "
+    ).strip()
+    ch_map = {"1": "telegram", "2": "discord"}
+    selected_channels = ["webchat"]  # webchat is required for `predacore chat`
     for token in ch_choice.split(","):
         token = token.strip()
         if token in ch_map:
@@ -1411,6 +1491,7 @@ async def _run_setup() -> None:
     console.print()
     config_path = save_default_config(
         provider=provider,
+        model=model,
         trust_level=trust_level,
         channels=selected_channels,
     )
@@ -1478,26 +1559,6 @@ async def _run_setup() -> None:
         title="[glass.mint]✓[/glass.mint]  [bold glass.text]Configuration Summary[/bold glass.text]",
         border_style="glass.mint",
         padding=(1, 2),
-        width=78,
-    )))
-    console.print()
-
-    # ── Bootstrap preview — the "one thing to know" panel ──
-    preview_body = Text.assemble(
-        ("On your very first message, your agent will greet you with something like:\n\n", "glass.text.muted"),
-        ("    ", ""),
-        ('"yooo what\'s up, what\'s your name?"', "bold #F9A8D4"),
-        ("\n\n", ""),
-        ("It doesn't have a name, a personality, or a memory yet —\n", "glass.text.muted"),
-        ("you'll discover those together in the first conversation.\n", "glass.text.muted"),
-        ("That's not a bug. That's how it's born.\n\n", "glass.text.muted"),
-        ("Just talk naturally. It's listening.", "italic grey85"),
-    )
-    console.print(Align.center(_glass_panel(
-        preview_body,
-        title="[glass.pink]◉[/glass.pink]  [bold glass.text]One thing to know before you start[/bold glass.text]",
-        border_style="glass.pink",
-        padding=(1, 3),
         width=78,
     )))
     console.print()
@@ -1886,8 +1947,10 @@ def _run_zero_args_flow() -> None:
         # Reuse the existing start flow in daemon mode
         class _Args:
             daemon = True
+            foreground = False
             config = None
             profile = None
+            public = False
         _run_start(_Args())
         # Give the daemon a moment to bind the webchat port
         time.sleep(2.0)
