@@ -32,7 +32,8 @@ defaults:
     working-directory: src/predacore_core_crate
 
 jobs:
-  # ── Linux x86_64 + aarch64 ────────────────────────────────────────
+  # ── Linux x86_64 (aarch64 dropped for v0.1.0 — ring crate cross-compile
+  #    issue with __ARM_ARCH in manylinux2014; restore in v0.1.1) ────
   build-linux:
     name: Build wheels · ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -41,7 +42,7 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+          # - aarch64-unknown-linux-gnu  # TODO: v0.1.1 — fix ring cross-compile
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
