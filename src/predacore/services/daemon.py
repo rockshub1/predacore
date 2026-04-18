@@ -619,14 +619,32 @@ def stop_daemon(config: PredaCoreConfig) -> bool:
         os.kill(pid, signal.SIGTERM)
         logger.info("Sent SIGTERM to PID %d", pid)
 
-        # Wait up to 10 seconds for shutdown
+        # Wait up to 10 seconds for graceful shutdown
         for _ in range(20):
             time.sleep(0.5)
             if not pid_manager.is_running():
                 pid_manager.cleanup()
                 return True
 
-        logger.warning("Daemon PID %d did not stop in 10s", pid)
+        # Escalate to SIGKILL if the daemon is stuck (e.g. blocked in a
+        # long-running subprocess like Gemini CLI). Graceful shutdown
+        # can't interrupt a blocking syscall, so force-terminate and
+        # clean up the pidfile so the next `predacore` works.
+        logger.warning(
+            "Daemon PID %d did not respond to SIGTERM in 10s — escalating to SIGKILL",
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pid_manager.cleanup()
+            return True
+        for _ in range(10):
+            time.sleep(0.3)
+            if not pid_manager.is_running():
+                pid_manager.cleanup()
+                return True
+        logger.error("Daemon PID %d survived SIGKILL — check process state manually", pid)
         return False
 
     except ProcessLookupError:
