@@ -47,7 +47,8 @@ jobs:
       - name: Build + install Rust crate (provides predacore_core)
         run: |
           cd src/predacore_core_crate
-          maturin develop --release
+          maturin build --release --out dist
+          pip install dist/*.whl
 
       - name: Install Python package + dev deps
         run: pip install -e ".[dev]"
