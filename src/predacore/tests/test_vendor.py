@@ -13,22 +13,14 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import hmac
 import json
 import math
 import os
-import sqlite3
-import tempfile
 import time
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
-
 
 # ===========================================================================
 # Fixtures
@@ -58,8 +50,6 @@ def basic_genome():
         CapabilityTier,
         SkillGenome,
         SkillStep,
-        TrustLevel,
-        TrustScore,
     )
     genome = SkillGenome(
         id="test_skill_001",
@@ -94,7 +84,11 @@ class TestSkillGenome:
     """Tests for SkillGenome construction, tiers, signing, serialization."""
 
     def test_construction_defaults(self):
-        from predacore._vendor.common.skill_genome import CapabilityTier, SkillGenome, TrustLevel
+        from predacore._vendor.common.skill_genome import (
+            CapabilityTier,
+            SkillGenome,
+            TrustLevel,
+        )
         g = SkillGenome()
         assert g.id.startswith("skill_")
         assert len(g.id) == len("skill_") + 12
@@ -433,7 +427,11 @@ class TestScanFinding:
 
 class TestScanReport:
     def test_critical_count(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanReport, ScanVerdict
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanReport,
+            ScanVerdict,
+        )
         report = ScanReport(
             genome_id="test",
             verdict=ScanVerdict.REJECTED,
@@ -458,7 +456,10 @@ class TestSkillScanner:
     """Comprehensive security scanner tests."""
 
     def _make_genome(self, steps=None, declared_tools=None, tier=None, name="test", creator="predacore"):
-        from predacore._vendor.common.skill_genome import CapabilityTier, SkillGenome, SkillStep
+        from predacore._vendor.common.skill_genome import (
+            CapabilityTier,
+            SkillGenome,
+        )
         steps = steps or []
         declared = declared_tools or [s.tool_name for s in steps]
         g = SkillGenome(
@@ -473,8 +474,8 @@ class TestSkillScanner:
         return g
 
     def test_clean_skill(self):
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(tool_name="read_file", parameters={"path": "/tmp/foo.txt"})],
@@ -486,8 +487,8 @@ class TestSkillScanner:
 
     def test_exfiltration_pattern_detected(self):
         """Read local data then send to network = REJECTED."""
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[
@@ -502,8 +503,8 @@ class TestSkillScanner:
 
     def test_exfiltration_memory_recall_then_speak(self):
         """Memory recall then speak = data exfiltration."""
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[
@@ -518,8 +519,8 @@ class TestSkillScanner:
 
     def test_sensitive_path_env_file(self):
         """Accessing .env should be rejected."""
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(tool_name="read_file", parameters={"path": "/home/user/.env"})],
@@ -530,8 +531,8 @@ class TestSkillScanner:
         assert "sensitive_path_access" in rules
 
     def test_sensitive_path_credentials_json(self):
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(tool_name="read_file", parameters={"path": "~/.config/credentials.json"})],
@@ -541,8 +542,8 @@ class TestSkillScanner:
         assert "sensitive_path_access" in rules
 
     def test_sensitive_path_ssh_key(self):
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(tool_name="read_file", parameters={"path": "/home/user/id_rsa"})],
@@ -552,8 +553,8 @@ class TestSkillScanner:
         assert "sensitive_path_access" in rules
 
     def test_sensitive_path_secrets_yaml(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(tool_name="read_file", parameters={"path": "/app/secrets.yaml"})],
@@ -564,8 +565,12 @@ class TestSkillScanner:
 
     def test_capability_mismatch_detected(self):
         """Declare PURE_LOGIC but use network write tools."""
+        from predacore._vendor.common.skill_genome import (
+            CapabilityTier,
+            SkillGenome,
+            SkillStep,
+        )
         from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
-        from predacore._vendor.common.skill_genome import CapabilityTier, SkillGenome, SkillStep
         scanner = SkillScanner()
         genome = SkillGenome(
             name="misleading",
@@ -582,8 +587,8 @@ class TestSkillScanner:
 
     def test_undeclared_tool_detected(self):
         """Step uses a tool not in declared_tools."""
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             name="sneaky",
@@ -602,8 +607,8 @@ class TestSkillScanner:
 
     def test_obfuscation_base64_detected(self):
         """Base64-like content in parameters should be flagged."""
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(
@@ -617,8 +622,8 @@ class TestSkillScanner:
 
     def test_obfuscation_hex_detected(self):
         """Hex-encoded content should be flagged or rejected."""
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         hex_payload = "".join(f"\\x{i:02x}" for i in range(20))
         genome = self._make_genome(
@@ -635,8 +640,8 @@ class TestSkillScanner:
 
     def test_unexpected_url_in_non_network_tool(self):
         """URLs in non-network tools should be flagged."""
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[SkillStep(
@@ -650,8 +655,8 @@ class TestSkillScanner:
 
     def test_excessive_scope_many_tools(self):
         """More than 8 declared tools should be flagged."""
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         tools = [f"tool_{i}" for i in range(10)]
         genome = SkillGenome(
@@ -666,8 +671,8 @@ class TestSkillScanner:
 
     def test_kitchen_sink_permissions(self):
         """Read + Write + Network = kitchen sink flagged."""
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = self._make_genome(
             steps=[
@@ -681,8 +686,8 @@ class TestSkillScanner:
         assert "kitchen_sink_permissions" in rules
 
     def test_missing_signature_flagged(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             name="unsigned",
@@ -697,8 +702,8 @@ class TestSkillScanner:
         assert "missing_signature" in rules
 
     def test_invalid_signature_rejected(self):
-        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import ScanVerdict, SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             name="tampered",
@@ -714,8 +719,8 @@ class TestSkillScanner:
         assert "invalid_signature" in rules
 
     def test_empty_skill_flagged(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(name="empty", creator_instance_id="predacore")
         genome.sign()
@@ -724,8 +729,8 @@ class TestSkillScanner:
         assert "empty_skill" in rules
 
     def test_missing_name_flagged(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             creator_instance_id="predacore",
@@ -739,8 +744,8 @@ class TestSkillScanner:
         assert "missing_name" in rules
 
     def test_missing_origin_flagged(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             name="no_origin",
@@ -754,8 +759,8 @@ class TestSkillScanner:
         assert "missing_origin" in rules
 
     def test_excessive_steps_flagged(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         steps = [SkillStep(tool_name="read_file") for _ in range(25)]
         genome = SkillGenome(
@@ -777,13 +782,21 @@ class TestSkillScanner:
         assert verdict == ScanVerdict.CLEAN
 
     def test_verdict_rejected_on_critical(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanVerdict, SkillScanner
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanVerdict,
+            SkillScanner,
+        )
         scanner = SkillScanner()
         findings = [ScanFinding(rule="r", severity="critical", description="d")]
         assert scanner._compute_verdict(findings) == ScanVerdict.REJECTED
 
     def test_verdict_rejected_on_multiple_high(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanVerdict, SkillScanner
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanVerdict,
+            SkillScanner,
+        )
         scanner = SkillScanner()
         findings = [
             ScanFinding(rule="r1", severity="high", description="d1"),
@@ -792,26 +805,38 @@ class TestSkillScanner:
         assert scanner._compute_verdict(findings) == ScanVerdict.REJECTED
 
     def test_verdict_flagged_on_single_high(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanVerdict, SkillScanner
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanVerdict,
+            SkillScanner,
+        )
         scanner = SkillScanner()
         findings = [ScanFinding(rule="r1", severity="high", description="d1")]
         assert scanner._compute_verdict(findings) == ScanVerdict.FLAGGED
 
     def test_verdict_flagged_on_medium(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanVerdict, SkillScanner
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanVerdict,
+            SkillScanner,
+        )
         scanner = SkillScanner()
         findings = [ScanFinding(rule="r1", severity="medium", description="d1")]
         assert scanner._compute_verdict(findings) == ScanVerdict.FLAGGED
 
     def test_verdict_clean_on_low_only(self):
-        from predacore._vendor.common.skill_scanner import ScanFinding, ScanVerdict, SkillScanner
+        from predacore._vendor.common.skill_scanner import (
+            ScanFinding,
+            ScanVerdict,
+            SkillScanner,
+        )
         scanner = SkillScanner()
         findings = [ScanFinding(rule="r1", severity="low", description="d1")]
         assert scanner._compute_verdict(findings) == ScanVerdict.CLEAN
 
     def test_runtime_tool_drift_detected(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             steps=[SkillStep(tool_name="read_file")],
@@ -822,8 +847,8 @@ class TestSkillScanner:
         assert finding.rule == "runtime_tool_drift"
 
     def test_runtime_tool_drift_not_detected_for_declared(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             steps=[SkillStep(tool_name="read_file")],
@@ -833,8 +858,8 @@ class TestSkillScanner:
         assert finding is None
 
     def test_runtime_step_mismatch_detected(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             steps=[SkillStep(tool_name="read_file"), SkillStep(tool_name="write_file")],
@@ -846,8 +871,8 @@ class TestSkillScanner:
         assert finding.rule == "runtime_step_mismatch"
 
     def test_runtime_data_volume_anomaly(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome()
         finding = scanner.check_runtime_data_volume(genome, 0, 2_000_000)
@@ -855,16 +880,16 @@ class TestSkillScanner:
         assert finding.rule == "runtime_data_volume_anomaly"
 
     def test_runtime_data_volume_within_threshold(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome()
         finding = scanner.check_runtime_data_volume(genome, 0, 500_000)
         assert finding is None
 
     def test_runtime_timing_anomaly(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome()
         finding = scanner.check_runtime_timing(genome, 0, 60_000)
@@ -872,16 +897,16 @@ class TestSkillScanner:
         assert finding.rule == "runtime_timing_anomaly"
 
     def test_runtime_timing_within_threshold(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome()
         finding = scanner.check_runtime_timing(genome, 0, 5_000)
         assert finding is None
 
     def test_scanner_stats(self):
-        from predacore._vendor.common.skill_scanner import SkillScanner
         from predacore._vendor.common.skill_genome import SkillGenome, SkillStep
+        from predacore._vendor.common.skill_scanner import SkillScanner
         scanner = SkillScanner()
         genome = SkillGenome(
             name="test", creator_instance_id="j",
@@ -933,7 +958,10 @@ class TestSkillCrystallizer:
         assert crystallizer.find_crystallizable() == []
 
     def test_crystallize_with_sufficient_occurrences(self, tmp_dir):
-        from predacore._vendor.common.skill_evolution import MIN_PATTERN_OCCURRENCES, SkillCrystallizer
+        from predacore._vendor.common.skill_evolution import (
+            MIN_PATTERN_OCCURRENCES,
+            SkillCrystallizer,
+        )
         crystallizer = SkillCrystallizer(data_dir=tmp_dir / "evo")
         # Feed the same pattern multiple times
         for _ in range(MIN_PATTERN_OCCURRENCES + 2):
@@ -952,7 +980,10 @@ class TestSkillCrystallizer:
         assert len(genome.steps) == 2
 
     def test_crystallize_rejects_non_crystallizable(self, tmp_dir):
-        from predacore._vendor.common.skill_evolution import DetectedPattern, SkillCrystallizer
+        from predacore._vendor.common.skill_evolution import (
+            DetectedPattern,
+            SkillCrystallizer,
+        )
         crystallizer = SkillCrystallizer(data_dir=tmp_dir / "evo")
         pattern = DetectedPattern(
             tool_sequence=("read_file", "write_file"),
@@ -964,7 +995,10 @@ class TestSkillCrystallizer:
         assert result is None
 
     def test_endorse_moves_to_crystallized(self, tmp_dir):
-        from predacore._vendor.common.skill_evolution import MIN_PATTERN_OCCURRENCES, SkillCrystallizer
+        from predacore._vendor.common.skill_evolution import (
+            MIN_PATTERN_OCCURRENCES,
+            SkillCrystallizer,
+        )
         from predacore._vendor.common.skill_genome import TrustLevel
         crystallizer = SkillCrystallizer(data_dir=tmp_dir / "evo")
         for _ in range(MIN_PATTERN_OCCURRENCES + 2):
@@ -987,7 +1021,10 @@ class TestSkillCrystallizer:
         assert genome.id not in [g.id for g in crystallizer.get_pending()]
 
     def test_reject_endorsement(self, tmp_dir):
-        from predacore._vendor.common.skill_evolution import MIN_PATTERN_OCCURRENCES, SkillCrystallizer
+        from predacore._vendor.common.skill_evolution import (
+            MIN_PATTERN_OCCURRENCES,
+            SkillCrystallizer,
+        )
         crystallizer = SkillCrystallizer(data_dir=tmp_dir / "evo")
         for _ in range(MIN_PATTERN_OCCURRENCES + 2):
             records = [
@@ -1005,7 +1042,10 @@ class TestSkillCrystallizer:
         assert genome.id not in [g.id for g in crystallizer.get_pending()]
 
     def test_record_execution_updates_trust(self, tmp_dir):
-        from predacore._vendor.common.skill_evolution import MIN_PATTERN_OCCURRENCES, SkillCrystallizer
+        from predacore._vendor.common.skill_evolution import (
+            MIN_PATTERN_OCCURRENCES,
+            SkillCrystallizer,
+        )
         crystallizer = SkillCrystallizer(data_dir=tmp_dir / "evo")
         for _ in range(MIN_PATTERN_OCCURRENCES + 2):
             records = [
@@ -1082,7 +1122,9 @@ class TestDetectedPattern:
 
 class TestMCTSNode:
     def test_construction_defaults(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode()
         assert node.node_id != ""
         assert node.visits == 0
@@ -1093,22 +1135,30 @@ class TestMCTSNode:
         assert node.parent is None
 
     def test_value_zero_visits(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode()
         assert node.value == 0.0
 
     def test_value_calculated(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode(visits=10, total_value=7.0)
         assert node.value == pytest.approx(0.7)
 
     def test_ucb1_unvisited_is_inf(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode()
         assert node.ucb1() == float("inf")
 
     def test_ucb1_calculated(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         parent = MCTSNode(visits=10)
         child = MCTSNode(visits=5, total_value=3.0, parent=parent)
         ucb = child.ucb1(c=1.414)
@@ -1117,7 +1167,9 @@ class TestMCTSNode:
         assert ucb == pytest.approx(expected_exploitation + expected_exploration, abs=0.01)
 
     def test_add_child(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         parent = MCTSNode(state="root")
         child = parent.add_child(state="child_state", action="go_left")
         assert len(parent.children) == 1
@@ -1127,7 +1179,9 @@ class TestMCTSNode:
         assert child.state == "child_state"
 
     def test_best_child(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         parent = MCTSNode(visits=20, state="root")
         c1 = parent.add_child(state="s1", action="a1")
         c1.visits = 5
@@ -1140,12 +1194,16 @@ class TestMCTSNode:
         # c2 has higher exploitation (0.8 vs 0.4)
 
     def test_best_child_empty(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode()
         assert node.best_child() is None
 
     def test_is_leaf(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+        )
         node = MCTSNode()
         assert node.is_leaf is True
         node.add_child(state="x")
@@ -1154,20 +1212,27 @@ class TestMCTSNode:
 
 class TestMCTSTree:
     def test_set_root(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+        )
         tree = MCTSTree()
         root = tree.set_root("initial_state")
         assert tree.root is root
         assert root.state == "initial_state"
 
     def test_search_requires_root(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+        )
         tree = MCTSTree()
         with pytest.raises(ValueError):
             tree.search(lambda s: [], lambda s: 0.5)
 
     def test_search_basic(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree, SearchConfig
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+            SearchConfig,
+        )
         config = SearchConfig(max_iterations=10, time_budget_seconds=5.0)
         tree = MCTSTree(config=config)
         tree.set_root("start")
@@ -1185,7 +1250,10 @@ class TestMCTSTree:
         assert tree.root.visits > 0
 
     def test_best_action(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree, SearchConfig
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+            SearchConfig,
+        )
         config = SearchConfig(max_iterations=50, time_budget_seconds=5.0)
         tree = MCTSTree(config=config)
         tree.set_root("start")
@@ -1203,7 +1271,10 @@ class TestMCTSTree:
         assert best == "go_good"
 
     def test_backpropagate(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSNode, MCTSTree
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSNode,
+            MCTSTree,
+        )
         parent = MCTSNode(state="root")
         child = parent.add_child(state="child")
         grandchild = child.add_child(state="grandchild")
@@ -1217,7 +1288,10 @@ class TestMCTSTree:
         assert parent.total_value == pytest.approx(0.75)
 
     def test_get_statistics(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree, SearchConfig
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+            SearchConfig,
+        )
         tree = MCTSTree(SearchConfig(max_iterations=5))
         tree.set_root("s")
         tree.search(lambda s: [("c", "a")] if s == "s" else [], lambda s: 0.5)
@@ -1227,7 +1301,10 @@ class TestMCTSTree:
         assert stats["total_nodes"] >= 2
 
     def test_time_budget_respected(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import MCTSTree, SearchConfig
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            MCTSTree,
+            SearchConfig,
+        )
         config = SearchConfig(
             max_iterations=1_000_000,  # Very high
             time_budget_seconds=0.1,   # Very short
@@ -1248,19 +1325,26 @@ class TestMCTSTree:
 
 class TestPlanCandidate:
     def test_overall_score(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import PlanCandidate
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            PlanCandidate,
+        )
         pc = PlanCandidate(scores={"quality": 0.8, "cost": 0.6})
         assert pc.overall_score == pytest.approx(0.7)
 
     def test_overall_score_empty(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import PlanCandidate
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            PlanCandidate,
+        )
         pc = PlanCandidate()
         assert pc.overall_score == 0.0
 
 
 class TestPlanRanker:
     def test_rank_by_weighted_score(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import PlanCandidate, PlanRanker
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            PlanCandidate,
+            PlanRanker,
+        )
         ranker = PlanRanker()
         c1 = PlanCandidate(plan_id="a", scores={"quality": 0.9, "risk": 0.9})
         c2 = PlanCandidate(plan_id="b", scores={"quality": 0.3, "risk": 0.1})
@@ -1270,14 +1354,20 @@ class TestPlanRanker:
         assert ranked[0].plan_id != ranked[1].plan_id
 
     def test_compare_tie(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import PlanCandidate, PlanRanker
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            PlanCandidate,
+            PlanRanker,
+        )
         ranker = PlanRanker()
         c1 = PlanCandidate(scores={"quality": 0.5})
         c2 = PlanCandidate(scores={"quality": 0.5})
         assert ranker.compare(c1, c2) == "tie"
 
     def test_compare_a_wins(self):
-        from predacore._vendor.core_strategic_engine.planner_enhancements import PlanCandidate, PlanRanker
+        from predacore._vendor.core_strategic_engine.planner_enhancements import (
+            PlanCandidate,
+            PlanRanker,
+        )
         ranker = PlanRanker()
         c1 = PlanCandidate(scores={"quality": 0.9})
         c2 = PlanCandidate(scores={"quality": 0.1})
@@ -1394,7 +1484,10 @@ class TestHashingEmbeddingClient:
 class TestResilientEmbeddingClient:
     @pytest.mark.asyncio
     async def test_primary_success(self):
-        from predacore._vendor.common.embedding import HashingEmbeddingClient, ResilientEmbeddingClient
+        from predacore._vendor.common.embedding import (
+            HashingEmbeddingClient,
+            ResilientEmbeddingClient,
+        )
         primary = HashingEmbeddingClient(dim=64)
         resilient = ResilientEmbeddingClient(primary=primary)
         result = await resilient.embed(["test"])
@@ -1457,7 +1550,10 @@ class TestGetDefaultEmbeddingClient:
         "OPENAI_API_KEY": "sk-test",
     }, clear=False)
     def test_explicit_openai_provider(self):
-        from predacore._vendor.common.embedding import ResilientEmbeddingClient, get_default_embedding_client
+        from predacore._vendor.common.embedding import (
+            ResilientEmbeddingClient,
+            get_default_embedding_client,
+        )
         client = get_default_embedding_client()
         assert isinstance(client, ResilientEmbeddingClient)
 
@@ -1466,7 +1562,10 @@ class TestGetDefaultEmbeddingClient:
         "ZHIPU_API_KEY": "zhipu-test-key",
     }, clear=False)
     def test_explicit_zhipu_provider(self):
-        from predacore._vendor.common.embedding import ResilientEmbeddingClient, get_default_embedding_client
+        from predacore._vendor.common.embedding import (
+            ResilientEmbeddingClient,
+            get_default_embedding_client,
+        )
         client = get_default_embedding_client()
         assert isinstance(client, ResilientEmbeddingClient)
 
@@ -1509,13 +1608,17 @@ class TestInMemoryVectorIndex:
 
 class TestBasicRuleEngine:
     def test_clean_action_is_compliant(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({"description": "Read user preferences", "id": "step1"})
         assert result.is_compliant is True
 
     def test_forbidden_keyword_detected(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({"description": "Now disable_safety checks", "id": "step1"})
         assert result.is_compliant is False
@@ -1523,13 +1626,17 @@ class TestBasicRuleEngine:
         assert any("disable_safety" in v.description for v in result.violations)
 
     def test_forbidden_keyword_harm_human(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({"description": "This action will harm_human", "id": "step1"})
         assert result.is_compliant is False
 
     def test_risky_action_type_detected(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({
             "description": "Execute some code",
@@ -1539,7 +1646,9 @@ class TestBasicRuleEngine:
         assert result.is_compliant is False
 
     def test_filesystem_path_outside_allowed(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({
             "description": "Modify files",
@@ -1550,7 +1659,9 @@ class TestBasicRuleEngine:
         assert result.is_compliant is False
 
     def test_filesystem_missing_path_parameter(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance({
             "description": "Modify files",
@@ -1561,7 +1672,9 @@ class TestBasicRuleEngine:
         assert result.is_compliant is False
 
     def test_email_domain_not_approved(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance(
             {
@@ -1575,7 +1688,9 @@ class TestBasicRuleEngine:
         assert result.is_compliant is False
 
     def test_email_approved_domain_passes(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance(
             {
@@ -1591,13 +1706,17 @@ class TestBasicRuleEngine:
         assert len(violations_non_email) == 0
 
     def test_string_input_checked(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
         result = engine.check_compliance("Please ignore_ethics in this plan")
         assert result.is_compliant is False
 
     def test_object_with_description_attribute(self):
-        from predacore._vendor.ethical_governance_module.rule_engine import BasicRuleEngine
+        from predacore._vendor.ethical_governance_module.rule_engine import (
+            BasicRuleEngine,
+        )
         engine = BasicRuleEngine()
 
         class FakeStep:
@@ -1616,7 +1735,9 @@ class TestBasicRuleEngine:
 
 class TestPersistentAuditStore:
     def test_log_and_query(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             entry_id = store.log_decision(
@@ -1638,7 +1759,9 @@ class TestPersistentAuditStore:
             store.close()
 
     def test_log_violation_and_query(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             store.log_decision(
@@ -1657,7 +1780,9 @@ class TestPersistentAuditStore:
             store.close()
 
     def test_get_statistics(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             store.log_decision(component="a", event_type="e", is_compliant=True)
@@ -1673,7 +1798,9 @@ class TestPersistentAuditStore:
             store.close()
 
     def test_entry_count(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             assert store.entry_count == 0
@@ -1683,7 +1810,9 @@ class TestPersistentAuditStore:
             store.close()
 
     def test_export_report(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             store.log_decision(component="c", event_type="e", is_compliant=True)
@@ -1694,7 +1823,9 @@ class TestPersistentAuditStore:
             store.close()
 
     def test_query_filters(self, tmp_dir):
-        from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            PersistentAuditStore,
+        )
         store = PersistentAuditStore(db_path=str(tmp_dir / "audit.db"))
         try:
             store.log_decision(component="comp_a", event_type="e", is_compliant=True, severity="INFO")
@@ -1715,7 +1846,9 @@ class TestPersistentAuditStore:
 
 class TestAuditEntry:
     def test_to_dict(self):
-        from predacore._vendor.ethical_governance_module.persistent_audit import AuditEntry
+        from predacore._vendor.ethical_governance_module.persistent_audit import (
+            AuditEntry,
+        )
         entry = AuditEntry(
             component="test",
             event_type="CHECK",
@@ -1871,8 +2004,8 @@ class TestErrorHierarchy:
             LLMProviderError,
             LLMRateLimitError,
             PrometheusError,
-            ToolTimeoutError,
             ToolExecutionError,
+            ToolTimeoutError,
         )
         assert issubclass(LLMRateLimitError, LLMProviderError)
         assert issubclass(LLMProviderError, PrometheusError)
@@ -1894,7 +2027,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_add_and_get_node(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         node = KnowledgeNode(labels={"Concept"}, properties={"name": "AI"})
         result = await store.add_node(node)
@@ -1907,7 +2042,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_add_duplicate_node_fails(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         node = KnowledgeNode(labels={"Concept"}, properties={"name": "AI"})
         await store.add_node(node)
@@ -1917,7 +2054,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_update_node(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         node = KnowledgeNode(labels={"Concept"}, properties={"name": "AI"})
         await store.add_node(node)
@@ -1930,7 +2069,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_delete_node(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         node = KnowledgeNode(labels={"Concept"}, properties={"name": "AI"})
         await store.add_node(node)
@@ -1941,7 +2082,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_add_edge_requires_nodes(self):
         from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         n1 = KnowledgeNode(labels={"A"})
         n2 = KnowledgeNode(labels={"B"})
@@ -1955,7 +2098,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_add_edge_fails_with_missing_node(self):
         from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         n1 = KnowledgeNode(labels={"A"})
         await store.add_node(n1)
@@ -1967,7 +2112,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_query_nodes_by_label(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         await store.add_node(KnowledgeNode(labels={"Concept"}, properties={"name": "AI"}))
         await store.add_node(KnowledgeNode(labels={"Tool"}, properties={"name": "Python"}))
@@ -1979,7 +2126,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_query_nodes_by_property(self):
         from predacore._vendor.common.models import KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         await store.add_node(KnowledgeNode(labels={"Concept"}, properties={"name": "AI"}))
         await store.add_node(KnowledgeNode(labels={"Concept"}, properties={"name": "ML"}))
@@ -1991,7 +2140,9 @@ class TestInMemoryKnowledgeGraphStore:
     @pytest.mark.asyncio
     async def test_get_neighbors(self):
         from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
-        from predacore._vendor.knowledge_nexus.storage import InMemoryKnowledgeGraphStore
+        from predacore._vendor.knowledge_nexus.storage import (
+            InMemoryKnowledgeGraphStore,
+        )
         store = InMemoryKnowledgeGraphStore()
         n1 = KnowledgeNode(labels={"A"}, properties={"name": "Source"})
         n2 = KnowledgeNode(labels={"B"}, properties={"name": "Target"})
@@ -2012,7 +2163,9 @@ class TestInMemoryKnowledgeGraphStore:
 class TestFAISSVectorIndex:
     @pytest.mark.asyncio
     async def test_add_and_search(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=3)
         await idx.add("a", [1.0, 0.0, 0.0])
         await idx.add("b", [0.0, 1.0, 0.0])
@@ -2022,14 +2175,18 @@ class TestFAISSVectorIndex:
 
     @pytest.mark.asyncio
     async def test_dimension_mismatch_raises(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=3)
         with pytest.raises(ValueError, match="dimension mismatch"):
             await idx.add("x", [1.0, 0.0])
 
     @pytest.mark.asyncio
     async def test_remove(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=2)
         await idx.add("item", [1.0, 0.0])
         assert idx.size == 1
@@ -2038,7 +2195,9 @@ class TestFAISSVectorIndex:
 
     @pytest.mark.asyncio
     async def test_layer_filtering(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=2)
         await idx.add("a", [1.0, 0.0], metadata={"layers": ["docs"]})
         await idx.add("b", [0.9, 0.1], metadata={"layers": ["code"]})
@@ -2048,7 +2207,9 @@ class TestFAISSVectorIndex:
 
     @pytest.mark.asyncio
     async def test_save_and_load(self, tmp_dir):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=3)
         await idx.add("item1", [1.0, 0.0, 0.0], metadata={"source": "test"})
         await idx.add("item2", [0.0, 1.0, 0.0])
@@ -2062,7 +2223,9 @@ class TestFAISSVectorIndex:
 
     @pytest.mark.asyncio
     async def test_get_metadata(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         idx = FAISSVectorIndex(dimensions=2)
         await idx.add("x", [1.0, 0.0], metadata={"key": "value"})
         meta = idx.get_metadata("x")
@@ -2071,7 +2234,9 @@ class TestFAISSVectorIndex:
 
     @pytest.mark.asyncio
     async def test_cosine_similarity(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+        from predacore._vendor.knowledge_nexus.faiss_vector_index import (
+            FAISSVectorIndex,
+        )
         sim = FAISSVectorIndex._cosine_similarity([1.0, 0.0], [1.0, 0.0])
         assert sim == pytest.approx(1.0)
         sim = FAISSVectorIndex._cosine_similarity([1.0, 0.0], [0.0, 1.0])
@@ -2109,7 +2274,10 @@ class TestUserProfile:
 
 class TestUserModelingEngineService:
     def test_save_and_get_profile(self, tmp_dir):
-        from predacore._vendor.user_modeling_engine.service import UserModelingEngineService, UserProfile
+        from predacore._vendor.user_modeling_engine.service import (
+            UserModelingEngineService,
+            UserProfile,
+        )
         svc = UserModelingEngineService(data_path=str(tmp_dir / "ume"))
         profile = UserProfile(user_id="alice", preferences={"lang": "en"})
         svc.save_profile(profile)
@@ -2119,14 +2287,19 @@ class TestUserModelingEngineService:
         assert retrieved.preferences == {"lang": "en"}
 
     def test_get_nonexistent_profile_returns_default(self, tmp_dir):
-        from predacore._vendor.user_modeling_engine.service import UserModelingEngineService
+        from predacore._vendor.user_modeling_engine.service import (
+            UserModelingEngineService,
+        )
         svc = UserModelingEngineService(data_path=str(tmp_dir / "ume"))
         profile = svc.get_profile("nonexistent")
         assert profile.user_id == "nonexistent"
         assert profile.preferences == {}
 
     def test_update_profile_merges(self, tmp_dir):
-        from predacore._vendor.user_modeling_engine.service import UserModelingEngineService, UserProfile
+        from predacore._vendor.user_modeling_engine.service import (
+            UserModelingEngineService,
+            UserProfile,
+        )
         svc = UserModelingEngineService(data_path=str(tmp_dir / "ume"))
         svc.save_profile(UserProfile(user_id="alice", preferences={"theme": "dark"}))
         updated = svc.update_profile("alice", {"preferences": {"lang": "en"}})
@@ -2135,14 +2308,19 @@ class TestUserModelingEngineService:
         assert updated.preferences["lang"] == "en"
 
     def test_record_interaction(self, tmp_dir):
-        from predacore._vendor.user_modeling_engine.service import UserModelingEngineService
+        from predacore._vendor.user_modeling_engine.service import (
+            UserModelingEngineService,
+        )
         svc = UserModelingEngineService(data_path=str(tmp_dir / "ume"))
         svc.record_interaction("alice", "Hello!", metadata={"channel": "web"})
         profile = svc.get_profile("alice")
         assert profile.last_interaction_at != ""
 
     def test_build_planning_context(self, tmp_dir):
-        from predacore._vendor.user_modeling_engine.service import UserModelingEngineService, UserProfile
+        from predacore._vendor.user_modeling_engine.service import (
+            UserModelingEngineService,
+            UserProfile,
+        )
         svc = UserModelingEngineService(data_path=str(tmp_dir / "ume"))
         svc.save_profile(UserProfile(
             user_id="alice",
@@ -2233,8 +2411,8 @@ class TestFlame:
         assert stats["local_skills"] == 0
 
     def test_publish_requires_endorsement(self, tmp_dir):
-        from predacore._vendor.common.skill_genome import SkillGenome, TrustScore
         from predacore._vendor.common.skill_collective import Flame
+        from predacore._vendor.common.skill_genome import SkillGenome, TrustScore
         flame = Flame(
             instance_id="test",
             local_dir=tmp_dir / "local",
@@ -2275,8 +2453,12 @@ class TestFlame:
         assert genome.trust.local_successes > 0
 
     def test_get_executable_skills(self, tmp_dir):
-        from predacore._vendor.common.skill_genome import SkillGenome, TrustLevel, TrustScore
         from predacore._vendor.common.skill_collective import Flame
+        from predacore._vendor.common.skill_genome import (
+            SkillGenome,
+            TrustLevel,
+            TrustScore,
+        )
         flame = Flame(
             instance_id="test",
             local_dir=tmp_dir / "local",
@@ -2339,7 +2521,10 @@ class TestLLMClients:
 
 class TestTierPropagation:
     def test_all_tiers_have_propagation_rules(self):
-        from predacore._vendor.common.skill_genome import CapabilityTier, TIER_PROPAGATION
+        from predacore._vendor.common.skill_genome import (
+            TIER_PROPAGATION,
+            CapabilityTier,
+        )
         for tier in CapabilityTier:
             assert tier in TIER_PROPAGATION
             rules = TIER_PROPAGATION[tier]
@@ -2347,7 +2532,10 @@ class TestTierPropagation:
             assert "requires_user_endorsement" in rules
 
     def test_higher_tiers_need_more_successes(self):
-        from predacore._vendor.common.skill_genome import CapabilityTier, TIER_PROPAGATION
+        from predacore._vendor.common.skill_genome import (
+            TIER_PROPAGATION,
+            CapabilityTier,
+        )
         prev = 0
         for tier in CapabilityTier:
             required = TIER_PROPAGATION[tier]["min_successes"]
@@ -2355,7 +2543,10 @@ class TestTierPropagation:
             prev = required
 
     def test_network_write_needs_most_scrutiny(self):
-        from predacore._vendor.common.skill_genome import CapabilityTier, TIER_PROPAGATION
+        from predacore._vendor.common.skill_genome import (
+            TIER_PROPAGATION,
+            CapabilityTier,
+        )
         nw = TIER_PROPAGATION[CapabilityTier.NETWORK_WRITE]
         assert nw["requires_user_endorsement"] is True
         assert nw["requires_receiver_approval"] is True

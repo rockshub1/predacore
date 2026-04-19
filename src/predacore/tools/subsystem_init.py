@@ -18,7 +18,7 @@ import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     pass
@@ -127,7 +127,9 @@ class SubsystemFactory:
             try:
                 from predacore.operators.desktop import MacDesktopOperator
             except ImportError:
-                from src.predacore.operators.desktop import MacDesktopOperator  # type: ignore
+                from src.predacore.operators.desktop import (
+                    MacDesktopOperator,  # type: ignore
+                )
 
             ops_cfg = getattr(config, "operators", None)
             op = MacDesktopOperator(log=logger, operators_config=ops_cfg)
@@ -151,7 +153,9 @@ class SubsystemFactory:
             try:
                 from predacore.services.embedding import get_default_embedding_client
             except ImportError:
-                from src.predacore.services.embedding import get_default_embedding_client  # type: ignore
+                from src.predacore.services.embedding import (
+                    get_default_embedding_client,  # type: ignore
+                )
 
             um_db = str(Path(home_dir) / "memory" / "unified_memory.db")
             bundle.unified_memory = UnifiedMemoryStore(
@@ -173,11 +177,15 @@ class SubsystemFactory:
             try:
                 from predacore.services.embedding import get_default_embedding_client
             except ImportError:
-                from src.predacore.services.embedding import get_default_embedding_client  # type: ignore
+                from src.predacore.services.embedding import (
+                    get_default_embedding_client,  # type: ignore
+                )
             try:
                 from predacore._vendor.common.memory_service import MemoryService
             except ImportError:
-                from predacore._vendor.common.memory_service import MemoryService  # type: ignore
+                from predacore._vendor.common.memory_service import (
+                    MemoryService,  # type: ignore
+                )
 
             bundle.memory_service = MemoryService(
                 data_path=config.memory.persistence_dir,
@@ -212,9 +220,13 @@ class SubsystemFactory:
 
         try:
             try:
-                from predacore._vendor.core_strategic_engine.planner_mcts import ABMCTSPlanner
+                from predacore._vendor.core_strategic_engine.planner_mcts import (
+                    ABMCTSPlanner,
+                )
             except ImportError:
-                from predacore._vendor.core_strategic_engine.planner_mcts import ABMCTSPlanner  # type: ignore
+                from predacore._vendor.core_strategic_engine.planner_mcts import (
+                    ABMCTSPlanner,  # type: ignore
+                )
 
             bundle.mcts_planner = ABMCTSPlanner(kn_stub=None, egm_stub=None)
             bundle.available.append("mcts_planner")
@@ -244,7 +256,9 @@ class SubsystemFactory:
             try:
                 from predacore.llm_providers.router import LLMInterface
             except ImportError:
-                from src.predacore.llm_providers.router import LLMInterface  # type: ignore
+                from src.predacore.llm_providers.router import (
+                    LLMInterface,  # type: ignore
+                )
 
             collab_config = copy.deepcopy(config)
             agent_llm = getattr(config, "agent_llm", None)
@@ -310,7 +324,9 @@ class SubsystemFactory:
             try:
                 from predacore.agents.autonomy import OpenClawBridgeRuntime
             except ImportError:
-                from src.predacore.agents.autonomy import OpenClawBridgeRuntime  # type: ignore
+                from src.predacore.agents.autonomy import (
+                    OpenClawBridgeRuntime,  # type: ignore
+                )
 
             bundle.openclaw_runtime = OpenClawBridgeRuntime(config)
             bundle.available.append("openclaw")

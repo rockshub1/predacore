@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from predacore.llm_providers import message_validator as mv
 
-
 # ---------------------------------------------------------------------------
 # validate_tool_flow — reports violations, doesn't mutate
 # ---------------------------------------------------------------------------

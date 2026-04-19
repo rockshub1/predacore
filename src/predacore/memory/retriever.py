@@ -241,8 +241,8 @@ class MemoryRetriever:
             return ""
 
         # Rerank: combine similarity score with recency and importance
-        import time as _time
         import math as _math
+        import time as _time
         now = _time.time()
         reranked = []
         for mem, sim_score in results:

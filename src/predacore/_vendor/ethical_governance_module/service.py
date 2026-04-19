@@ -5,9 +5,9 @@ import logging
 import logging as _logging
 import os
 from concurrent import futures
-from typing import Optional
 
 import grpc
+
 from predacore._vendor.common.logging_utils import log_json
 from predacore._vendor.common.protos import (
     egm_pb2,

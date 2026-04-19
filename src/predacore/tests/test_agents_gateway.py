@@ -10,84 +10,72 @@ Target: 80+ tests covering all core orchestration infrastructure.
 from __future__ import annotations
 
 import asyncio
-import collections
-import json
-import logging
 import os
-import tempfile
 import time
-from dataclasses import FrozenInstanceError, dataclass, field
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from uuid import uuid4
+from dataclasses import FrozenInstanceError
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # ---------------------------------------------------------------------------
 # Imports under test — agents
 # ---------------------------------------------------------------------------
-
 from predacore.agents.collaboration import (
-    CollaborationPattern,
-    AgentSpec,
-    TaskPayload,
     AgentResult,
-    CollaborationResult,
+    AgentSpec,
     AgentTeam,
+    CollaborationPattern,
+    CollaborationResult,
     ResultAggregator,
     TaskDistributor,
+    TaskPayload,
 )
 from predacore.agents.engine import (
-    AgentType,
-    DynamicAgentSpec,
     AGENT_TYPES,
-    CapabilityRouter,
     AgentInstance,
-    TaskRecord,
-    TaskStore,
+    AgentType,
+    CapabilityRouter,
+    DynamicAgentSpec,
     PerformanceTracker,
+    TaskStore,
     compile_dynamic_agent_prompt,
     create_dynamic_agent_spec,
 )
 from predacore.agents.meta_cognition import (
-    ResponseEvaluation,
-    evaluate_response,
-    detect_loop,
-    should_ask_for_help,
-    _text_similarity,
-    _stable_args_key,
-    _FABRICATION_INDICATORS,
     _ECHO_PATTERNS,
+    _FABRICATION_INDICATORS,
+    ResponseEvaluation,
     ToolCall,
+    _stable_args_key,
+    _text_similarity,
+    detect_loop,
+    evaluate_response,
+    should_ask_for_help,
 )
 from predacore.agents.self_improvement import (
+    DEFAULT_PROTECTED_FILES,
+    AuditLog,
+    ImprovementProposal,
     ProposalCategory,
     RiskLevel,
-    ImprovementProposal,
-    AuditLog,
     SelfImprovementEngine,
-    DEFAULT_PROTECTED_FILES,
 )
 
 # ---------------------------------------------------------------------------
 # Imports under test — gateway
 # ---------------------------------------------------------------------------
-
 from predacore.gateway import (
-    IncomingMessage,
-    OutgoingMessage,
-    ChannelAdapter,
-    Gateway,
-    USER_RATE_LIMIT_PER_MINUTE,
-    RATE_LIMIT_WINDOW_SECONDS,
-    SESSION_LOCKS_MAX,
     IDENTITY_CACHE_MAX_SIZE,
     IDENTITY_CACHE_TTL_SECONDS,
     RATE_LIMIT_CLEANUP_USER_THRESHOLD,
-    RATE_LIMIT_CLEANUP_ENTRY_THRESHOLD,
+    RATE_LIMIT_WINDOW_SECONDS,
+    SESSION_LOCKS_MAX,
+    USER_RATE_LIMIT_PER_MINUTE,
+    ChannelAdapter,
+    Gateway,
+    IncomingMessage,
+    OutgoingMessage,
 )
-
 
 # ===========================================================================
 # Section 1: CollaborationPattern enum

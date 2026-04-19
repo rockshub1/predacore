@@ -3,7 +3,7 @@ Initial implementation of the Rule Engine for the EGM.
 """
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from predacore._vendor.common.protos import egm_pb2

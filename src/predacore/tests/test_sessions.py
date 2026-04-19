@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
 from predacore.sessions import Message, Session, SessionStore
-
 
 # ── Message Dataclass ──────────────────────────────────────────────
 

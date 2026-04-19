@@ -22,13 +22,11 @@ import json
 import logging
 import os
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .skill_genome import (
-    CapabilityTier,
     SkillGenome,
     SkillStep,
     TrustLevel,

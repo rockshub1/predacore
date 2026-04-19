@@ -49,8 +49,7 @@ import logging
 import os
 import ssl
 from email.message import EmailMessage
-from email.utils import getaddresses, make_msgid, parseaddr
-from typing import Any, Optional
+from email.utils import make_msgid, parseaddr
 
 from ..config import PredaCoreConfig
 from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
@@ -94,7 +93,7 @@ class EmailAdapter(ChannelAdapter):
         # Messaging state per conversation — maps sender address →
         # (last Message-Id, list of prior Message-Ids) so we can thread.
         self._thread_state: dict[str, tuple[str, list[str]]] = {}
-        self._idle_task: Optional[asyncio.Task] = None
+        self._idle_task: asyncio.Task | None = None
         self._running = False
         self._imap_client = None
 

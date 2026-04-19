@@ -27,11 +27,11 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import BaseOperator, OperatorPlatform, OperatorError, MacroAbortToken
+from .base import BaseOperator, OperatorError, OperatorPlatform
 from .enums import AndroidAction
 
 logger = logging.getLogger(__name__)
@@ -1113,7 +1113,7 @@ class AndroidOperator(BaseOperator):
         enable = bool(params.get("enable", True))
         # Use shell cmd to toggle via system service
         val = "true" if enable else "false"
-        self._shell_cmd(f"cmd statusbar expand-settings && sleep 0.5 && cmd statusbar collapse", timeout=5)
+        self._shell_cmd("cmd statusbar expand-settings && sleep 0.5 && cmd statusbar collapse", timeout=5)
         return {"flashlight": "on" if enable else "off", "note": "May require manual toggle on some devices"}
 
     def _get_clipboard(self, params: dict[str, Any]) -> dict[str, Any]:

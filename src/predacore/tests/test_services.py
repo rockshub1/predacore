@@ -10,16 +10,11 @@ GitIntegration, and IdentityService.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
-import signal
-import sqlite3
-import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -130,10 +125,9 @@ class TestPIDManager:
 # ---------------------------------------------------------------------------
 from predacore.services.rate_limiter import (
     InMemoryBackend,
-    RateLimitAlgorithm,
     RateLimitConfig,
-    RateLimitResult,
     RateLimiter,
+    RateLimitResult,
     default_api_limits,
 )
 
@@ -879,14 +873,13 @@ class TestTranscriptWriter:
 # ---------------------------------------------------------------------------
 from predacore.services.alerting import (
     Alert,
-    AlertChannel,
     AlertManager,
     AlertSeverity,
-    SlackDispatcher,
-    PagerDutyDispatcher,
-    WebhookDispatcher,
     DiscordDispatcher,
     EmailDispatcher,
+    PagerDutyDispatcher,
+    SlackDispatcher,
+    WebhookDispatcher,
     _is_safe_url,
 )
 
@@ -1406,8 +1399,6 @@ from predacore.services.plugins import (
     PluginRegistry,
     hook,
     tool,
-    VALID_HOOK_EVENTS,
-    MAX_LOADED_PLUGINS,
 )
 
 

@@ -13,7 +13,7 @@ import platform
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -1217,10 +1217,10 @@ class MacDesktopNativeService:
         )
         try:
             volume = int(result.stdout.strip())
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
             raise DesktopNativeError(
                 f"failed to read volume: {result.stderr.strip() or result.stdout.strip()}"
-            )
+            ) from exc
         return {"volume": volume}
 
     def _set_brightness(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1237,11 +1237,11 @@ class MacDesktopNativeService:
             core_display = ctypes.CDLL("/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay")
             core_display.CoreDisplay_Display_SetUserBrightness.argtypes = [ctypes.c_uint32, ctypes.c_double]
             core_display.CoreDisplay_Display_SetUserBrightness(0, level)
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as exc:
             raise DesktopNativeError(
                 "brightness control requires CoreDisplay framework (IOKit); "
                 "use System Preferences or keyboard brightness keys instead"
-            )
+            ) from exc
         return {"brightness": round(level, 2)}
 
     def _get_brightness(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1253,10 +1253,10 @@ class MacDesktopNativeService:
             core_display.CoreDisplay_Display_GetUserBrightness.argtypes = [ctypes.c_uint32]
             brightness = core_display.CoreDisplay_Display_GetUserBrightness(0)
             return {"brightness": round(float(brightness), 2)}
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as exc:
             raise DesktopNativeError(
                 "brightness read requires CoreDisplay framework (IOKit)"
-            )
+            ) from exc
 
     # ── Move window to monitor ──────────────────────────────────────
 
@@ -1419,7 +1419,7 @@ class MacDesktopNativeService:
             files = [f.strip() for f in out.stdout.strip().split("\n") if f.strip()]
             return {"query": query, "files": files, "count": len(files)}
         except (OSError, _sp.SubprocessError) as exc:
-            raise DesktopNativeError(f"Spotlight search failed: {exc}")
+            raise DesktopNativeError(f"Spotlight search failed: {exc}") from exc
 
     def _open_file(self, params: dict[str, Any]) -> dict[str, Any]:
         """Open a file with the default app, or a specific app."""
@@ -1476,7 +1476,8 @@ class MacDesktopNativeService:
 
     def _screen_record_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """Stop screen recording."""
-        import os, signal
+        import os
+        import signal
         proc = getattr(self, "_screen_record_proc", None)
         path = getattr(self, "_screen_record_path", "")
         if proc is None:
@@ -1484,7 +1485,7 @@ class MacDesktopNativeService:
         try:
             proc.send_signal(signal.SIGINT)
             proc.wait(timeout=5)
-        except (OSError, _sp.SubprocessError):
+        except (OSError, subprocess.SubprocessError):
             proc.kill()
         self._screen_record_proc = None
         size = os.path.getsize(path) if os.path.exists(path) else 0
@@ -1561,7 +1562,10 @@ class MacDesktopNativeService:
         val_str = str(value)
         if "kAXValueCGPointType" in val_str:
             try:
-                from ApplicationServices import AXValueGetValue, kAXValueTypeCGPoint  # type: ignore
+                from ApplicationServices import (  # type: ignore
+                    AXValueGetValue,
+                    kAXValueTypeCGPoint,
+                )
                 ok, point = AXValueGetValue(value, kAXValueTypeCGPoint, None)
                 if ok and hasattr(point, "x"):
                     return {"x": float(point.x), "y": float(point.y)}
@@ -1569,7 +1573,10 @@ class MacDesktopNativeService:
                 pass  # Expected: value may not be CGPoint type
         if "kAXValueCGSizeType" in val_str:
             try:
-                from ApplicationServices import AXValueGetValue, kAXValueTypeCGSize  # type: ignore
+                from ApplicationServices import (  # type: ignore
+                    AXValueGetValue,
+                    kAXValueTypeCGSize,
+                )
                 ok, size = AXValueGetValue(value, kAXValueTypeCGSize, None)
                 if ok and hasattr(size, "width"):
                     return {"width": float(size.width), "height": float(size.height)}

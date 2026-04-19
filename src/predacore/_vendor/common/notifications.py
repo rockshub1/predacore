@@ -10,12 +10,12 @@ import logging
 import os
 import socket
 from abc import ABC, abstractmethod
-from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 # Optional imports for different channels

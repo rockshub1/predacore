@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 try:
     from predacore.operators.native_service import (
@@ -50,13 +50,13 @@ except ImportError:  # pragma: no cover
     except ImportError:
         SmartInputEngine = None  # type: ignore[assignment, misc]
 
-from .base import BaseOperator, OperatorPlatform, OperatorError, MacroAbortToken
+from .base import BaseOperator, OperatorPlatform
 from .enums import (
+    NATIVE_CAPABLE_ACTIONS,
+    NATIVE_ONLY_ACTIONS,
+    SMART_ACTIONS,
     DesktopAction,
     ScreenshotQuality,
-    SMART_ACTIONS,
-    NATIVE_ONLY_ACTIONS,
-    NATIVE_CAPABLE_ACTIONS,
 )
 from .retry import with_retry
 
@@ -75,7 +75,7 @@ class AsyncBridge:
     caller's own loop. The bridge has its own loop on its own daemon thread.
     """
 
-    _instance: "AsyncBridge | None" = None
+    _instance: AsyncBridge | None = None
     _init_lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -102,7 +102,7 @@ class AsyncBridge:
             self._thread.join(timeout=5)
 
     @classmethod
-    def get(cls) -> "AsyncBridge":
+    def get(cls) -> AsyncBridge:
         """Get or create the singleton async bridge."""
         if cls._instance is None:
             with cls._init_lock:

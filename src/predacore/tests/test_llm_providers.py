@@ -6,9 +6,7 @@ Tests mock external APIs — no real LLM calls needed.
 """
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -19,7 +17,6 @@ from predacore.llm_providers.text_tool_adapter import (
     build_tool_prompt,
     parse_tool_calls,
 )
-
 
 # ── ProviderConfig ─────────────────────────────────────────────────
 
@@ -337,7 +334,7 @@ class TestLLMInterfaceRouter:
 
     @pytest.fixture
     def mock_config(self):
-        from predacore.config import PredaCoreConfig, LLMConfig
+        from predacore.config import LLMConfig, PredaCoreConfig
         cfg = PredaCoreConfig()
         cfg.llm = LLMConfig(
             provider="mock",

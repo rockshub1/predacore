@@ -43,7 +43,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .mcp_client import (
     MCPClient,
@@ -122,8 +122,8 @@ class MCPRegistry:
 
     def set_mount_callbacks(
         self,
-        on_mount: "Callable[[_MountedTool], None]",
-        on_unmount: "Callable[[_MountedTool], None]",
+        on_mount: Callable[[_MountedTool], None],
+        on_unmount: Callable[[_MountedTool], None],
     ) -> None:
         self._on_mount = on_mount
         self._on_unmount = on_unmount

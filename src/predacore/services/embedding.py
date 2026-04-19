@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import threading
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

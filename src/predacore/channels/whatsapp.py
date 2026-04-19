@@ -30,7 +30,6 @@ import hmac
 import json
 import logging
 import os
-from typing import Optional
 
 import httpx
 from aiohttp import web

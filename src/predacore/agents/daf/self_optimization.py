@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Deque, Optional
+from typing import Any
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -279,7 +279,7 @@ class AgentLifecycleManager:
     async def apply_actions(self, actions: list[str]) -> dict[str, str]:
         results: dict[str, str] = {}
         if self.orchestrator is None:
-            return {action: "skipped:no_orchestrator" for action in actions}
+            return dict.fromkeys(actions, "skipped:no_orchestrator")
 
         for action in actions:
             action_method = getattr(self.orchestrator, action, None)

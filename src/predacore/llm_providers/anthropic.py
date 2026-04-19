@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from . import _anthropic_wire as wire
 from . import predacore_sdk as psdk

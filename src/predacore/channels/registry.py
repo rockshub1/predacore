@@ -30,7 +30,7 @@ import importlib.metadata as _meta
 import importlib.util
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config import PredaCoreConfig
@@ -66,7 +66,7 @@ class ChannelRegistry:
 
     def __init__(self, home_dir: Path | str) -> None:
         self._home = Path(home_dir).expanduser()
-        self._adapters: dict[str, Type["ChannelAdapter"]] = {}
+        self._adapters: dict[str, type[ChannelAdapter]] = {}
         self._sources: dict[str, str] = {}  # name -> source tag for diagnostics
         self._scanned = False
 
@@ -155,7 +155,7 @@ class ChannelRegistry:
                 if isinstance(candidate, type) and hasattr(candidate, "channel_name"):
                     self._register(candidate, source=f"local:{py_file.name}")
 
-    def _register(self, cls: Type["ChannelAdapter"], *, source: str) -> None:
+    def _register(self, cls: type[ChannelAdapter], *, source: str) -> None:
         name = getattr(cls, "channel_name", None)
         if not isinstance(name, str) or not name:
             logger.debug(
@@ -185,7 +185,7 @@ class ChannelRegistry:
         self.scan()
         return name in self._adapters
 
-    def create(self, name: str, config: "PredaCoreConfig") -> "ChannelAdapter | None":
+    def create(self, name: str, config: PredaCoreConfig) -> ChannelAdapter | None:
         """Instantiate the adapter registered under ``name``."""
         self.scan()
         cls = self._adapters.get(name)

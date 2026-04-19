@@ -23,8 +23,9 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._context import (
     ToolContext,
@@ -68,7 +69,7 @@ def make_mcp_tool_handler(exposed_name: str) -> Callable[..., Any]:
     return _handler
 
 
-def make_mcp_tool_schema(mt: "_MountedTool") -> dict[str, Any]:
+def make_mcp_tool_schema(mt: _MountedTool) -> dict[str, Any]:
     """Convert a mounted MCP tool into an LLM-facing tool-definition dict."""
     description = mt.tool.description.strip() or f"MCP tool from server '{mt.server}'"
     # Prepend the origin so the LLM knows this is a plugin tool (useful for

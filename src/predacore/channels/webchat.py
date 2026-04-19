@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import re
-import sqlite3
 import time
 import uuid
 from datetime import datetime
@@ -385,7 +384,9 @@ class WebChatAdapter(ChannelAdapter):
 
         # Identity stats
         try:
-            from ..identity.engine import get_identity_engine  # noqa: deferred to avoid circular import
+            from ..identity.engine import (
+                get_identity_engine,  # noqa: deferred to avoid circular import
+            )
             engine = get_identity_engine(self.config)
             gs = engine.get_growth_stats()
             jf = gs.get("files", {}).get("JOURNAL.md") or {}

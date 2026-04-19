@@ -22,7 +22,7 @@ import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..config import PredaCoreConfig
@@ -77,7 +77,7 @@ class MarketplaceManager:
     Extracted from ToolExecutor to keep the executor as a thin facade.
     """
 
-    def __init__(self, config: "PredaCoreConfig", tool_ctx: "ToolContext") -> None:
+    def __init__(self, config: PredaCoreConfig, tool_ctx: ToolContext) -> None:
         self._config = config
         self._tool_ctx = tool_ctx
         self._skill_marketplace: SkillMarketplace | None = None
@@ -473,9 +473,17 @@ class MarketplaceManager:
 
         from .handlers import (
             handle_execute_code as _h_execute_code,
+        )
+        from .handlers import (
             handle_list_directory as _h_list_directory,
+        )
+        from .handlers import (
             handle_read_file as _h_read_file,
+        )
+        from .handlers import (
             handle_web_scrape as _h_web_scrape,
+        )
+        from .handlers import (
             handle_write_file as _h_write_file,
         )
 

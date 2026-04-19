@@ -23,15 +23,14 @@ from enum import Enum
 
 # ── Re-export operator enums (single source of truth lives in operators/) ──
 from predacore.operators.enums import (  # noqa: F401
-    AndroidAction,
-    DesktopAction,
     NATIVE_CAPABLE_ACTIONS,
     NATIVE_ONLY_ACTIONS,
     SMART_ACTIONS,
+    AndroidAction,
+    DesktopAction,
     ScreenshotQuality,
     VisionAction,
 )
-
 
 # ---------------------------------------------------------------------------
 # Tool Names — used in HANDLER_MAP, dispatcher, cache, circuit breaker

@@ -13,11 +13,11 @@ from ._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
-    missing_param,
-    invalid_param,
     blocked,
-    subsystem_unavailable,
+    invalid_param,
+    missing_param,
     resource_not_found,
+    subsystem_unavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,7 +161,7 @@ async def handle_voice_note(args: dict[str, Any], ctx: ToolContext) -> str:
         )
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=duration + 10)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             try:
                 proc.kill()
                 await proc.wait()
@@ -171,7 +171,7 @@ async def handle_voice_note(args: dict[str, Any], ctx: ToolContext) -> str:
                 "Recording timed out",
                 kind=ToolErrorKind.TIMEOUT,
                 tool_name="voice_note",
-            )
+            ) from exc
 
         if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
             err_msg = (stderr or b"").decode(errors="replace").strip()
@@ -208,13 +208,13 @@ async def handle_voice_note(args: dict[str, Any], ctx: ToolContext) -> str:
         if is_temp_output:
             Path(output_path).unlink(missing_ok=True)
         raise  # Re-raise our structured errors
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         if is_temp_output:
             Path(output_path).unlink(missing_ok=True)
         raise subsystem_unavailable(
             "sox (install: brew install sox on macOS, apt install sox on Linux)",
             tool="voice_note",
-        )
+        ) from exc
     except OSError as e:
         if is_temp_output:
             Path(output_path).unlink(missing_ok=True)

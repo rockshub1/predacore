@@ -23,7 +23,6 @@ import time
 import uuid
 from collections.abc import Generator
 from contextvars import ContextVar
-from typing import Optional
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,

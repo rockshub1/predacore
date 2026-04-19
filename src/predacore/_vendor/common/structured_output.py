@@ -3,7 +3,7 @@ Utilities for validating and versioning structured outputs from LLM tools.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 def validate_and_version(

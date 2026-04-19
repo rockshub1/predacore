@@ -23,7 +23,6 @@ import pytest
 
 from predacore.llm_providers import predacore_sdk as psdk
 
-
 # ---------------------------------------------------------------------------
 # Exception hierarchy
 # ---------------------------------------------------------------------------

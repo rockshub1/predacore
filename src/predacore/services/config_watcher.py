@@ -25,7 +25,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class ConfigWatcher:
 
         try:
             content = self._config_path.read_bytes()
-            return hashlib.md5(content).hexdigest()
+            return hashlib.md5(content, usedforsecurity=False).hexdigest()
         except OSError:
             return ""
 

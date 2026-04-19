@@ -36,9 +36,8 @@ from typing import Any
 
 from .base import (
     BaseOperator,
-    OperatorPlatform,
     OperatorError,
-    MacroAbortToken,
+    OperatorPlatform,
 )
 
 logger = logging.getLogger(__name__)

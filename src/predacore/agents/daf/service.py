@@ -12,6 +12,9 @@ from typing import Optional
 from uuid import uuid4
 
 import grpc
+from google.protobuf.struct_pb2 import Struct, Value
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
 from predacore._vendor.common.logging_utils import extract_trace_id, log_json
 
 # Import generated protobuf code and stubs
@@ -23,8 +26,6 @@ from predacore._vendor.common.protos import (
     wil_pb2,  # For status enum
     wil_pb2_grpc,  # For WIL stub dependency
 )
-from google.protobuf.struct_pb2 import Struct, Value
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 from . import scheduler as daf_scheduler
 

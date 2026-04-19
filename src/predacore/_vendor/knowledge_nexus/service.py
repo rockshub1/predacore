@@ -5,14 +5,21 @@ import logging
 import os
 from concurrent import futures
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 import grpc
-from predacore._vendor.common.embedding import EmbeddingClient, get_default_embedding_client
-from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
-from predacore._vendor.common.protos import knowledge_nexus_pb2, knowledge_nexus_pb2_grpc
 from google.protobuf.struct_pb2 import Struct
+
+from predacore._vendor.common.embedding import (
+    EmbeddingClient,
+    get_default_embedding_client,
+)
+from predacore._vendor.common.models import KnowledgeEdge, KnowledgeNode
+from predacore._vendor.common.protos import (
+    knowledge_nexus_pb2,
+    knowledge_nexus_pb2_grpc,
+)
 
 from .faiss_vector_index import FAISSVectorIndex
 from .storage import (

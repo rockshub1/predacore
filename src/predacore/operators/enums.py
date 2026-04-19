@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-
 # ---------------------------------------------------------------------------
 # Desktop Actions — used in MacDesktopOperator.execute()
 # ---------------------------------------------------------------------------

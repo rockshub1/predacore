@@ -21,7 +21,8 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from . import predacore_sdk as psdk
 from .base import LLMProvider
@@ -31,12 +32,19 @@ logger = logging.getLogger(__name__)
 
 # ── OpenAI-compatible provider endpoints ──────────────────────────────
 # Each entry maps a provider name to its base URL, env var for API key,
-# and default model.  All use the OpenAI chat/completions wire format.
+# and default model. All use the OpenAI chat/completions wire format.
+# ``env_key`` may be None for providers that don't require auth (e.g. local
+# Ollama); such providers skip the Authorization header and the no-key check.
 PROVIDER_ENDPOINTS: dict[str, dict[str, Any]] = {
     "openai": {
         "base_url": "https://api.openai.com/v1",
         "env_key": "OPENAI_API_KEY",
         "default_model": "gpt-4o",
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "env_key": None,  # Ollama is local, no auth required
+        "default_model": "llama3.2:3b",
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
@@ -110,17 +118,26 @@ class OpenAIProvider(LLMProvider):
         """Resolve API key, base URL, and default model for the active provider.
 
         Returns (api_key, base_url, default_model). ``base_url`` is
-        always non-empty so downstream code can concatenate paths.
+        always non-empty so downstream code can concatenate paths. For
+        no-auth providers (ollama), ``api_key`` is an empty string and
+        the caller should skip the auth check.
         """
         variant = str(self.config.extras.get("provider", "openai"))
         ep = PROVIDER_ENDPOINTS.get(variant)
 
         if ep:
-            # Use ONLY the provider-specific env var — never fall back to
-            # config.api_key which belongs to the primary provider.
-            api_key = os.getenv(ep["env_key"], "")
-            if not api_key:
-                logger.warning("No API key for %s (set %s)", variant, ep["env_key"])
+            env_key = ep.get("env_key")
+            if env_key:
+                # Provider-specific env var takes precedence. Fall back to
+                # config.api_key so users can put the key in ~/.predacore/
+                # config.yaml when their env isn't available (e.g. running
+                # from a launchd plist without a login shell).
+                api_key = os.getenv(env_key, "") or self.config.api_key
+                if not api_key:
+                    logger.warning("No API key for %s (set %s)", variant, env_key)
+            else:
+                # Provider doesn't require auth (e.g. ollama).
+                api_key = ""
             # Prefer an explicit override from config.api_base if set
             base_url = self.config.api_base or ep["base_url"]
             default_model = ep["default_model"]
@@ -132,6 +149,15 @@ class OpenAIProvider(LLMProvider):
 
         return api_key, base_url.rstrip("/"), default_model
 
+    @property
+    def _requires_api_key(self) -> bool:
+        """Whether the active variant needs auth. False for ollama and friends."""
+        variant = str(self.config.extras.get("provider", "openai"))
+        ep = PROVIDER_ENDPOINTS.get(variant)
+        if ep is None:
+            return True  # Unknown provider → assume auth required
+        return bool(ep.get("env_key"))
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -142,9 +168,13 @@ class OpenAIProvider(LLMProvider):
     ) -> dict[str, Any]:
         """Send a chat completion request to OpenAI or a compatible API."""
         api_key, base_url, default_model = self._resolve_endpoint()
-        if not api_key:
+        variant = str(self.config.extras.get("provider", "openai"))
+        if not api_key and self._requires_api_key:
+            ep = PROVIDER_ENDPOINTS.get(variant, {})
+            env_var = ep.get("env_key", "OPENAI_API_KEY")
             raise psdk.AuthenticationError(
-                f"No API key for provider '{self.config.extras.get('provider', 'openai')}'"
+                f"{variant}: missing API key. "
+                f"Set ${env_var} or add api_key to ~/.predacore/config.yaml."
             )
 
         model = self.config.model or default_model
@@ -221,11 +251,16 @@ class OpenAIProvider(LLMProvider):
 
 
 def _build_headers(api_key: str) -> dict[str, str]:
-    """Standard OpenAI-compatible headers."""
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    """Standard OpenAI-compatible headers.
+
+    Omits the Authorization header entirely when ``api_key`` is empty, so
+    no-auth providers like local Ollama don't send a dangling
+    ``Authorization: Bearer`` that some HTTP stacks reject.
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 async def _stream_chat(

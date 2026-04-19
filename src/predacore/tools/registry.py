@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -691,7 +691,6 @@ BUILTIN_TOOLS_RAW = [
                     "height": {"type": "integer"},
                     "amount": {"type": "integer"},
                     "seconds": {"type": "number"},
-                    "path": {"type": "string"},
                     "include_base64": {"type": "boolean"},
                     "timeout_seconds": {"type": "number"},
                     "target": {"type": "string"},

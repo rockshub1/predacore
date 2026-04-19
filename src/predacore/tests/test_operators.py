@@ -8,40 +8,37 @@ Target: 60+ tests covering all operator infrastructure.
 """
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ── Imports under test ─────────────────────────────────────────────────
-
-from predacore.operators.enums import (
-    DesktopAction,
-    AndroidAction,
-    VisionAction,
-    ScreenshotQuality,
-    SMART_ACTIONS,
-    NATIVE_ONLY_ACTIONS,
-    NATIVE_CAPABLE_ACTIONS,
-)
 from predacore.operators.base import (
-    BaseOperator,
-    OperatorPlatform,
     ActionCategory,
-    OperatorError,
+    BaseOperator,
     MacroAbortToken,
+    OperatorError,
+    OperatorPlatform,
+)
+
+# ── Imports under test ─────────────────────────────────────────────────
+from predacore.operators.enums import (
+    NATIVE_CAPABLE_ACTIONS,
+    NATIVE_ONLY_ACTIONS,
+    SMART_ACTIONS,
+    AndroidAction,
+    DesktopAction,
+    ScreenshotQuality,
+    VisionAction,
 )
 from predacore.operators.mock import (
-    MockDesktopOperator,
     MockAndroidOperator,
+    MockDesktopOperator,
 )
 from predacore.operators.retry import (
-    with_retry,
     async_with_retry,
+    with_retry,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. DesktopAction Enum
@@ -1046,21 +1043,21 @@ class TestEnumReExports:
     """Verify that tools/enums.py re-exports operator enums."""
 
     def test_desktop_action_reexport(self):
-        from predacore.tools.enums import DesktopAction as DAFromTools
         from predacore.operators.enums import DesktopAction as DAFromOps
+        from predacore.tools.enums import DesktopAction as DAFromTools
         assert DAFromTools is DAFromOps
 
     def test_android_action_reexport(self):
-        from predacore.tools.enums import AndroidAction as AAFromTools
         from predacore.operators.enums import AndroidAction as AAFromOps
+        from predacore.tools.enums import AndroidAction as AAFromTools
         assert AAFromTools is AAFromOps
 
     def test_vision_action_reexport(self):
-        from predacore.tools.enums import VisionAction as VAFromTools
         from predacore.operators.enums import VisionAction as VAFromOps
+        from predacore.tools.enums import VisionAction as VAFromTools
         assert VAFromTools is VAFromOps
 
     def test_frozenset_reexport(self):
-        from predacore.tools.enums import SMART_ACTIONS as SA_Tools
         from predacore.operators.enums import SMART_ACTIONS as SA_Ops
+        from predacore.tools.enums import SMART_ACTIONS as SA_Tools
         assert SA_Tools is SA_Ops

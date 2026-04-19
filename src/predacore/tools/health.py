@@ -17,11 +17,10 @@ Usage:
 from __future__ import annotations
 
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .dispatcher import ToolDispatcher
-    from .middleware import MetricsMiddleware
 
 
 class HealthDashboard:
@@ -31,7 +30,7 @@ class HealthDashboard:
     adaptive timeouts, middleware) to produce a comprehensive health report.
     """
 
-    def __init__(self, dispatcher: "ToolDispatcher") -> None:
+    def __init__(self, dispatcher: ToolDispatcher) -> None:
         self._dispatcher = dispatcher
 
     def report(self) -> dict[str, Any]:

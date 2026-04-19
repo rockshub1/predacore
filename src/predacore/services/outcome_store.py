@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import os
 import json
 import logging
 import sqlite3
@@ -22,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

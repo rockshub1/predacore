@@ -20,13 +20,9 @@ import base64
 import hashlib
 import json
 import logging
-import os
-import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # OCR fallback for when AX tree is unavailable
 try:
@@ -51,7 +47,7 @@ class UIElement:
     enabled: bool = True
     source: str = "ax"  # "ax" or "vision"
     confidence: float = 1.0  # 1.0 for AX, 0.0-1.0 for vision
-    children: list["UIElement"] = field(default_factory=list)
+    children: list[UIElement] = field(default_factory=list)
     ax_ref: str = ""  # AX element reference for direct interaction
     depth: int = 0
 

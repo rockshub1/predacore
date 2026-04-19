@@ -5,10 +5,11 @@ Includes static type definitions and dynamic instance management.
 import asyncio  # For locks
 import datetime
 import logging
-from typing import Any, Optional
+from typing import Any
+
+from google.protobuf.timestamp_pb2 import Timestamp
 
 from predacore._vendor.common.protos import daf_pb2  # For AgentStatus enum
-from google.protobuf.timestamp_pb2 import Timestamp
 
 # --- Abstract Base Classes ---
 

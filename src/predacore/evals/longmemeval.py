@@ -44,7 +44,6 @@ from typing import Any
 from predacore.memory import UnifiedMemoryStore
 from predacore.services.embedding import RustEmbeddingClient
 
-
 # ── Metric helpers ────────────────────────────────────────────────────────
 
 

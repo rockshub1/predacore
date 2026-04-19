@@ -1,14 +1,10 @@
 """Git handlers: git_context, git_diff_summary, git_commit_suggest, git_find_files, git_semantic_search."""
 from __future__ import annotations
 
-from typing import Any
-
 from ._context import (
     ToolContext,
-    ToolError,
-    ToolErrorKind,
-    missing_param,
     invalid_param,
+    missing_param,
 )
 
 

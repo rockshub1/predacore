@@ -9,18 +9,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ..config import PredaCoreConfig
-from .base import LLMProvider, ProviderConfig
-from .circuit_breaker import CircuitBreaker
-from .text_tool_adapter import build_tool_prompt, build_full_text_prompt, parse_tool_calls
 
 # Import providers (direct API only — no vendor SDK dependencies)
 from .anthropic import AnthropicProvider
+from .base import LLMProvider, ProviderConfig
+from .circuit_breaker import CircuitBreaker
 from .gemini import GeminiProvider
 from .gemini_cli import GeminiCLIProvider
 from .openai import OpenAIProvider
+from .text_tool_adapter import (
+    build_full_text_prompt,
+    build_tool_prompt,
+    parse_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +63,7 @@ class LLMInterface:
     def __init__(self, config: PredaCoreConfig):
         self.config = config
         self._provider_name = _normalize_provider_name(config.llm.provider)
-        
+
         # Build failover chain
         self._provider_chain = [self._provider_name]
         if config.llm.fallback_providers:
@@ -286,7 +291,7 @@ class LLMInterface:
         fallback_hint = ""
         if fallbacks:
             fallback_hint = (
-                f"\n\nAvailable alternatives:\n"
+                "\n\nAvailable alternatives:\n"
                 + "\n".join(f"  /model {fb}" for fb in fallbacks)
                 + "\n\nSwitch with /model <provider> — I'll use that until you switch back."
             )
@@ -324,7 +329,7 @@ class LLMInterface:
         fallback_hint = ""
         if fallbacks:
             fallback_hint = (
-                f"\n\nAvailable alternatives:\n"
+                "\n\nAvailable alternatives:\n"
                 + "\n".join(f"  /model {fb}" for fb in fallbacks)
                 + "\n\nSwitch with /model <provider>"
             )
@@ -370,8 +375,8 @@ class LLMInterface:
                         self._throttle_delay * self._THROTTLE_BACKOFF_FACTOR,
                         self._THROTTLE_MAX_DELAY
                     )
-                
+
                 logger.info("LLM Throttle: sleeping %.1fs", self._throttle_delay)
                 await asyncio.sleep(self._throttle_delay)
-            
+
             self._last_call_ts = time.time()

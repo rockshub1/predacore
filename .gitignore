@@ -64,3 +64,6 @@ benchmarks/*.json
 benchmarks/*.log
 !benchmarks/README.md
 !benchmarks/PAPER_PLAN.md
+
+# Local audit tooling output (not shipped)
+.audit/

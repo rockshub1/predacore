@@ -20,9 +20,18 @@ v2 improvements over v1:
 """
 from __future__ import annotations
 
-import asyncio, base64, json, logging, math, os, random, subprocess, tempfile, time
+import asyncio
+import base64
+import json
+import logging
+import math
+import os
+import random
+import subprocess
+import tempfile
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 try:
     import aiohttp
@@ -111,14 +120,14 @@ _NAVIGATE_SETTLE_MS = 800
 class _ChromeCDP:
     """Chrome DevTools Protocol backend over aiohttp websocket."""
     def __init__(self) -> None:
-        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
         self._msg_id: int = 0
         self._ws_url: str = ""
         self.browser_label: str = ""
         self._events: dict[str, list[dict]] = {}
         self._event_waiters: dict[str, list[asyncio.Future]] = {}
-        self._bridge_ref: Optional[Any] = None  # Back-ref to BrowserBridge for dialog handling
+        self._bridge_ref: Any | None = None  # Back-ref to BrowserBridge for dialog handling
 
     @property
     def connected(self) -> bool:
@@ -145,7 +154,7 @@ class _ChromeCDP:
             return False
         try:
             self._ws = await self._session.ws_connect(self._ws_url)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             await self._cleanup()
             return False
         # Enable CDP domains we need
@@ -1227,7 +1236,8 @@ class BrowserBridge:
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     )
                     await asyncio.wait_for(proc.wait(), timeout=60)
-                    import glob, re as _re
+                    import glob
+                    import re as _re
                     vtt_files = glob.glob(f"{vtt_path}*.vtt")
                     if vtt_files:
                         with open(vtt_files[0]) as f:

@@ -17,15 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +187,8 @@ class KokoroTTS(TTSProvider):
             return
 
         try:
-            from kokoro import KModel
             import torch
+            from kokoro import KModel
 
             # Auto-select device
             if self._device is None:
@@ -203,11 +202,11 @@ class KokoroTTS(TTSProvider):
             logger.info(f"Kokoro TTS: model loaded in {elapsed:.1f}s")
             self._initialized = True
 
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "Kokoro TTS not installed. Run: pip install kokoro"
-            )
-        except (ImportError, OSError, RuntimeError) as e:
+            ) from exc
+        except (OSError, RuntimeError) as e:
             logger.error(f"Kokoro TTS init failed: {e}")
             raise
 
@@ -283,6 +282,7 @@ class KokoroTTS(TTSProvider):
     def _float_to_wav(audio: Any, sample_rate: int) -> bytes:
         """Convert float32 numpy audio to WAV bytes."""
         import struct
+
         import numpy as np
 
         # Normalize and convert to int16
@@ -334,8 +334,8 @@ class EdgeTTS(TTSProvider):
     ) -> SynthesisResult:
         try:
             import edge_tts
-        except ImportError:
-            raise RuntimeError("Install edge-tts: pip install edge-tts")
+        except ImportError as exc:
+            raise RuntimeError("Install edge-tts: pip install edge-tts") from exc
 
         import tempfile
 
@@ -431,6 +431,7 @@ class OpenAITTS(TTSProvider):
         self, text: str, voice_id: str = "alloy", **kwargs
     ) -> SynthesisResult:
         import os
+
         import httpx
 
         api_key = os.getenv("OPENAI_API_KEY", "")
@@ -470,6 +471,7 @@ class OpenAISTT(STTProvider):
         self, audio_bytes: bytes, language: str = "en", **kwargs
     ) -> TranscriptionResult:
         import os
+
         import httpx
 
         api_key = os.getenv("OPENAI_API_KEY", "")

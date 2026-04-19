@@ -35,7 +35,6 @@ import platform
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, Optional
 
 from ..config import PredaCoreConfig
 from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
@@ -84,14 +83,14 @@ class IMessageAdapter(ChannelAdapter):
     def __init__(self, config: PredaCoreConfig):
         self.config = config
         self._message_handler = None
-        self._poll_task: Optional[asyncio.Task] = None
+        self._poll_task: asyncio.Task | None = None
         self._running = False
         self._last_rowid: int = 0
         # Captured in start() so the polling thread can dispatch coroutines
         # back onto the event loop. ``asyncio.get_event_loop()`` from a
         # worker thread is unreliable on Python 3.12+ (returns a new loop),
         # so we grab the running loop upfront instead.
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._chat_db = Path.home() / "Library" / "Messages" / "chat.db"
         self._poll_interval = float(os.getenv("IMESSAGE_POLL_INTERVAL_S", "2.5"))
         self._allow_groups = os.getenv("IMESSAGE_ALLOW_GROUPS", "").lower() in {

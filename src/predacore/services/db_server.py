@@ -36,7 +36,7 @@ import os
 import sqlite3
 import struct
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 class _BytesSafeEncoder(json.JSONEncoder):
@@ -58,19 +58,19 @@ class DBServer:
 
     def __init__(
         self,
-        db_registry: Dict[str, str],
-        socket_path: Optional[str] = None,
+        db_registry: dict[str, str],
+        socket_path: str | None = None,
     ) -> None:
         self._socket_path: str = (
             os.environ.get("PREDACORE_DB_SOCKET")
             or socket_path
             or _DEFAULT_SOCKET
         )
-        self._db_registry: Dict[str, str] = dict(db_registry)
-        self._connections: Dict[str, sqlite3.Connection] = {}
-        self._server: Optional[asyncio.AbstractServer] = None
-        self._write_queue: asyncio.Queue[Tuple[asyncio.Future, str, str, Optional[list]]] = asyncio.Queue()
-        self._writer_task: Optional[asyncio.Task] = None
+        self._db_registry: dict[str, str] = dict(db_registry)
+        self._connections: dict[str, sqlite3.Connection] = {}
+        self._server: asyncio.AbstractServer | None = None
+        self._write_queue: asyncio.Queue[tuple[asyncio.Future, str, str, list | None]] = asyncio.Queue()
+        self._writer_task: asyncio.Task | None = None
         self._conn_count: int = 0
         self._query_count: int = 0
 
@@ -185,14 +185,14 @@ class DBServer:
                 self._write_queue.task_done()
 
     def _do_execute(
-        self, db_name: str, sql: str, params: Optional[list]
-    ) -> Dict[str, Any]:
+        self, db_name: str, sql: str, params: list | None
+    ) -> dict[str, Any]:
         conn = self._get_connection(db_name)
         cur = conn.execute(sql, params or [])
         conn.commit()
         return {"rowcount": cur.rowcount, "lastrowid": cur.lastrowid}
 
-    def _do_executescript(self, db_name: str, sql: str) -> Dict[str, Any]:
+    def _do_executescript(self, db_name: str, sql: str) -> dict[str, Any]:
         conn = self._get_connection(db_name)
         conn.executescript(sql)
         return {"ok": True}
@@ -202,21 +202,21 @@ class DBServer:
     # ------------------------------------------------------------------
 
     def _do_query(
-        self, db_name: str, sql: str, params: Optional[list]
-    ) -> Dict[str, Any]:
+        self, db_name: str, sql: str, params: list | None
+    ) -> dict[str, Any]:
         conn = self._get_connection(db_name)
         cur = conn.execute(sql, params or [])
-        rows: List[list] = [list(row) for row in cur.fetchall()]
+        rows: list[list] = [list(row) for row in cur.fetchall()]
         return {"rows": rows}
 
     def _do_query_dicts(
-        self, db_name: str, sql: str, params: Optional[list]
-    ) -> Dict[str, Any]:
+        self, db_name: str, sql: str, params: list | None
+    ) -> dict[str, Any]:
         conn = self._get_connection(db_name)
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.execute(sql, params or [])
-            rows: List[Dict[str, Any]] = [dict(row) for row in cur.fetchall()]
+            rows: list[dict[str, Any]] = [dict(row) for row in cur.fetchall()]
         finally:
             conn.row_factory = None  # type: ignore[assignment]
         return {"rows": rows}
@@ -253,7 +253,7 @@ class DBServer:
             except Exception:
                 pass
 
-    async def _dispatch(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         """Route a JSON-RPC request to the appropriate handler."""
         req_id = request.get("id")
         method = request.get("method", "")
@@ -307,6 +307,6 @@ class DBServer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _send(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    def _send(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
         payload = json.dumps(obj, cls=_BytesSafeEncoder).encode("utf-8")
         writer.write(_HEADER.pack(len(payload)) + payload)

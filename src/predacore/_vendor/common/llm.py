@@ -19,7 +19,7 @@ import os
 import signal
 import subprocess
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -516,17 +516,17 @@ class OllamaClient(LLMClient):
                 resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
-        except httpx.ConnectError:
+        except httpx.ConnectError as exc:
             raise RuntimeError(
                 f"Cannot connect to Ollama at {self.base_url}. "
                 f"Is Ollama running? Start it with: ollama serve"
-            )
+            ) from exc
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 raise RuntimeError(
                     f"Model '{model or self.model}' not found on Ollama. "
                     f"Pull it with: ollama pull {model or self.model}"
-                )
+                ) from e
             raise
 
     async def list_models(self) -> list[str]:

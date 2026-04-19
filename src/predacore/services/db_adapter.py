@@ -23,7 +23,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -40,15 +40,15 @@ class DBAdapter:
 
     def __init__(
         self,
-        socket_path: Optional[str] = None,
-        db_registry: Optional[Dict[str, str]] = None,
+        socket_path: str | None = None,
+        db_registry: dict[str, str] | None = None,
     ) -> None:
         self._socket_path: str = (
             os.environ.get("PREDACORE_DB_SOCKET")
             or socket_path
             or _DEFAULT_SOCKET
         )
-        self._db_registry: Dict[str, str] = dict(db_registry or {})
+        self._db_registry: dict[str, str] = dict(db_registry or {})
 
         # Socket client (lazy)
         self._client: Any = None  # DBClient | None
@@ -104,7 +104,7 @@ class DBAdapter:
     def _get_direct_connection(self, db_name: str) -> sqlite3.Connection:
         """Return a thread-local SQLite connection for *db_name*."""
         attr = f"_conn_{db_name}"
-        conn: Optional[sqlite3.Connection] = getattr(self._local, attr, None)
+        conn: sqlite3.Connection | None = getattr(self._local, attr, None)
         if conn is not None:
             return conn
 
@@ -123,23 +123,23 @@ class DBAdapter:
         return conn
 
     def _direct_execute(
-        self, db_name: str, sql: str, params: Optional[list] = None
-    ) -> Dict[str, Any]:
+        self, db_name: str, sql: str, params: list | None = None
+    ) -> dict[str, Any]:
         conn = self._get_direct_connection(db_name)
         cur = conn.execute(sql, params or [])
         conn.commit()
         return {"rowcount": cur.rowcount, "lastrowid": cur.lastrowid}
 
     def _direct_query(
-        self, db_name: str, sql: str, params: Optional[list] = None
-    ) -> List[list]:
+        self, db_name: str, sql: str, params: list | None = None
+    ) -> list[list]:
         conn = self._get_direct_connection(db_name)
         cur = conn.execute(sql, params or [])
         return [list(row) for row in cur.fetchall()]
 
     def _direct_query_dicts(
-        self, db_name: str, sql: str, params: Optional[list] = None
-    ) -> List[Dict[str, Any]]:
+        self, db_name: str, sql: str, params: list | None = None
+    ) -> list[dict[str, Any]]:
         conn = self._get_direct_connection(db_name)
         conn.row_factory = sqlite3.Row
         try:
@@ -148,7 +148,7 @@ class DBAdapter:
         finally:
             conn.row_factory = None  # type: ignore[assignment]
 
-    def _direct_executescript(self, db_name: str, sql: str) -> Dict[str, Any]:
+    def _direct_executescript(self, db_name: str, sql: str) -> dict[str, Any]:
         conn = self._get_direct_connection(db_name)
         conn.executescript(sql)
         return {"ok": True}
@@ -161,8 +161,8 @@ class DBAdapter:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> Dict[str, Any]:
+        params: list | None = None,
+    ) -> dict[str, Any]:
         """Execute a write statement. Returns ``{rowcount, lastrowid}``."""
         if await self._ensure_client():
             try:
@@ -179,8 +179,8 @@ class DBAdapter:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[list]:
+        params: list | None = None,
+    ) -> list[list]:
         """Run a read query. Returns a list of row-tuples (as lists)."""
         if await self._ensure_client():
             try:
@@ -197,8 +197,8 @@ class DBAdapter:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[Dict[str, Any]]:
+        params: list | None = None,
+    ) -> list[dict[str, Any]]:
         """Run a read query. Returns a list of dicts keyed by column name."""
         if await self._ensure_client():
             try:
@@ -211,7 +211,7 @@ class DBAdapter:
             None, self._direct_query_dicts, db_name, sql, params
         )
 
-    async def executescript(self, db_name: str, sql: str) -> Dict[str, Any]:
+    async def executescript(self, db_name: str, sql: str) -> dict[str, Any]:
         """Execute a multi-statement SQL script. Returns ``{ok: true}``."""
         if await self._ensure_client():
             try:

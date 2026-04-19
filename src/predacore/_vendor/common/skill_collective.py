@@ -28,19 +28,18 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .skill_genome import (
+    TIER_PROPAGATION,
     SkillGenome,
     TrustLevel,
     TrustScore,
-    TIER_PROPAGATION,
 )
-from .skill_scanner import ScanReport, ScanVerdict, SkillScanner
+from .skill_scanner import ScanVerdict, SkillScanner
 
 logger = logging.getLogger(__name__)
 

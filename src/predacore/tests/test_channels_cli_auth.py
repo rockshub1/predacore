@@ -9,133 +9,106 @@ Target: 100+ tests covering all interface infrastructure.
 """
 from __future__ import annotations
 
-import argparse
-import asyncio
-import base64
-import collections
 import hashlib
 import hmac
 import json
-import logging
 import os
-import re
-import tempfile
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from uuid import uuid4
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # ---------------------------------------------------------------------------
 # Imports under test — Channels
 # ---------------------------------------------------------------------------
-
 import predacore.channels  # noqa: F401
-
-from predacore.channels.health import (
-    ChannelStatus,
-    RateLimiter,
-    ReconnectionManager,
-    ChannelHealthRecord,
-    ChannelHealthMonitor,
-    DEFAULT_RATE_LIMITS,
-    DEGRADED_ERROR_RATE,
-    CIRCUIT_BREAK_ERROR_RATE,
-)
-
-from predacore.channels.telegram import (
-    TelegramAdapter,
-    _chunk_message as tg_chunk_message,
-    _md_to_telegram,
-    TG_MAX_LENGTH,
-    _TYPING_INTERVAL,
-    _RECENT_UPDATE_TTL,
-    _RECENT_UPDATE_MAX,
-    _RECENT_START_TTL,
-)
-
-from predacore.channels.discord import (
-    DiscordAdapter,
-    _chunk_message as discord_chunk_message,
-    DISCORD_MAX_LENGTH,
-)
-
-from predacore.channels.whatsapp import (
-    WhatsAppAdapter,
-    _chunk_message as wa_chunk_message,
-    WA_API_URL,
-    WA_MAX_LENGTH,
-)
-
-from predacore.channels.webchat import (
-    WebChatAdapter,
-    STATIC_DIR,
+from predacore.auth.middleware import (
+    APIKey,
+    APIKeyStore,
+    AuthContext,
+    AuthMethod,
+    AuthMiddleware,
+    _base64url_decode,
+    _base64url_encode,
+    _decode_jwt_parts,
+    create_jwt_hs256,
+    verify_jwt_hs256,
 )
 
 # ---------------------------------------------------------------------------
 # Imports under test — Auth
 # ---------------------------------------------------------------------------
-
 from predacore.auth.sandbox import (
-    SubprocessSandboxManager,
-    DockerSandboxManager,
-    AbstractSandboxManager,
-    SessionSandbox,
-    SessionSandboxPool,
-    SandboxConfig,
-    _get_language_config,
-    _RUNTIME_IMAGES,
+    _COMPILED_LANGS,
+    _RUNTIME_ALIASES,
     _RUNTIME_EXTENSIONS,
     _RUNTIME_FILENAMES,
-    _RUNTIME_ALIASES,
-    _COMPILED_LANGS,
+    _RUNTIME_IMAGES,
+    AbstractSandboxManager,
+    DockerSandboxManager,
+    SandboxConfig,
+    SessionSandbox,
+    SessionSandboxPool,
+    SubprocessSandboxManager,
+    _get_language_config,
 )
-
 from predacore.auth.security import (
-    InjectionAssessment,
+    _INJECTION_PATTERNS,
+    MAX_INPUT_LENGTH,
     detect_injection,
-    sanitize_tool_output,
-    redact_secrets,
     is_sensitive_file,
+    redact_secrets,
+    sanitize_tool_output,
     sanitize_user_input,
     validate_url_ssrf,
-    _INJECTION_PATTERNS,
-    INJECTION_THRESHOLD,
-    MAX_INPUT_LENGTH,
 )
-
-from predacore.auth.middleware import (
-    AuthMethod,
-    AuthContext,
-    APIKey,
-    APIKeyStore,
-    AuthMiddleware,
-    verify_jwt_hs256,
-    create_jwt_hs256,
-    _base64url_decode,
-    _base64url_encode,
-    _decode_jwt_parts,
+from predacore.channels.discord import (
+    DISCORD_MAX_LENGTH,
+    DiscordAdapter,
+)
+from predacore.channels.discord import (
+    _chunk_message as discord_chunk_message,
+)
+from predacore.channels.health import (
+    DEFAULT_RATE_LIMITS,
+    ChannelHealthMonitor,
+    ChannelHealthRecord,
+    ChannelStatus,
+    RateLimiter,
+    ReconnectionManager,
+)
+from predacore.channels.telegram import (
+    _RECENT_UPDATE_MAX,
+    TG_MAX_LENGTH,
+    TelegramAdapter,
+    _md_to_telegram,
+)
+from predacore.channels.telegram import (
+    _chunk_message as tg_chunk_message,
+)
+from predacore.channels.webchat import (
+    WebChatAdapter,
+)
+from predacore.channels.whatsapp import (
+    WA_MAX_LENGTH,
+    WhatsAppAdapter,
+)
+from predacore.channels.whatsapp import (
+    _chunk_message as wa_chunk_message,
 )
 
 # ---------------------------------------------------------------------------
 # Imports under test — CLI
 # ---------------------------------------------------------------------------
-
 # CLI chat is a thin WebSocket client to the daemon — no in-process chat
 # primitives (GenerationController / PredaCoreCompleter / StatusBar /
 # _COMMAND_DEFS / _handle_command) to import any more. The daemon-facing
 # surface (setup / doctor / start / stop / status) lives in cli.py and
 # is covered by subcommand tests below.
-
 # ---------------------------------------------------------------------------
 # Gateway — ChannelAdapter ABC
 # ---------------------------------------------------------------------------
-
 from predacore.gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -144,7 +117,7 @@ from predacore.gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
 
 def _make_mock_config(**overrides):
     """Create a real PredaCoreConfig for adapter construction."""
-    from predacore.config import PredaCoreConfig, ChannelConfig
+    from predacore.config import ChannelConfig, PredaCoreConfig
     channels_dict = overrides.get("channels_dict", {})
     channel_cfg = ChannelConfig(
         enabled=overrides.get("enabled", ["cli"]),
@@ -814,7 +787,6 @@ class TestWhatsAppAdapter:
             "hub.verify_token": "my-verify-token",
             "hub.challenge": "challenge123",
         }
-        from aiohttp import web
         resp = await adapter._verify_webhook(request)
         assert resp.status == 200
         assert resp.text == "challenge123"

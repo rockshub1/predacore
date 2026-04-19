@@ -38,10 +38,9 @@ Features
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from ..config import PredaCoreConfig
 from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
@@ -94,7 +93,7 @@ class SlackAdapter(ChannelAdapter):
 
         self._web_client = None
         self._socket_handler = None
-        self._bot_user_id: Optional[str] = None
+        self._bot_user_id: str | None = None
 
     async def start(self) -> None:
         """Open the Socket Mode WebSocket + cache our bot user id."""
@@ -106,10 +105,18 @@ class SlackAdapter(ChannelAdapter):
             return
 
         try:
-            from slack_sdk.web.async_client import AsyncWebClient  # type: ignore[import-not-found]
-            from slack_sdk.socket_mode.aiohttp import SocketModeClient  # type: ignore[import-not-found]
-            from slack_sdk.socket_mode.request import SocketModeRequest  # type: ignore[import-not-found]
-            from slack_sdk.socket_mode.response import SocketModeResponse  # type: ignore[import-not-found]
+            from slack_sdk.socket_mode.aiohttp import (
+                SocketModeClient,  # type: ignore[import-not-found]
+            )
+            from slack_sdk.socket_mode.request import (
+                SocketModeRequest,  # type: ignore[import-not-found]
+            )
+            from slack_sdk.socket_mode.response import (
+                SocketModeResponse,  # type: ignore[import-not-found]
+            )
+            from slack_sdk.web.async_client import (
+                AsyncWebClient,  # type: ignore[import-not-found]
+            )
         except ImportError:
             logger.error(
                 "Slack: slack-sdk not installed. "
