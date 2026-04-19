@@ -629,13 +629,31 @@ class BrowserBridge:
         if not target:
             return {"ok": False, "error": f"Input not found: {text}"}
 
-        # Focus the element
+        # Focus the element AND verify focus actually landed. Without this
+        # check, a selector that matches a hidden/disabled/shadow-DOM element
+        # silently lands focus on <body> or a neighbour, and subsequent
+        # keystrokes go to the wrong place.
         await self._eval(f'document.querySelector("{_js_esc(target)}").focus()')
+        focus_ok = await self._eval(
+            f'(function(){{var el=document.querySelector("{_js_esc(target)}");'
+            f'return el!==null&&document.activeElement===el}})()'
+        )
+        if focus_ok is not True:
+            return {
+                "ok": False,
+                "error": (
+                    f"focus did not land on {target!r} — element may be hidden, "
+                    "disabled, in a shadow DOM, or inside a cross-origin iframe"
+                ),
+            }
 
         if clear:
             # Select all + delete (Ctrl+A then Backspace)
             await self.key_combo(["ctrl", "a"])
             await self.press_key("Backspace")
+            # React re-render settle — controlled-component state update is
+            # async, typing into a stale DOM value results in lost keystrokes.
+            await asyncio.sleep(0.2)
 
         if self.is_cdp:
             # CDP real keystrokes — each char goes through the full input pipeline
@@ -656,7 +674,7 @@ class BrowserBridge:
                     await asyncio.sleep(random.uniform(0.20, 0.45))
                 else:
                     await asyncio.sleep(random.uniform(0.04, 0.12))
-            return {"ok": True, "method": "cdp_keystrokes", "chars": len(value)}
+            method = "cdp_keystrokes"
         else:
             # JS fallback: simulate per-char events
             for ch in value:
@@ -668,7 +686,33 @@ class BrowserBridge:
                     f'el.dispatchEvent(new KeyboardEvent("keyup",{{key:{json.dumps(ch)},bubbles:true}}))}})()'
                 )
                 await self._eval(js)
-            return {"ok": True, "method": "js_keystrokes", "chars": len(value)}
+            method = "js_keystrokes"
+
+        # Post-typing verification — read the element's value back. If what we
+        # sent didn't land (page intercepted keys, input is read-only, etc.)
+        # fail the call explicitly so the agent doesn't keep retrying on a
+        # false-positive "ok": true.
+        final_value = await self._eval(
+            f'(function(){{var el=document.querySelector("{_js_esc(target)}");'
+            f'return el&&"value" in el?el.value:null}})()'
+        )
+        if final_value is None:
+            return {
+                "ok": False,
+                "error": f"element {target!r} has no .value after typing",
+                "method": method,
+            }
+        if final_value != value:
+            return {
+                "ok": False,
+                "error": (
+                    f"typing did not register: expected {value!r} "
+                    f"but element.value is {str(final_value)[:80]!r}"
+                ),
+                "method": method,
+                "final_value": final_value,
+            }
+        return {"ok": True, "method": method, "chars": len(value), "final_value": final_value}
 
     # ── Read text ──────────────────────────────────────────
 
