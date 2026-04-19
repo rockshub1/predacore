@@ -65,6 +65,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pyo3 compiles against a specific Python ABI. macos-latest ships
+      # Python 3.14 by default, but pyo3 0.23.x tops out at 3.13. Pin the
+      # interpreter so cargo test / cargo clippy compile against a
+      # supported version.
+      - name: Set up Python 3.13 (for PyO3)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
