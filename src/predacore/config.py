@@ -53,9 +53,12 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int = 32000  # raised 4096 → 32000 per "remove all limits" — Claude Opus extended output
     reasoning_effort: str = "medium"  # minimal | low | medium | high
-    fallback_providers: list[str] = field(
-        default_factory=lambda: ["gemini", "openrouter"]
-    )
+    # Explicit opt-in only. Leaving this empty means "primary only — if it
+    # fails, tell the user and stop." Silently rerouting to a provider the
+    # user didn't configure (and might not have credentials for) produces
+    # confusing errors like "No API key for provider X" when X isn't even
+    # the provider the user picked in setup.
+    fallback_providers: list[str] = field(default_factory=list)
     auto_fallback: bool = False  # OFF = ask user to switch on rate limit, no silent fallback
     # Adaptive throttle settings (prevents 429s during rapid tool loops)
     throttle_ramp_after: int = 3  # start throttling after N rapid calls
@@ -807,6 +810,9 @@ llm:
                         # | mistral | fireworks | nvidia | zhipu | ollama
   model: "{model}"      # auto-detect from provider if empty
   fallback_models: []   # optional ordered model fallbacks for the chosen provider
+  fallback_providers: []  # optional. Leave empty to only use the primary.
+                          # e.g. [gemini, openrouter] — rate limits on primary
+                          # will ask you to switch rather than silently reroute.
   temperature: 0.7
   reasoning_effort: medium
 

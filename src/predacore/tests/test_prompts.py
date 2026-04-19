@@ -4,11 +4,7 @@ prompt assembly, identity file loading, and regex patterns.
 """
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
-import pytest
-
+from predacore.identity.engine import _read_cached as _read_file_cached
 from predacore.prompts import (
     DIRECT_CAPABILITY_DENIAL_RE,
     DIRECT_TOOL_PREFIX_RE,
@@ -20,8 +16,6 @@ from predacore.prompts import (
     VERIFICATION_REQUEST_RE,
     PersonaDriftAssessment,
 )
-from predacore.identity.engine import _read_cached as _read_file_cached
-
 
 # ── PersonaDriftAssessment ─────────────────────────────────────────
 

@@ -22,7 +22,6 @@ import time
 import tty
 import uuid
 from pathlib import Path
-from typing import Any, Optional
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -1257,9 +1256,12 @@ async def _run_setup() -> None:
             ("gemini-2.5-flash-lite",  "fastest"),
         ],
         "gemini": [
-            ("gemini-2.5-flash",       "fast, cheap (default)"),
-            ("gemini-2.5-pro",         "highest quality"),
-            ("gemini-2.0-flash",       "previous gen, stable"),
+            ("gemini-flash-latest",    "newest Flash alias (default)"),
+            ("gemini-pro-latest",      "newest Pro alias, highest quality"),
+            ("gemini-3-pro-preview",   "Gemini 3 Pro (preview)"),
+            ("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview, thinking)"),
+            ("gemini-2.5-flash",       "Gemini 2.5 Flash (stable)"),
+            ("gemini-2.5-pro",         "Gemini 2.5 Pro (stable)"),
         ],
         "anthropic": [
             ("claude-sonnet-4-6",      "balanced speed/quality (default)"),
@@ -1926,19 +1928,35 @@ def _run_zero_args_flow() -> None:
         _run_bootstrap(force=False)
 
     # Step 2 — setup wizard if no config
-    if not Path(DEFAULT_CONFIG_FILE).exists():
+    config_existed_before_setup = Path(DEFAULT_CONFIG_FILE).exists()
+    if not config_existed_before_setup:
         console.print()
         console.print(
             "  [glass.text.dim]No config yet — let's pick an LLM provider.[/glass.text.dim]"
         )
         asyncio.run(_run_setup())
 
-    # Step 3 — make sure the daemon is up (so chat's thin client can connect)
+    # Step 3 — make sure the daemon is up (so chat's thin client can connect).
+    # If we *just* wrote a fresh config via setup and a stale daemon from a
+    # previous run is still alive, restart it so it loads the new provider
+    # instead of holding onto whatever was configured last time. The config
+    # watcher can hot-reload most keys, but racy startup orderings (daemon
+    # loaded config before setup wrote it) leave the in-memory state stale.
     from .config import load_config
     from .services.daemon import PIDManager
 
     cfg = load_config(None)
     pid_manager = PIDManager(str(Path(cfg.home_dir) / "predacore.pid"))
+    setup_just_ran = not config_existed_before_setup
+    if setup_just_ran and pid_manager.is_running():
+        console.print()
+        console.print(
+            "  [glass.text.dim]Restarting daemon so it picks up the new provider...[/glass.text.dim]"
+        )
+        _run_stop(config_path=None)
+        # Give signals a moment to settle before restarting
+        time.sleep(1.0)
+
     if not pid_manager.is_running():
         console.print()
         console.print(
@@ -1965,7 +1983,7 @@ def _run_zero_args_flow() -> None:
 
 def _run_bootstrap(force: bool = False) -> None:
     """Render the bootstrap report with the glass table UX."""
-    from .bootstrap import run_bootstrap, is_bootstrapped
+    from .bootstrap import is_bootstrapped, run_bootstrap
 
     console.print()
     console.print(Align.center(_gradient_text(
@@ -2130,7 +2148,7 @@ def _run_doctor(
     # ── Playwright ──
     console.print("\n[bold]Browser Automation[/bold]")
     try:
-        import playwright
+        import playwright  # noqa: F401  # presence check only
 
         ok("Playwright installed")
     except ImportError:
@@ -2206,7 +2224,9 @@ def _run_doctor(
         ok("UnifiedMemoryStore available")
     except ImportError:
         try:
-            from predacore._vendor.common.memory_service import MemoryService  # type: ignore
+            from predacore._vendor.common.memory_service import (
+                MemoryService,  # type: ignore
+            )
             ok("MemoryService (legacy) available")
         except ImportError:
             warn("Memory system not importable")
@@ -2249,7 +2269,7 @@ def _run_doctor(
 def _run_start(args) -> None:
     """Start PredaCore in foreground or daemon mode."""
     from .config import load_config
-    from .services.daemon import PredaCoreDaemon, PIDManager
+    from .services.daemon import PIDManager, PredaCoreDaemon
 
     profile = "public_beast" if args.public else args.profile
     config = load_config(args.config, profile_override=profile)

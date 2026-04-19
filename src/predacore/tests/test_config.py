@@ -7,7 +7,6 @@ dataclass construction, helper functions, and edge cases.
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,12 +20,12 @@ from predacore.config import (
     AgentLLMConfig,
     ChannelConfig,
     DaemonConfig,
-    PredaCoreConfig,
     LaunchProfileConfig,
     LLMConfig,
     MemoryConfig,
     OpenClawBridgeConfig,
     OperatorsConfig,
+    PredaCoreConfig,
     SecurityConfig,
     _deep_merge,
     _dict_to_config,
@@ -42,7 +41,6 @@ from predacore.config import (
     load_config,
     save_default_config,
 )
-
 
 # ── Helper Functions ───────────────────────────────────────────────
 
@@ -205,7 +203,10 @@ class TestDataclassDefaults:
         assert cfg.auto_fallback is False
         assert cfg.max_retries == 3
         assert cfg.retry_jitter is True
-        assert cfg.fallback_providers == ["gemini", "openrouter"]
+        # Default is now empty — fallback providers are explicit opt-in. A
+        # stale default like ["gemini", "openrouter"] leaked into error
+        # messages ("/model openrouter") for users who never configured those.
+        assert cfg.fallback_providers == []
 
     def test_agent_llm_config_defaults(self):
         cfg = AgentLLMConfig()
@@ -214,7 +215,10 @@ class TestDataclassDefaults:
 
     def test_channel_config_defaults(self):
         cfg = ChannelConfig()
-        assert cfg.enabled == ["cli"]
+        # Default channel is now "webchat" — the daemon hosts a WebSocket
+        # server at port 3000 that both the browser UI and `predacore chat`
+        # connect to. "cli" was the pre-gateway legacy channel.
+        assert cfg.enabled == ["webchat"]
         assert cfg.telegram_token == ""
         assert cfg.discord_token == ""
         assert cfg.whatsapp_token == ""

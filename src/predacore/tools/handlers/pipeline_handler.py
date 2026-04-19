@@ -20,8 +20,8 @@ from ._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
-    missing_param,
     invalid_param,
+    missing_param,
 )
 
 # ── Workflow Library ──────────────────────────────────────────────
@@ -89,7 +89,7 @@ def _load_workflow(name: str) -> dict[str, Any]:
             f"Workflow '{name}' not found",
             kind=ToolErrorKind.NOT_FOUND,
             tool_name="tool_pipeline",
-            suggestion=f"Use action='list' to see available workflows",
+            suggestion="Use action='list' to see available workflows",
         )
     return json.loads(path.read_text())
 

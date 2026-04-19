@@ -23,10 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from predacore.llm_providers import _anthropic_wire as wire
-
 
 # ---------------------------------------------------------------------------
 # extract_system_text

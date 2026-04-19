@@ -27,7 +27,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 
 def get_trace_id() -> str:
@@ -35,7 +35,9 @@ def get_trace_id() -> str:
     try:
         from predacore._vendor.common.metrics import get_trace_id as _get
     except Exception:  # pragma: no cover
-        from predacore._vendor.common.metrics import get_trace_id as _get  # type: ignore
+        from predacore._vendor.common.metrics import (
+            get_trace_id as _get,  # type: ignore
+        )
     return _get()
 
 

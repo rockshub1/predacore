@@ -27,12 +27,10 @@ from enum import Enum
 from typing import Any
 
 from .skill_genome import (
-    CapabilityTier,
     SENSITIVE_PATHS,
-    SkillGenome,
-    SkillStep,
     TOOL_TIER_MAP,
-    TrustLevel,
+    CapabilityTier,
+    SkillGenome,
 )
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ Moved from src/daf/task_store.py into dynamic_agent_fabric/ as the canonical loc
 """
 import asyncio
 import os
-from typing import Any, Optional
+from typing import Any
 
 try:
     import redis.asyncio as redis

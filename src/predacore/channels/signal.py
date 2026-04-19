@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -98,8 +98,8 @@ class SignalAdapter(ChannelAdapter):
             os.getenv("SIGNAL_NUMBER", "")
             or cfg.get("number", "")
         )
-        self._client: Optional[httpx.AsyncClient] = None
-        self._recv_task: Optional[asyncio.Task] = None
+        self._client: httpx.AsyncClient | None = None
+        self._recv_task: asyncio.Task | None = None
         self._running = False
 
     async def start(self) -> None:

@@ -5,7 +5,7 @@ Includes in-memory and a simple disk-backed JSONL persistence layer.
 import json
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 # Assuming Pydantic models are used internally for storage consistency

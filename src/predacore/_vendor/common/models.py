@@ -3,7 +3,7 @@ Common data models used across PredaCore components.
 Leverages Pydantic for validation and type hints.
 """
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field

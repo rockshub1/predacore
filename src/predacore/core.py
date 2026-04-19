@@ -19,18 +19,18 @@ import re
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from .config import PredaCoreConfig
 from .agents.meta_cognition import (
     evaluate_response as _evaluate_response,
 )
 from .agents.meta_cognition import (
     should_ask_for_help as _should_ask_for_help,
 )
+from .config import PredaCoreConfig
 from .services.outcome_store import OutcomeStore, TaskOutcome, detect_feedback
-from .sessions import Session
 from .services.transcripts import TranscriptWriter
+from .sessions import Session
 
 logger = logging.getLogger(__name__)
 
@@ -1562,22 +1562,26 @@ class PredaCoreCore:
             independent, dependent = _classify_tool_dependencies(tool_calls)
             _tool_timeout = self._tool_timeout
 
-            async def _run_single_tool(tc):
-                """Execute a single tool call and return (tc, result, elapsed_ms)."""
+            async def _run_single_tool(tc, _timeout: float = _tool_timeout):
+                """Execute a single tool call and return (tc, result, elapsed_ms).
+
+                ``_timeout`` is captured via default-arg so the closure is
+                unambiguously bound to the current value (silences B023).
+                """
                 t_name = tc["name"]
                 t_args = tc["arguments"]
                 t0 = time.time()
                 try:
                     res = await asyncio.wait_for(
                         self.tools.execute(t_name, t_args, confirm_fn=confirm_fn),
-                        timeout=_tool_timeout,
+                        timeout=_timeout,
                     )
                 except asyncio.TimeoutError:
                     elapsed = (time.time() - t0) * 1000
-                    logger.error("Tool %s timed out after %ds", t_name, _tool_timeout)
+                    logger.error("Tool %s timed out after %ds", t_name, _timeout)
                     return (
                         tc,
-                        f"[Error: Tool '{t_name}' timed out after {_tool_timeout}s]",
+                        f"[Error: Tool '{t_name}' timed out after {_timeout}s]",
                         elapsed,
                     )
                 elapsed = (time.time() - t0) * 1000

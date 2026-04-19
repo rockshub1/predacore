@@ -131,7 +131,7 @@ class IdentityService:
                 "New user %s created for %s:%s", canonical_id, channel, channel_user_id[:20]
             )
             return canonical_id
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
             # Race: another thread inserted first — fetch their result
             conn.rollback()
             row = conn.execute(
@@ -142,7 +142,7 @@ class IdentityService:
                 return row["canonical_id"]
             raise RuntimeError(
                 f"IntegrityError during resolve but no existing link for {channel}:{channel_user_id}"
-            )
+            ) from exc
 
     def link(
         self,

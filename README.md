@@ -87,11 +87,13 @@ Not an LLM wrapper. A digital operator wired into your machine through a hardene
 ## Quickstart
 
 ```bash
-pip install predacore[full]
+pipx install "predacore[full]"
 predacore
 ```
 
 One command. First message in under two minutes. Rust ships as pre-built wheels — no toolchain required.
+
+> **Don't have pipx?** `brew install pipx` (macOS) · `python -m pip install --user pipx` (Linux/Windows). Already inside a venv or using Conda? Plain `pip install "predacore[full]"` works too.
 
 **Zero-config. The agent configures itself mid-chat:**
 

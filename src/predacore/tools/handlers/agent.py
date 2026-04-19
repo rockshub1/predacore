@@ -233,7 +233,10 @@ def _default_dynamic_agent_spec_inputs(
     try:
         from predacore.agents.engine import AGENT_TYPES, CapabilityRouter
     except ImportError:
-        from src.predacore.agents.engine import AGENT_TYPES, CapabilityRouter  # type: ignore
+        from src.predacore.agents.engine import (  # type: ignore
+            AGENT_TYPES,
+            CapabilityRouter,
+        )
 
     prompt_lower = prompt.lower()
     defaults = [
@@ -333,7 +336,10 @@ async def _generate_dynamic_agent_specs(
     try:
         from predacore.agents.engine import AGENT_TYPES, create_dynamic_agent_spec
     except ImportError:
-        from src.predacore.agents.engine import AGENT_TYPES, create_dynamic_agent_spec  # type: ignore
+        from src.predacore.agents.engine import (  # type: ignore
+            AGENT_TYPES,
+            create_dynamic_agent_spec,
+        )
 
     defaults_raw = _default_dynamic_agent_spec_inputs(
         roles,
@@ -610,8 +616,14 @@ async def _multi_agent_inner(args: dict[str, Any], ctx: ToolContext) -> str:
         from predacore.agents.collaboration import AgentSpec, AgentTeam, TaskPayload
         from predacore.agents.engine import compile_dynamic_agent_prompt
     except ImportError:
-        from src.predacore.agents.collaboration import AgentSpec, AgentTeam, TaskPayload  # type: ignore
-        from src.predacore.agents.engine import compile_dynamic_agent_prompt  # type: ignore
+        from src.predacore.agents.collaboration import (  # type: ignore
+            AgentSpec,
+            AgentTeam,
+            TaskPayload,
+        )
+        from src.predacore.agents.engine import (
+            compile_dynamic_agent_prompt,  # type: ignore
+        )
 
     pattern_name = str(args.get("pattern", "fan_out")).lower()
     num_agents = min(int(args.get("num_agents") or 3), 5)

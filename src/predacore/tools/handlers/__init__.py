@@ -35,49 +35,15 @@ from typing import Any
 from ..enums import ToolName, ToolStatus
 
 # ── Re-export ToolContext and ToolError (the primary types used by executor/dispatcher) ──
-from ._context import ToolContext, ToolError, ToolErrorKind
-from ._context import missing_param, invalid_param, subsystem_unavailable, resource_not_found, blocked
-
-# ── File operations ──
-from .file_ops import (
-    handle_list_directory,
-    handle_read_file,
-    handle_write_file,
-)
-
-# ── Shell / code execution ──
-from .shell import (
-    handle_execute_code,
-    handle_python_exec,
-    handle_run_command,
-)
-
-# ── Web ──
-from .web import (
-    handle_deep_search,
-    handle_semantic_search,
-    handle_web_scrape,
-    handle_web_search,
-)
-
-# ── Memory ──
-from .memory import (
-    handle_memory_recall,
-    handle_memory_store,
-)
-
-# ── Voice ──
-from .voice import (
-    handle_speak,
-    handle_voice_note,
-)
-
-# ── Desktop / mobile / browser ──
-from .desktop import (
-    handle_android_control,
-    handle_browser_control,
-    handle_desktop_control,
-    handle_screen_vision,
+from ._context import (
+    ToolContext,
+    ToolError,
+    ToolErrorKind,
+    blocked,
+    invalid_param,
+    missing_param,
+    resource_not_found,
+    subsystem_unavailable,
 )
 
 # ── Agent / planning ──
@@ -87,11 +53,54 @@ from .agent import (
     handle_strategic_plan,
 )
 
+# ── REST API registry ──
+from .apis import (
+    handle_api_add,
+    handle_api_call,
+    handle_api_list,
+    handle_api_remove,
+)
+
+# ── Channel management + secrets ──
+from .channels import (
+    handle_channel_configure,
+    handle_channel_install,
+    handle_secret_list,
+    handle_secret_set,
+)
+
+# ── Collective intelligence ──
+from .collective_intelligence import (
+    handle_collective_intelligence_status,
+    handle_collective_intelligence_sync,
+    handle_skill_endorse,
+    handle_skill_evolve,
+    handle_skill_scan,
+)
+
 # ── Creative ──
 from .creative import (
     handle_diagram,
     handle_image_gen,
     handle_pdf_reader,
+)
+
+# ── Cron ──
+from .cron import handle_cron_task
+
+# ── Desktop / mobile / browser ──
+from .desktop import (
+    handle_android_control,
+    handle_browser_control,
+    handle_desktop_control,
+    handle_screen_vision,
+)
+
+# ── File operations ──
+from .file_ops import (
+    handle_list_directory,
+    handle_read_file,
+    handle_write_file,
 )
 
 # ── Git ──
@@ -103,13 +112,6 @@ from .git import (
     handle_git_semantic_search,
 )
 
-# ── Marketplace ──
-from .marketplace import (
-    handle_marketplace_install_skill,
-    handle_marketplace_invoke_skill,
-    handle_marketplace_list_skills,
-)
-
 # ── Identity ──
 from .identity import (
     handle_identity_read,
@@ -117,49 +119,55 @@ from .identity import (
     handle_journal_append,
 )
 
-# ── Channel management + secrets ──
-from .channels import (
-    handle_channel_configure,
-    handle_channel_install,
-    handle_secret_set,
-    handle_secret_list,
+# ── Marketplace ──
+from .marketplace import (
+    handle_marketplace_install_skill,
+    handle_marketplace_invoke_skill,
+    handle_marketplace_list_skills,
 )
 
 # ── MCP (client) ──
 from .mcp import (
-    handle_mcp_list,
     handle_mcp_add,
+    handle_mcp_list,
     handle_mcp_remove,
     handle_mcp_restart,
     make_mcp_tool_handler,
     make_mcp_tool_schema,
 )
 
-# ── REST API registry ──
-from .apis import (
-    handle_api_add,
-    handle_api_call,
-    handle_api_list,
-    handle_api_remove,
+# ── Memory ──
+from .memory import (
+    handle_memory_recall,
+    handle_memory_store,
 )
-
-# ── Cron ──
-from .cron import handle_cron_task
 
 # ── Pipeline ──
 from .pipeline_handler import handle_tool_pipeline
 
-# ── Collective intelligence ──
-from .collective_intelligence import (
-    handle_collective_intelligence_status,
-    handle_collective_intelligence_sync,
-    handle_skill_evolve,
-    handle_skill_scan,
-    handle_skill_endorse,
+# ── Shell / code execution ──
+from .shell import (
+    handle_execute_code,
+    handle_python_exec,
+    handle_run_command,
 )
 
 # ── Stats / Debug ──
 from .stats import handle_tool_stats
+
+# ── Voice ──
+from .voice import (
+    handle_speak,
+    handle_voice_note,
+)
+
+# ── Web ──
+from .web import (
+    handle_deep_search,
+    handle_semantic_search,
+    handle_web_scrape,
+    handle_web_search,
+)
 
 # ---------------------------------------------------------------------------
 # Unified handler map — ToolName enum keys → async handler functions

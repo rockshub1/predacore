@@ -15,15 +15,16 @@ import logging as _logging
 import math
 import os
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID, uuid4
+
+from google.protobuf.struct_pb2 import Struct
+from prometheus_client import Counter, Histogram
 
 from predacore._vendor.common.llm import default_params, get_default_llm_client
 from predacore._vendor.common.logging_utils import log_json
 from predacore._vendor.common.models import Plan, PlanStep, StatusEnum
 from predacore._vendor.common.protos import egm_pb2, egm_pb2_grpc
-from google.protobuf.struct_pb2 import Struct
-from prometheus_client import Counter, Histogram
 
 from .plan_cache import PlanMotifStore
 from .planner import HierarchicalStrategicPlannerV1

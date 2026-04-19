@@ -8,29 +8,27 @@ from __future__ import annotations
 
 import asyncio
 import json
-import struct
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from predacore.memory.consolidator import MemoryConsolidator
+from predacore.memory.retriever import MemoryRetriever, _to_unix_timestamp, _truncate
 from predacore.memory.store import (
     UnifiedMemoryStore,
-    _NumpyVectorIndex,
     _coerce_metadata_dict,
+    _memory_matches_scope,
     _now_iso,
+    _NumpyVectorIndex,
     _pack_embedding,
     _prepare_memory_metadata,
     _unpack_embedding,
     _uuid,
     future_iso_from_ttl,
     normalize_memory_scope,
-    _memory_matches_scope,
 )
-from predacore.memory.retriever import MemoryRetriever, _truncate, _to_unix_timestamp
-from predacore.memory.consolidator import MemoryConsolidator
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 

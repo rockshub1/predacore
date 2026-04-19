@@ -25,10 +25,11 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from predacore.services.rate_limiter import InMemoryBackend as _RateLimitBackend
 from predacore.auth.security import redact_secrets as _redact
 from predacore.auth.security import sanitize_tool_output as _sanitize_output
-from .enums import ToolStatus, WRITE_TOOLS
+from predacore.services.rate_limiter import InMemoryBackend as _RateLimitBackend
+
+from .enums import WRITE_TOOLS, ToolStatus
 from .handlers import HANDLER_MAP as _HANDLER_MAP
 from .handlers import ToolContext as _ToolContext
 from .handlers._context import ToolError as _ToolError

@@ -24,27 +24,27 @@ _logger = logging.getLogger(__name__)
 
 # ── Base classes and enums (always available) ──
 from .base import (
-    BaseOperator,
-    OperatorPlatform,
     ActionCategory,
-    OperatorError,
+    BaseOperator,
     MacroAbortToken,
+    OperatorError,
+    OperatorPlatform,
 )
 from .enums import (
-    DesktopAction,
-    AndroidAction,
-    VisionAction,
-    ScreenshotQuality,
-    SMART_ACTIONS,
-    NATIVE_ONLY_ACTIONS,
     NATIVE_CAPABLE_ACTIONS,
+    NATIVE_ONLY_ACTIONS,
+    SMART_ACTIONS,
+    AndroidAction,
+    DesktopAction,
+    ScreenshotQuality,
+    VisionAction,
 )
 
 # ── Concrete operators (may fail on non-macOS / missing deps) ──
 # Import errors are logged so missing deps surface in debug, not silent.
 
 try:
-    from .desktop import MacDesktopOperator, AsyncBridge, DesktopControlError
+    from .desktop import AsyncBridge, DesktopControlError, MacDesktopOperator
 except ImportError as _exc:
     _logger.debug("MacDesktopOperator unavailable: %s", _exc)
     MacDesktopOperator = None  # type: ignore[misc,assignment]
@@ -52,7 +52,7 @@ except ImportError as _exc:
     DesktopControlError = None  # type: ignore[misc,assignment]
 
 try:
-    from .android import AndroidOperator, ADBError, AndroidElement
+    from .android import ADBError, AndroidElement, AndroidOperator
 except ImportError as _exc:
     _logger.debug("AndroidOperator unavailable: %s", _exc)
     AndroidOperator = None  # type: ignore[misc,assignment]
@@ -73,7 +73,7 @@ except ImportError as _exc:
     OCRResult = None  # type: ignore[misc,assignment]
 
 try:
-    from .mock import MockDesktopOperator, MockAndroidOperator
+    from .mock import MockAndroidOperator, MockDesktopOperator
 except ImportError as _exc:
     _logger.debug("Mock operators unavailable: %s", _exc)
     MockDesktopOperator = None  # type: ignore[misc,assignment]

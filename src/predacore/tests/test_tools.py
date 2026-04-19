@@ -8,97 +8,86 @@ Target: 80+ tests covering all core infrastructure.
 """
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
-import re
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-# ── Imports under test ─────────────────────────────────────────────────
+from predacore.tools.dispatcher import (
+    _FORBIDDEN_KEYWORDS,
+    _TOOL_ALIAS_MAP,
+    AdaptiveTimeoutTracker,
+    _check_ethical_compliance,
+)
 
+# ── Imports under test ─────────────────────────────────────────────────
 from predacore.tools.enums import (
+    READ_ONLY_TOOLS,
+    WRITE_TOOLS,
     ToolName,
     ToolStatus,
-    WRITE_TOOLS,
-    READ_ONLY_TOOLS,
-    DesktopAction,
-    AndroidAction,
-    VisionAction,
+)
+from predacore.tools.handlers._context import (
+    _MAX_DELEGATION_DEPTH,
+    SENSITIVE_READ_PATTERNS,
+    SENSITIVE_WRITE_FILES,
+    SENSITIVE_WRITE_PATHS,
+    ToolContext,
+    ToolError,
+    ToolErrorKind,
+    blocked,
+    invalid_param,
+    missing_param,
+    resource_not_found,
+    subsystem_unavailable,
+    web_cache_get,
+    web_cache_put,
+)
+from predacore.tools.health import HealthDashboard
+from predacore.tools.middleware import (
+    AuditTrailMiddleware,
+    InputSanitizerMiddleware,
+    LoggingMiddleware,
+    MetricsMiddleware,
+    Middleware,
+    MiddlewareContext,
+    MiddlewareStack,
+    OutputTruncationMiddleware,
+    PerToolRateLimitMiddleware,
+    _percentile,
+    _truncate,
+    create_default_stack,
+)
+from predacore.tools.pipeline import (
+    _MAX_PIPELINE_STEPS,
+    _MAX_PIPELINE_TIMEOUT,
+    PipelineResult,
+    PipelineStep,
+    ToolPipeline,
 )
 from predacore.tools.registry import (
-    ToolDefinition,
-    ToolRegistry,
     BUILTIN_TOOLS_RAW,
     TRUST_POLICIES,
+    ToolDefinition,
+    ToolRegistry,
     build_builtin_registry,
     build_full_registry,
 )
 from predacore.tools.resilience import (
     CircuitState,
-    ToolCircuitBreaker,
-    ToolResultCache,
     ExecutionHistory,
     ExecutionRecord,
+    ToolCircuitBreaker,
+    ToolResultCache,
 )
 from predacore.tools.trust_policy import (
-    TrustPolicyEvaluator,
+    _CRITICAL_PATTERNS,
+    _RISK_MAP,
     ApprovalContext,
     ApprovalHistory,
-    _RISK_MAP,
-    _CRITICAL_PATTERNS,
+    TrustPolicyEvaluator,
 )
-from predacore.tools.middleware import (
-    Middleware,
-    MiddlewareContext,
-    MiddlewareStack,
-    LoggingMiddleware,
-    MetricsMiddleware,
-    AuditTrailMiddleware,
-    InputSanitizerMiddleware,
-    OutputTruncationMiddleware,
-    PerToolRateLimitMiddleware,
-    create_default_stack,
-    _truncate,
-    _percentile,
-)
-from predacore.tools.dispatcher import (
-    AdaptiveTimeoutTracker,
-    _check_ethical_compliance,
-    _FORBIDDEN_KEYWORDS,
-    _TOOL_ALIAS_MAP,
-)
-from predacore.tools.pipeline import (
-    PipelineStep,
-    PipelineResult,
-    ToolPipeline,
-    _MAX_PIPELINE_STEPS,
-    _MAX_PIPELINE_TIMEOUT,
-)
-from predacore.tools.health import HealthDashboard
-from predacore.tools.handlers._context import (
-    ToolError,
-    ToolErrorKind,
-    ToolContext,
-    missing_param,
-    invalid_param,
-    subsystem_unavailable,
-    resource_not_found,
-    blocked,
-    web_cache_get,
-    web_cache_put,
-    SENSITIVE_READ_PATTERNS,
-    SENSITIVE_WRITE_PATHS,
-    SENSITIVE_WRITE_FILES,
-    _DELEGATION_DEPTH,
-    _MAX_DELEGATION_DEPTH,
-)
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. ToolName Enum

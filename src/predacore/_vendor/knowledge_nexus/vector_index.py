@@ -2,7 +2,6 @@
 Abstract Vector Index for Knowledge Nexus semantic search.
 """
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class AbstractVectorIndex(ABC):

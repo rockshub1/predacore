@@ -11,14 +11,13 @@ from typing import Any
 
 from ._context import (
     SENSITIVE_READ_PATTERNS,
-    SENSITIVE_WRITE_FILES,
     SENSITIVE_WRITE_PATHS,
     ToolContext,
     ToolError,
     ToolErrorKind,
-    missing_param,
-    invalid_param,
     blocked,
+    invalid_param,
+    missing_param,
     resource_not_found,
 )
 
@@ -162,13 +161,13 @@ async def handle_pdf_reader(args: dict[str, Any], ctx: ToolContext) -> str:
     except ImportError:
         try:
             import fitz as pymupdf  # type: ignore
-        except ImportError:
+        except ImportError as exc:
             raise ToolError(
                 "PDF reader requires PyMuPDF: pip install pymupdf",
                 kind=ToolErrorKind.UNAVAILABLE,
                 tool_name="pdf_reader",
                 suggestion="pip install pymupdf",
-            )
+            ) from exc
 
     try:
         doc = pymupdf.open(str(path))
@@ -268,12 +267,12 @@ async def handle_diagram(args: dict[str, Any], ctx: ToolContext) -> str:
             f"[Diagram renderer (mmdc) not found — install: npm i -g @mermaid-js/mermaid-cli]\n\n"
             f"Mermaid code (render manually):\n```mermaid\n{code}\n```"
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         raise ToolError(
             "Diagram rendering timed out after 30s",
             kind=ToolErrorKind.TIMEOUT,
             tool_name="diagram",
-        )
+        ) from exc
     except ToolError:
         raise
     except (OSError, RuntimeError) as e:

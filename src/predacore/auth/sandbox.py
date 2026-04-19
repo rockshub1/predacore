@@ -33,11 +33,12 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 try:
-    import docker
     from docker.errors import DockerException
+
+    import docker
 except ImportError:  # pragma: no cover - optional dependency
     docker = None  # type: ignore
     DockerException = Exception  # type: ignore
@@ -766,8 +767,8 @@ def _get_language_config(language: str) -> dict[str, Any] | None:
         "ruby": lambda p: ["ruby", p],
         "go": lambda p: ["go", "run", p],
         "rust": lambda p: ["sh", "-c", f'rustc "{p}" -o /workspace/out && /workspace/out'],
-        "java": lambda p: ["sh", "-c", f'cd /tmp && javac code.java && java Main'],
-        "kotlin": lambda p: ["sh", "-c", f'cd /tmp && kotlinc code.kt -include-runtime -d main.jar && java -jar main.jar'],
+        "java": lambda p: ["sh", "-c", 'cd /tmp && javac code.java && java Main'],
+        "kotlin": lambda p: ["sh", "-c", 'cd /tmp && kotlinc code.kt -include-runtime -d main.jar && java -jar main.jar'],
         "c": lambda p: ["sh", "-c", f'gcc "{p}" -o /workspace/out && /workspace/out'],
         "cpp": lambda p: ["sh", "-c", f'g++ "{p}" -o /workspace/out && /workspace/out'],
         "php": lambda p: ["php", p],

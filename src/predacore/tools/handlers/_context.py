@@ -20,12 +20,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from predacore.config import PredaCoreConfig
-    from predacore.memory import UnifiedMemoryStore
-    from predacore._vendor.common.memory_service import MemoryService
+    pass
 
 logger = logging.getLogger(__name__)
 

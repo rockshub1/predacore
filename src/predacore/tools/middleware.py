@@ -45,10 +45,10 @@ import logging
 import threading
 import time
 import uuid
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class MiddlewareStack:
     def __init__(self) -> None:
         self._middlewares: list[Middleware] = []
 
-    def add(self, mw: Middleware) -> "MiddlewareStack":
+    def add(self, mw: Middleware) -> MiddlewareStack:
         """Add a middleware to the stack. Returns self for chaining."""
         self._middlewares.append(mw)
         self._middlewares.sort(key=lambda m: m.order)

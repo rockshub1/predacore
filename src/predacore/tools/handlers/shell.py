@@ -13,10 +13,9 @@ from ._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
-    missing_param,
-    invalid_param,
     blocked,
-    subsystem_unavailable,
+    invalid_param,
+    missing_param,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,7 +133,7 @@ async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout_seconds
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 try:
                     proc.kill()
                     await proc.wait()
@@ -144,7 +143,7 @@ async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
                     f"Command timed out after {int(timeout_seconds)} seconds",
                     kind=ToolErrorKind.TIMEOUT,
                     tool_name="run_command",
-                )
+                ) from exc
 
         if stdout and len(stdout) > _MAX_OUTPUT_BYTES:
             stdout = stdout[:_MAX_OUTPUT_BYTES] + b"\n[output truncated at byte limit]"
@@ -163,12 +162,12 @@ async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
         return result or "[Command completed with no output]"
     except ToolError:
         raise
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         raise ToolError(
             f"Command timed out after {int(timeout_seconds or default_timeout)} seconds",
             kind=ToolErrorKind.TIMEOUT,
             tool_name="run_command",
-        )
+        ) from exc
     except (OSError, subprocess.SubprocessError) as e:
         raise ToolError(
             f"Command error: {e}",
@@ -251,7 +250,7 @@ async def handle_python_exec(args: dict[str, Any], ctx: ToolContext) -> str:
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             try:
                 proc.kill()
                 await proc.wait()
@@ -261,7 +260,7 @@ async def handle_python_exec(args: dict[str, Any], ctx: ToolContext) -> str:
                 f"Python execution timed out after {timeout} seconds",
                 kind=ToolErrorKind.TIMEOUT,
                 tool_name="python_exec",
-            )
+            ) from exc
         result = ""
         if stdout:
             out_text = stdout.decode(errors="replace")

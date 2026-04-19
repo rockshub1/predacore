@@ -37,7 +37,6 @@ Usage (programmatic):
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -47,7 +46,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .dispatcher import ToolDispatcher
@@ -79,7 +78,7 @@ class PipelineStep:
     approval: str = ""                           # "required" = pause before this step
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "PipelineStep":
+    def from_dict(cls, d: dict[str, Any]) -> PipelineStep:
         """Create a PipelineStep from a dictionary specification."""
         return cls(
             tool=str(d.get("tool", "")).strip(),
@@ -332,7 +331,7 @@ class ToolPipeline:
       7. Records full execution trace
     """
 
-    def __init__(self, dispatcher: "ToolDispatcher"):
+    def __init__(self, dispatcher: ToolDispatcher):
         self._dispatcher = dispatcher
 
     async def execute(

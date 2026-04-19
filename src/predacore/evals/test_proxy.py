@@ -1,6 +1,7 @@
 import asyncio
+
 import httpx
-import json
+
 
 async def test():
     proxy_url = "http://localhost:8080"
@@ -14,7 +15,7 @@ async def test():
         "Content-Type": "application/json",
         "x-api-key": "dummy"
     }
-    
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(endpoint, json=request_body, headers=headers)

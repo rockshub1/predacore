@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from ..config import PredaCoreConfig
 from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage

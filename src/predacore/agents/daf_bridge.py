@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -181,8 +181,9 @@ class DAFBridge:
 
         try:
             import grpc
-            from predacore._vendor.common.protos import daf_pb2, daf_pb2_grpc, wil_pb2
             from google.protobuf.struct_pb2 import Struct
+
+            from predacore._vendor.common.protos import daf_pb2, daf_pb2_grpc, wil_pb2
         except ImportError as e:
             logger.warning("DAF bridge: missing deps — %s", e)
             return [DAFTaskResult(

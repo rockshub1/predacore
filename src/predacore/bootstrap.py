@@ -16,16 +16,15 @@ the PredaCore CLI UX. No arguments required.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import platform
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +114,7 @@ def _check_rust_kernel() -> _StepResult:
     """Verify ``predacore_core`` imports and reports a sensible embedding dim."""
     try:
         import predacore_core  # type: ignore[import-not-found]
-    except ImportError as exc:
+    except ImportError:
         return _StepResult(
             name="Rust kernel (predacore_core)",
             ok=False,

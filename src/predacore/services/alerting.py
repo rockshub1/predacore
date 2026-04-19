@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen

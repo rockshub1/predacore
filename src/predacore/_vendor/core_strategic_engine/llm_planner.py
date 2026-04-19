@@ -4,7 +4,7 @@ Uses a provider-agnostic LLM client (OpenAI/OpenRouter) via src.common.llm.
 """
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from predacore._vendor.common.llm import default_params, get_default_llm_client

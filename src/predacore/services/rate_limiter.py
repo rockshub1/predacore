@@ -18,7 +18,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger("predacore.services.rate_limiter")
 

@@ -31,7 +31,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -1191,11 +1191,11 @@ def _has_input_element(snapshot: dict[str, Any]) -> bool:
     return False
 
 
-_SYNC_BRIDGE_POOL: "concurrent.futures.ThreadPoolExecutor | None" = None
+_SYNC_BRIDGE_POOL: concurrent.futures.ThreadPoolExecutor | None = None
 _SYNC_BRIDGE_LOCK = threading.Lock()
 
 
-def _get_sync_bridge_pool() -> "concurrent.futures.ThreadPoolExecutor":
+def _get_sync_bridge_pool() -> concurrent.futures.ThreadPoolExecutor:
     """Lazy singleton thread pool for sync→async bridging.
 
     A persistent worker thread is dramatically cheaper than spinning a

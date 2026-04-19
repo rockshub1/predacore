@@ -35,13 +35,13 @@ async def handle_desktop_control(args: dict[str, Any], ctx: ToolContext) -> str:
         )
         out = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         return out[:50000] if len(out) > 50000 else out
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         raise ToolError(
             f"Desktop control timed out after {_DESKTOP_TIMEOUT}s — action '{action}' took too long",
             kind=ToolErrorKind.TIMEOUT,
             tool_name="desktop_control",
             suggestion="Try a simpler action or increase timeout",
-        )
+        ) from exc
     except ToolError:
         raise  # Re-raise our own errors
     except (RuntimeError, OSError, ValueError) as exc:
@@ -222,7 +222,7 @@ async def handle_android_control(args: dict[str, Any], ctx: ToolContext) -> str:
     if not action:
         raise missing_param("action", tool="android_control")
 
-    from predacore.operators.android import AndroidOperator, ADBError
+    from predacore.operators.android import ADBError, AndroidOperator
 
     serial = str(args.get("device_serial", "")).strip() or None
     cache_key = f"_android_operator_{serial or 'default'}"
@@ -271,7 +271,7 @@ async def handle_browser_control(args: dict[str, Any], ctx: ToolContext) -> str:
     try:
         from predacore.operators.browser_bridge import BrowserBridge
     except ImportError as e:
-        raise subsystem_unavailable(f"Browser Bridge: {e}")
+        raise subsystem_unavailable(f"Browser Bridge: {e}") from e
 
     # Auto-connect on first use (Chrome only — Safari support is disabled)
     if _browser_bridge is None or not _browser_bridge.connected:

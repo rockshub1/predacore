@@ -20,14 +20,14 @@ import logging
 import os
 import shutil
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import httpx
 
-from ..config import PredaCoreConfig
 from predacore.auth.sandbox import SessionSandboxPool
+
+from ..config import PredaCoreConfig
 from .dispatcher import ToolDispatcher
 from .handlers import ToolContext as _ToolContext
 from .marketplace import MarketplaceManager
@@ -255,10 +255,12 @@ class ToolExecutor:
         max_attempts: int = 3,
         base_delay: float = 0.5,
         **kwargs: Any,
-    ) -> "httpx.Response":
+    ) -> httpx.Response:
         """HTTP request with exponential backoff retry on transient errors."""
         from random import random
+
         import httpx
+
         from predacore.auth.security import validate_url_ssrf
 
         validate_url_ssrf(url)  # raises ValueError if unsafe

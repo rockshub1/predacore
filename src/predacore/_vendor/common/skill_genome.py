@@ -24,7 +24,7 @@ import pathlib
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import IntEnum, Enum
+from enum import Enum, IntEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)

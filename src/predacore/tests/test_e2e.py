@@ -18,39 +18,30 @@ Only the LLM provider is mocked. Everything else runs real:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import tempfile
-import time
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from uuid import uuid4
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from predacore.config import (
-    PredaCoreConfig,
-    LLMConfig,
-    SecurityConfig,
-    LaunchProfileConfig,
     ChannelConfig,
     DaemonConfig,
+    LaunchProfileConfig,
+    LLMConfig,
     MemoryConfig,
+    PredaCoreConfig,
+    SecurityConfig,
     load_config,
     save_default_config,
-    PROFILE_PRESETS,
-    DEFAULT_PROFILE,
 )
-from predacore.sessions import Session, SessionStore, Message
 from predacore.gateway import (
     Gateway,
     IncomingMessage,
-    OutgoingMessage,
-    USER_RATE_LIMIT_PER_MINUTE,
 )
 from predacore.memory.store import UnifiedMemoryStore
+from predacore.sessions import Session, SessionStore
 
 logger = logging.getLogger(__name__)
 

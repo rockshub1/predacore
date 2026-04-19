@@ -27,21 +27,22 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from aiohttp import web
 
-from .alerting import Alert, AlertManager, AlertSeverity
 from ..config import PredaCoreConfig, load_config
+from .alerting import Alert, AlertManager, AlertSeverity
 
 try:
-    from predacore._vendor.ethical_governance_module.persistent_audit import PersistentAuditStore
+    from predacore._vendor.ethical_governance_module.persistent_audit import (
+        PersistentAuditStore,
+    )
 except ImportError:
     PersistentAuditStore = None  # type: ignore
-from .config_watcher import ConfigWatcher
 from ..core import PredaCoreCore, _get_system_prompt
 from ..gateway import Gateway
-from ..sessions import SessionStore
+from .config_watcher import ConfigWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,12 @@ class PIDManager:
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 0o644,
             )
-        except FileExistsError:
+        except FileExistsError as exc:
             # PID file already exists — check if the process is still alive
             if self.is_running():
                 raise FileExistsError(
                     f"Daemon already running (PID file {self.pid_path} exists and process is alive)"
-                )
+                ) from exc
             # Stale PID file — remove and retry
             self.cleanup()
             fd = os.open(
@@ -523,16 +524,55 @@ class PredaCoreDaemon:
                 new_cfg = load_config(str(Path(self.config.home_dir) / "config.yaml"))
                 old_model = self.config.llm.model
                 old_provider = self.config.llm.provider
+                old_api_base = self.config.llm.base_url
 
                 # Update system prompt
                 self._core._system_prompt = _get_system_prompt(new_cfg)
 
-                # Hot-swap model on the LLM provider (no restart needed)
-                if new_cfg.llm.model != old_model:
-                    provider = self._core.llm._get_provider_instance(self._core.llm._provider_name)
-                    if hasattr(provider, 'config'):
-                        provider.config.model = new_cfg.llm.model
-                    logger.info("Model hot-swapped: %s → %s", old_model, new_cfg.llm.model)
+                # Hot-swap provider AND/OR model on the LLM router. Provider
+                # swap must come first — ``set_active_model`` clears the
+                # primary's cached instance, and if we swap model after, it
+                # would land on the new provider's config.
+                provider_changed = new_cfg.llm.provider != old_provider
+                model_changed = new_cfg.llm.model != old_model
+                base_url_changed = new_cfg.llm.base_url != old_api_base
+
+                if provider_changed or model_changed:
+                    # Refresh the router's stored config BEFORE swapping so
+                    # ``_get_provider_instance`` reads the new api_key and
+                    # base_url when the cache is repopulated.
+                    self._core.llm.config = new_cfg
+                    # Drop all cached provider instances — their ProviderConfig
+                    # snapshots the OLD values. Keeping them around means a
+                    # future ``/model <oldProvider>`` would silently reuse
+                    # stale credentials.
+                    self._core.llm._providers.clear()
+                    self._core.llm.set_active_model(
+                        provider=new_cfg.llm.provider if provider_changed else None,
+                        model=new_cfg.llm.model if model_changed else None,
+                    )
+                    if provider_changed:
+                        logger.info(
+                            "Provider hot-swapped: %s → %s",
+                            old_provider, new_cfg.llm.provider,
+                        )
+                    if model_changed:
+                        logger.info(
+                            "Model hot-swapped: %s → %s",
+                            old_model, new_cfg.llm.model,
+                        )
+                elif base_url_changed:
+                    # base_url changed without provider/model changing — the
+                    # cached provider instance still holds the old URL, so
+                    # drop it to force a fresh instance on the next call.
+                    self._core.llm.config = new_cfg
+                    self._core.llm._providers.pop(
+                        self._core.llm._provider_name, None,
+                    )
+                    logger.info(
+                        "base_url hot-swapped: %s → %s",
+                        old_api_base or "(none)", new_cfg.llm.base_url or "(none)",
+                    )
 
                 # Update config reference (core + gateway + daemon)
                 self.config = new_cfg

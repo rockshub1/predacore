@@ -6,7 +6,7 @@ import re  # Import regex module
 
 # from .service import AbstractHierarchicalPlanner # Import the abstract class if defined separately
 from dataclasses import dataclass, field  # Added dataclasses
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 import grpc  # For potential KN call errors

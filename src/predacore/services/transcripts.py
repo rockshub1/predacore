@@ -22,7 +22,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +234,6 @@ class TranscriptWriter:
 
     def prune_old(self, max_age_days: int = 90) -> int:
         """Delete transcript files older than max_age_days. Returns count deleted."""
-        import os
         cutoff = time.time() - (max_age_days * 86400)
         deleted = 0
         for path in self._output_dir.glob("*.jsonl"):

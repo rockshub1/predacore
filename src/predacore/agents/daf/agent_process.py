@@ -14,6 +14,7 @@ from typing import Any
 import grpc
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct, Value
+
 from predacore._vendor.common.protos import daf_pb2, daf_pb2_grpc, wil_pb2, wil_pb2_grpc
 
 
@@ -116,7 +117,9 @@ class AgentProcess:
             try:
                 from predacore.memory.store import UnifiedMemoryStore
             except ImportError:
-                from src.predacore.memory.store import UnifiedMemoryStore  # type: ignore
+                from src.predacore.memory.store import (
+                    UnifiedMemoryStore,  # type: ignore
+                )
 
             predacore_home = Path(
                 os.getenv("PREDACORE_HOME")
@@ -149,15 +152,20 @@ class AgentProcess:
             return False
         try:
             try:
-                from predacore.config import load_config
-                from predacore.tools.subsystem_init import SubsystemFactory
-                from predacore.tools.handlers import HANDLER_MAP, ToolContext
                 from predacore.agents.engine import AgentEngine
+                from predacore.config import load_config
+                from predacore.tools.handlers import HANDLER_MAP, ToolContext
+                from predacore.tools.subsystem_init import SubsystemFactory
             except ImportError:
-                from src.predacore.config import load_config  # type: ignore
-                from src.predacore.tools.subsystem_init import SubsystemFactory  # type: ignore
-                from src.predacore.tools.handlers import HANDLER_MAP, ToolContext  # type: ignore
                 from src.predacore.agents.engine import AgentEngine  # type: ignore
+                from src.predacore.config import load_config  # type: ignore
+                from src.predacore.tools.handlers import (  # type: ignore
+                    HANDLER_MAP,
+                    ToolContext,
+                )
+                from src.predacore.tools.subsystem_init import (
+                    SubsystemFactory,  # type: ignore
+                )
 
             config_path = Path(home_dir) / "config.yaml"
             cfg = load_config(str(config_path) if config_path.exists() else None)
@@ -392,7 +400,7 @@ class AgentProcess:
                 raise RuntimeError(f"Registration failed: {response.error_message}")
             self.logger.info("Successfully registered with DAF controller")
         except grpc.RpcError as e:
-            raise RuntimeError(f"gRPC registration error: {e.details()}")
+            raise RuntimeError(f"gRPC registration error: {e.details()}") from e
 
     def _heartbeat(self):
         """Send periodic heartbeat to controller"""

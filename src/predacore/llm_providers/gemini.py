@@ -24,8 +24,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import predacore_sdk as psdk
 from .base import LLMProvider
@@ -254,16 +255,32 @@ async def _fallback_text_tools(
 
 
 def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
-    """Parse Gemini ``generateContent`` response into the router's standard shape."""
+    """Parse Gemini ``generateContent`` response into the router's standard shape.
+
+    Handles three response shapes the original parser missed:
+      * Thinking parts (``{"thought": true, "text": ...}`` or ``{"thinking": ...}``)
+        emitted by reasoning models like ``gemini-3.1-pro-preview``. Reasoning
+        is excluded from visible output.
+      * Empty ``candidates`` — request was rejected before generation, usually
+        by a safety filter. ``promptFeedback.blockReason`` surfaces the cause.
+      * Non-empty ``candidates`` with no text parts and a non-stop
+        ``finishReason`` (``SAFETY``, ``RECITATION``, ``MAX_TOKENS``, etc.) —
+        model generated nothing usable. Surface the reason so the user
+        sees actionable feedback instead of a blank message.
+    """
     candidates = data.get("candidates") or []
     content_text = ""
+    thinking_text = ""
     tool_calls_out: list[dict] = []
     finish_reason = "stop"
 
     if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
+        cand = candidates[0]
+        parts = cand.get("content", {}).get("parts", [])
         for part in parts:
-            if isinstance(part, dict) and "functionCall" in part:
+            if not isinstance(part, dict):
+                continue
+            if "functionCall" in part:
                 fc = part["functionCall"] or {}
                 tool_calls_out.append(
                     {
@@ -272,8 +289,41 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
                     }
                 )
                 finish_reason = "tool_calls"
-            elif isinstance(part, dict) and "text" in part:
+            elif part.get("thought") is True or "thinking" in part:
+                # Gemini thinking models return reasoning with either
+                # ``{"thought": true, "text": ...}`` (current shape) or
+                # ``{"thinking": "..."}`` (older preview shape). Either way,
+                # internal reasoning is not sent to the user — skip it.
+                thinking_text += part.get("text") or part.get("thinking") or ""
+            elif "text" in part:
                 content_text += part.get("text") or ""
+
+        # Surface non-stop finish reasons when the model produced no output.
+        if not content_text and not tool_calls_out:
+            cand_finish = (cand.get("finishReason") or cand.get("finish_reason") or "").upper()
+            if cand_finish == "SAFETY":
+                content_text = "[Response blocked by Gemini safety filter. Try rephrasing or relax the prompt.]"
+                finish_reason = "content_filter"
+            elif cand_finish == "RECITATION":
+                content_text = "[Response blocked: matched copyrighted content. Rephrase the prompt.]"
+                finish_reason = "content_filter"
+            elif cand_finish == "MAX_TOKENS":
+                content_text = "[Response hit max_tokens before producing visible text. Raise max_tokens or lower reasoning effort.]"
+                finish_reason = "length"
+            elif cand_finish and cand_finish != "STOP":
+                content_text = f"[Gemini returned no content (finishReason={cand_finish}).]"
+                finish_reason = "stop"
+    else:
+        # No candidates = prompt rejected before generation.
+        feedback = data.get("promptFeedback") or {}
+        block_reason = feedback.get("blockReason") or ""
+        if block_reason:
+            content_text = f"[Prompt blocked by Gemini safety filter ({block_reason}). Rephrase the request.]"
+            finish_reason = "content_filter"
+        else:
+            # Genuinely empty response — don't return "" (downstream code
+            # treats empty as a silent success, so the user sees a blank turn).
+            content_text = "[Empty response from Gemini — no candidates and no feedback. This usually means a transient API issue; try again.]"
 
     # Parse text-based tool calls if no native ones found
     if not tool_calls_out and content_text:
@@ -291,6 +341,8 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
         "usage": {
             "prompt_tokens": usage.get("promptTokenCount", 0),
             "completion_tokens": usage.get("candidatesTokenCount", 0),
+            "thoughts_token_count": usage.get("thoughtsTokenCount", 0),
         },
+        "thinking": thinking_text,
         "model": model_name,
     }

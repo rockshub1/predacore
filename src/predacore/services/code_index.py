@@ -30,7 +30,7 @@ import os
 import pickle
 import re
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -426,8 +426,9 @@ class _RustEmbedder:
     """Wraps predacore_core.embed() with the same async interface as EmbeddingClient."""
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        import predacore_core
         import asyncio
+
+        import predacore_core
         return await asyncio.to_thread(predacore_core.embed, texts)
 
 
@@ -650,7 +651,8 @@ class CodeIndex:
             indexable = [f for f in all_files if self._should_index(f)][:_MAX_FILES]
 
             file_list_hash = hashlib.md5(
-                "\n".join(sorted(indexable)).encode()
+                "\n".join(sorted(indexable)).encode(),
+                usedforsecurity=False,
             ).hexdigest()
 
             if not force and file_list_hash == self._index_hash and self._ready:
@@ -677,10 +679,12 @@ class CodeIndex:
                     size = os.path.getsize(abs_path)
                     if size > _MAX_FILE_BYTES or size == 0:
                         continue
-                    with open(abs_path, "r", errors="replace") as f:
+                    with open(abs_path, errors="replace") as f:
                         content = f.read()
-                    # Content hash for incremental updates
-                    file_hashes[rel_path] = hashlib.md5(content.encode()).hexdigest()
+                    # Content hash for incremental updates (non-security)
+                    file_hashes[rel_path] = hashlib.md5(
+                        content.encode(), usedforsecurity=False,
+                    ).hexdigest()
                     # File-level signature (#5: AST for Python)
                     sig = _extract_signature(rel_path, content)
                     signatures.append(sig)
@@ -745,12 +749,12 @@ class CodeIndex:
                 continue
 
             try:
-                with open(abs_path, "r", errors="replace") as f:
+                with open(abs_path, errors="replace") as f:
                     content = f.read()
             except (OSError, UnicodeDecodeError):
                 continue
 
-            new_hash = hashlib.md5(content.encode()).hexdigest()
+            new_hash = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
             if self._file_hashes.get(rel_path) == new_hash:
                 continue  # Content unchanged
 

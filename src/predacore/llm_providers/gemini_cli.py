@@ -14,11 +14,11 @@ Useful for:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import shutil
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .base import LLMProvider
 from .text_tool_adapter import build_full_text_prompt, parse_tool_calls
@@ -84,9 +84,9 @@ class GeminiCLIProvider(LLMProvider):
                 proc.communicate(input=full_prompt.encode("utf-8")),
                 timeout=600,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             proc.kill()
-            raise TimeoutError("Gemini CLI timed out after 600s")
+            raise TimeoutError("Gemini CLI timed out after 600s") from exc
 
         if proc.returncode != 0:
             err_raw = stderr.decode().strip() or stdout.decode().strip()

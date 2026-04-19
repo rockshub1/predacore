@@ -9,39 +9,38 @@ from __future__ import annotations
 import pytest
 
 from predacore.errors import (
-    # Base
-    PredaCoreError,
-    # Tool errors
-    ToolError,
-    ToolNotFoundError,
-    ToolTimeoutError,
-    ToolPermissionError,
-    ToolValidationError,
-    # LLM errors
-    LLMError,
-    LLMRateLimitError,
-    LLMConnectionError,
-    LLMAllProvidersFailedError,
-    # Memory errors
-    MemoryStoreError,
-    MemoryCapacityError,
-    MemoryNotFoundError,
-    # Session errors
-    SessionError,
-    SessionNotFoundError,
-    SessionCorruptedError,
-    # Security errors
-    SecurityError,
-    SSRFBlockedError,
+    AccessibilityPermissionError,
     CommandInjectionError,
-    PromptInjectionError,
-    RateLimitExceededError,
     # Desktop errors
     DesktopError,
     DeviceNotConnectedError,
-    AccessibilityPermissionError,
+    LLMAllProvidersFailedError,
+    LLMConnectionError,
+    # LLM errors
+    LLMError,
+    LLMRateLimitError,
+    MemoryCapacityError,
+    MemoryNotFoundError,
+    # Memory errors
+    MemoryStoreError,
+    # Base
+    PredaCoreError,
+    PromptInjectionError,
+    RateLimitExceededError,
+    # Security errors
+    SecurityError,
+    SessionCorruptedError,
+    # Session errors
+    SessionError,
+    SessionNotFoundError,
+    SSRFBlockedError,
+    # Tool errors
+    ToolError,
+    ToolNotFoundError,
+    ToolPermissionError,
+    ToolTimeoutError,
+    ToolValidationError,
 )
-
 
 # ── Base Error ─────────────────────────────────────────────────────
 

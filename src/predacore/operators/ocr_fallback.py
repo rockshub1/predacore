@@ -26,12 +26,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,8 +87,8 @@ class OCREngine:
         if self._vision_available is not None:
             return self._vision_available
         try:
-            import Vision  # noqa: F401 — PyObjC Vision framework
             import Quartz  # noqa: F401 — needed for image loading
+            import Vision  # noqa: F401 — PyObjC Vision framework
             self._vision_available = True
         except ImportError:
             self._vision_available = False
@@ -214,8 +211,8 @@ class OCREngine:
         languages: list[str] | None,
     ) -> list[OCRResult]:
         """Synchronous Vision framework OCR."""
-        import Vision
         import Quartz
+        import Vision
 
         # Load image
         url = Quartz.CFURLCreateFromFileSystemRepresentation(

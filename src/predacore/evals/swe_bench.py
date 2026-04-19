@@ -14,7 +14,7 @@ import logging
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ class EvalRunner:
         else:
             return EvalScorer.fuzzy_match(output, expected)
 
-    async def run_default(self) -> "EvalReport":
+    async def run_default(self) -> EvalReport:
         """Run the built-in ``SAMPLE_TASKS`` with a minimal stub agent.
 
         Stub returns each task's ``expected_output`` verbatim — gives a

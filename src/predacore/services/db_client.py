@@ -32,10 +32,10 @@ import os
 import struct
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
-def _encode_params(params: Optional[list]) -> Optional[list]:
+def _encode_params(params: list | None) -> list | None:
     """Encode bytes values in SQL params as base64 for JSON transport."""
     if not params:
         return params
@@ -67,14 +67,14 @@ _HEADER = struct.Struct("!I")  # 4-byte big-endian unsigned int
 class DBClient:
     """Asynchronous client for the PredaCore DB socket service."""
 
-    def __init__(self, socket_path: Optional[str] = None) -> None:
+    def __init__(self, socket_path: str | None = None) -> None:
         self._socket_path: str = (
             os.environ.get("PREDACORE_DB_SOCKET")
             or socket_path
             or _DEFAULT_SOCKET
         )
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
         self._req_id: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
 
@@ -101,7 +101,7 @@ class DBClient:
             self._reader = None
             log.info("DBClient disconnected")
 
-    async def __aenter__(self) -> "DBClient":
+    async def __aenter__(self) -> DBClient:
         await self.connect()
         return self
 
@@ -113,7 +113,7 @@ class DBClient:
     # ------------------------------------------------------------------
 
     @classmethod
-    async def is_available(cls, socket_path: Optional[str] = None) -> bool:
+    async def is_available(cls, socket_path: str | None = None) -> bool:
         """Return True if the socket exists and a ping succeeds."""
         path = (
             os.environ.get("PREDACORE_DB_SOCKET")
@@ -147,7 +147,7 @@ class DBClient:
         self._req_id += 1
         return self._req_id
 
-    async def _call(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    async def _call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send a JSON-RPC request and return the result (or raise)."""
         async with self._lock:
             await self._ensure_connected()
@@ -195,8 +195,8 @@ class DBClient:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> Dict[str, Any]:
+        params: list | None = None,
+    ) -> dict[str, Any]:
         """Execute a write statement. Returns ``{rowcount, lastrowid}``."""
         return await self._call(
             "execute",
@@ -207,8 +207,8 @@ class DBClient:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[list]:
+        params: list | None = None,
+    ) -> list[list]:
         """Run a read query. Returns a list of row-tuples (as lists)."""
         result = await self._call(
             "query",
@@ -220,8 +220,8 @@ class DBClient:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[Dict[str, Any]]:
+        params: list | None = None,
+    ) -> list[dict[str, Any]]:
         """Run a read query. Returns a list of dicts keyed by column name."""
         result = await self._call(
             "query_dicts",
@@ -229,14 +229,14 @@ class DBClient:
         )
         return result["rows"]
 
-    async def executescript(self, db_name: str, sql: str) -> Dict[str, Any]:
+    async def executescript(self, db_name: str, sql: str) -> dict[str, Any]:
         """Execute a multi-statement SQL script. Returns ``{ok: true}``."""
         return await self._call(
             "executescript",
             {"db_name": db_name, "sql": sql},
         )
 
-    async def ping(self) -> Dict[str, Any]:
+    async def ping(self) -> dict[str, Any]:
         """Ping the server. Returns ``{ok: true}``."""
         return await self._call("ping")
 
@@ -254,11 +254,11 @@ class DBClientSync:
     DBServer without needing ``await``.
     """
 
-    def __init__(self, socket_path: Optional[str] = None) -> None:
+    def __init__(self, socket_path: str | None = None) -> None:
         self._socket_path = socket_path
-        self._client: Optional[DBClient] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
+        self._client: DBClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -321,8 +321,8 @@ class DBClientSync:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> Dict[str, Any]:
+        params: list | None = None,
+    ) -> dict[str, Any]:
         """Execute a write statement. Returns ``{rowcount, lastrowid}``."""
         assert self._client is not None
         return self._run(self._client.execute(db_name, sql, params))
@@ -331,8 +331,8 @@ class DBClientSync:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[list]:
+        params: list | None = None,
+    ) -> list[list]:
         """Run a read query. Returns a list of row-tuples (as lists)."""
         assert self._client is not None
         return self._run(self._client.query(db_name, sql, params))
@@ -341,18 +341,18 @@ class DBClientSync:
         self,
         db_name: str,
         sql: str,
-        params: Optional[list] = None,
-    ) -> List[Dict[str, Any]]:
+        params: list | None = None,
+    ) -> list[dict[str, Any]]:
         """Run a read query. Returns a list of dicts keyed by column name."""
         assert self._client is not None
         return self._run(self._client.query_dicts(db_name, sql, params))
 
-    def executescript(self, db_name: str, sql: str) -> Dict[str, Any]:
+    def executescript(self, db_name: str, sql: str) -> dict[str, Any]:
         """Execute a multi-statement SQL script. Returns ``{ok: true}``."""
         assert self._client is not None
         return self._run(self._client.executescript(db_name, sql))
 
-    def ping(self) -> Dict[str, Any]:
+    def ping(self) -> dict[str, Any]:
         """Ping the server. Returns ``{ok: true}``."""
         assert self._client is not None
         return self._run(self._client.ping())

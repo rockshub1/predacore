@@ -8,14 +8,13 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from ._context import (
     ToolContext,
     ToolError,
     ToolErrorKind,
-    missing_param,
     blocked,
+    missing_param,
     web_cache_get,
     web_cache_put,
 )
@@ -358,7 +357,7 @@ async def handle_semantic_search(args: dict[str, Any], ctx: ToolContext) -> str:
 
         for fpath in files_to_search:
             try:
-                with open(fpath, "r", errors="replace") as f:
+                with open(fpath, errors="replace") as f:
                     content = f.read(20000)
                 bm25 = _bm25_score(query_terms, content)
                 if bm25 > 0:

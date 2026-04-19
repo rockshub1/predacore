@@ -25,12 +25,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
