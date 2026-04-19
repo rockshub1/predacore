@@ -334,14 +334,30 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
             finish_reason = "tool_calls"
 
     usage = data.get("usageMetadata") or {}
+    # Gemini 2.5+ and 3.x automatically cache repeated prefixes server-side
+    # and report hits via `cachedContentTokenCount`. Older models + explicit
+    # caching callers get the same field. We surface it so callers can track
+    # cache hit rate — which directly drives cost.
+    cached_tokens = int(usage.get("cachedContentTokenCount", 0) or 0)
+    prompt_tokens = int(usage.get("promptTokenCount", 0) or 0)
+    cache_hit_ratio = (cached_tokens / prompt_tokens) if prompt_tokens else 0.0
+    if cached_tokens:
+        logger.info(
+            "gemini cache hit: %d / %d prompt tokens cached (%.0f%%)",
+            cached_tokens, prompt_tokens, cache_hit_ratio * 100,
+        )
     return {
         "content": content_text,
         "tool_calls": tool_calls_out,
         "finish_reason": finish_reason,
         "usage": {
-            "prompt_tokens": usage.get("promptTokenCount", 0),
-            "completion_tokens": usage.get("candidatesTokenCount", 0),
-            "thoughts_token_count": usage.get("thoughtsTokenCount", 0),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": int(usage.get("candidatesTokenCount", 0) or 0),
+            "thoughts_token_count": int(usage.get("thoughtsTokenCount", 0) or 0),
+            # Implicit + explicit cache hits. Multiply by provider pricing to
+            # get realised dollar savings.
+            "cached_content_tokens": cached_tokens,
+            "cache_hit_ratio": round(cache_hit_ratio, 3),
         },
         "thinking": thinking_text,
         "model": model_name,
