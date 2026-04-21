@@ -175,6 +175,16 @@ class LLMInterface:
         return self._provider_name
 
     @property
+    def active_provider_instance(self):
+        """Currently active LLMProvider instance.
+
+        Used by ``PredaCoreCore`` to call provider-owned tool-turn serializers
+        (``append_assistant_turn`` / ``append_tool_results_turn``). Lazily
+        instantiates the provider if it hasn't been used yet.
+        """
+        return self._get_provider_instance(self._provider_name)
+
+    @property
     def active_model(self) -> str:
         """Currently active model name."""
         return self.config.llm.model or "default"
@@ -207,6 +217,32 @@ class LLMInterface:
 
         If auto_fallback is ON, uses the old failover chain behavior.
         """
+        # Phase D: local response idempotency cache (opt-in via
+        # PREDACORE_IDEMPOTENT=1). Only hits for temperature=0.0 — anything
+        # else is non-deterministic and must not serve cached responses.
+        # Keyed by (provider, model, messages, tools, temperature) — works
+        # across ALL providers transparently.
+        from .response_cache import get_shared_cache, is_enabled as _cache_enabled
+
+        _effective_temp = (
+            temperature if temperature is not None else self.config.llm.temperature
+        )
+        _cache = None
+        if _cache_enabled() and float(_effective_temp) == 0.0:
+            _cache = get_shared_cache()
+            _cached = _cache.get(
+                provider=self._provider_name,
+                model=self.config.llm.model or "",
+                messages=messages,
+                tools=tools,
+                temperature=_effective_temp,
+            )
+            if _cached is not None:
+                _cached_copy = dict(_cached)
+                _cached_copy["_response_cache_hit"] = True
+                logger.info("response cache HIT (provider=%s)", self._provider_name)
+                return _cached_copy
+
         await self._apply_throttle()
 
         errors = []
@@ -243,6 +279,21 @@ class LLMInterface:
 
                     if provider_name != self._provider_chain[0]:
                         logger.info("Failover: used '%s' (%.0fms)", provider_name, latency)
+
+                    # Phase D: store successful response in idempotency cache
+                    # (temperature=0 only; cache is a no-op otherwise).
+                    if _cache is not None:
+                        try:
+                            _cache.set(
+                                provider=provider_name,
+                                model=self.config.llm.model or "",
+                                messages=messages,
+                                tools=tools,
+                                temperature=_effective_temp,
+                                response=result,
+                            )
+                        except Exception as _set_err:  # noqa: BLE001
+                            logger.debug("response cache set() non-fatal: %s", _set_err)
 
                     return result
 

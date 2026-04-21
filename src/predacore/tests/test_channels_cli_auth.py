@@ -132,7 +132,6 @@ def _make_mock_config(**overrides):
             channel_cfg.__dict__[k] = v
     config = PredaCoreConfig(
         name=overrides.get("name", "PredaCore"),
-        mode=overrides.get("mode", "personal"),
         home_dir=overrides.get("home_dir", "/tmp/prometheus_test"),
         channels=channel_cfg,
     )

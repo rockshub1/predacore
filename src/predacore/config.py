@@ -30,7 +30,7 @@ DEFAULT_SKILLS_DIR = DEFAULT_HOME / "skills"
 DEFAULT_LOGS_DIR = DEFAULT_HOME / "logs"
 DEFAULT_AGENTS_DIR = DEFAULT_HOME / "agents"
 DEFAULT_FLAME_DIR = DEFAULT_HOME / "flame"
-DEFAULT_PROFILE = "balanced"
+DEFAULT_PROFILE = "enterprise"
 DEFAULT_AGENT = "default"
 
 
@@ -122,23 +122,23 @@ class DaemonConfig:
 
 @dataclass
 class LaunchProfileConfig:
-    """Runtime profile toggles for public/enterprise launch posture."""
+    """Runtime profile toggles. Two modes: `enterprise` (safe-by-default, strict
+    governance) and `beast` (yolo, autonomous, plugin-open). Resource limits are
+    maxed on both modes — the split is about governance posture, not capacity."""
 
-    profile: str = DEFAULT_PROFILE  # balanced | public_beast | enterprise_lockdown
-    approvals_required: bool = True  # Require external approval before risky actions
-    egm_mode: str = "off"  # off | log_only | strict (enterprise only)
-    default_code_network: bool = False  # Default network setting for code execution
-    enable_openclaw_bridge: bool = False  # Future bridge toggle
-    enable_plugin_marketplace: bool = True  # Public ecosystem toggle
-    enable_self_evolution: bool = False  # Autonomous optimization toggle
-    max_spawn_depth: int = 4  # Agent recursion cap
-    max_spawn_fanout: int = 8  # Max concurrent child agents
-    max_tool_iterations: int = 200  # Tool loop cap — raised from 10 per "remove all limits"
-    enable_persona_drift_guard: bool = (
-        True  # Auto-regenerate if persona drift is detected
-    )
-    persona_drift_threshold: float = 0.42  # Drift score threshold [0.0, 1.0]
-    persona_drift_max_regens: int = 1  # Max regeneration attempts per response
+    profile: str = DEFAULT_PROFILE  # enterprise | beast
+    approvals_required: bool = True  # User-toggleable on both modes (--approvals/--no-approvals, or PREDACORE_APPROVALS_REQUIRED)
+    egm_mode: str = "strict"  # off | log_only | strict
+    default_code_network: bool = False
+    enable_openclaw_bridge: bool = False
+    enable_plugin_marketplace: bool = False
+    enable_self_evolution: bool = False
+    max_spawn_depth: int = 16  # Agent recursion cap — Python stack allows up to ~20 safely
+    max_spawn_fanout: int = 64  # Max concurrent child agents
+    max_tool_iterations: int = 1000  # Tool loop cap — meta_cognition detects runaway earlier
+    enable_persona_drift_guard: bool = True
+    persona_drift_threshold: float = 0.32
+    persona_drift_max_regens: int = 5
 
 
 @dataclass
@@ -161,87 +161,58 @@ class OpenClawBridgeConfig:
     auto_import_skills: bool = True  # Import OpenClaw SKILL.md entries into marketplace
 
 
+# Resource limits are maxed and identical on both modes. Modes differ only on
+# governance posture (trust, approvals, self-evolution, compliance). Users can
+# toggle approvals independently via --approvals/--no-approvals or the
+# PREDACORE_APPROVALS_REQUIRED env var.
+_MAXED_RESOURCES_SECURITY = {
+    "docker_sandbox": True,
+    "max_concurrent_tasks": 100,
+    "task_timeout_seconds": 3600,
+}
+_MAXED_RESOURCES_LAUNCH = {
+    "max_spawn_depth": 16,
+    "max_spawn_fanout": 64,
+    "max_tool_iterations": 1000,
+    "enable_persona_drift_guard": True,
+    "persona_drift_max_regens": 5,
+}
+
 PROFILE_PRESETS: dict[str, dict[str, Any]] = {
-    "balanced": {
-        "mode": "personal",
+    "enterprise": {
         "channels": {"enabled": ["webchat"]},
         "security": {
             "trust_level": "normal",
-            "docker_sandbox": False,
-            "max_concurrent_tasks": 5,
-            "task_timeout_seconds": 300,
+            **_MAXED_RESOURCES_SECURITY,
         },
         "launch": {
-            "profile": "balanced",
-            "approvals_required": True,
-            "egm_mode": "off",
-            "default_code_network": False,
-            "enable_openclaw_bridge": False,
-            "enable_plugin_marketplace": True,
-            "enable_self_evolution": False,
-            "max_spawn_depth": 4,
-            "max_spawn_fanout": 8,
-            # Raised 10 → 50: modern models loop rarely, and the loop
-            # detector in agents/meta_cognition already catches runaway
-            # cases. Autonomous background work is a separate path
-            # (spawn_background_agent) with its own caps.
-            "max_tool_iterations": 50,
-            "enable_persona_drift_guard": True,
-            "persona_drift_threshold": 0.42,
-            "persona_drift_max_regens": 1,
-        },
-    },
-    "public_beast": {
-        "mode": "public",
-        "channels": {"enabled": ["webchat"]},
-        "security": {
-            "trust_level": "yolo",
-            "docker_sandbox": True,
-            "max_concurrent_tasks": 12,
-            "task_timeout_seconds": 600,
-        },
-        "launch": {
-            "profile": "public_beast",
-            "approvals_required": False,
-            "egm_mode": "off",
-            "default_code_network": True,
-            "enable_openclaw_bridge": True,
-            "enable_plugin_marketplace": True,
-            "enable_self_evolution": True,
-            "max_spawn_depth": 8,
-            "max_spawn_fanout": 16,
-            # Public beast is the autonomous-leaning profile. 150 lets a
-            # foreground turn do real work without spawning a background
-            # task for every medium-sized job.
-            "max_tool_iterations": 150,
-            "enable_persona_drift_guard": True,
-            "persona_drift_threshold": 0.60,
-            "persona_drift_max_regens": 1,
-        },
-    },
-    "enterprise_lockdown": {
-        "mode": "enterprise",
-        "channels": {"enabled": ["webchat"]},
-        "security": {
-            "trust_level": "paranoid",
-            "docker_sandbox": True,
-            "max_concurrent_tasks": 3,
-            "task_timeout_seconds": 180,
-        },
-        "launch": {
-            "profile": "enterprise_lockdown",
+            "profile": "enterprise",
             "approvals_required": True,
             "egm_mode": "strict",
             "default_code_network": False,
             "enable_openclaw_bridge": False,
             "enable_plugin_marketplace": False,
             "enable_self_evolution": False,
-            "max_spawn_depth": 2,
-            "max_spawn_fanout": 4,
-            "max_tool_iterations": 6,
-            "enable_persona_drift_guard": True,
             "persona_drift_threshold": 0.32,
-            "persona_drift_max_regens": 2,
+            **_MAXED_RESOURCES_LAUNCH,
+        },
+    },
+    "beast": {
+        "channels": {"enabled": ["webchat"]},
+        "security": {
+            "trust_level": "yolo",
+            **_MAXED_RESOURCES_SECURITY,
+        },
+        "launch": {
+            "profile": "beast",
+            "approvals_required": False,
+            "egm_mode": "off",
+            "default_code_network": True,
+            "enable_openclaw_bridge": True,
+            "enable_plugin_marketplace": True,
+            "enable_self_evolution": True,
+            "persona_drift_threshold": 0.60,
+            **_MAXED_RESOURCES_LAUNCH,
         },
     },
 }
@@ -292,7 +263,6 @@ class PredaCoreConfig:
     # ── Identity ──
     name: str = "PredaCore"
     version: str = "0.1.0"
-    mode: str = "personal"  # personal | public | enterprise
     agent: str = DEFAULT_AGENT  # Active agent (folder name under ~/.predacore/agents/)
 
     # ── Paths ──
@@ -448,7 +418,6 @@ def _env_overrides() -> dict[str, Any]:
     overrides: dict[str, Any] = {}
 
     env_map = {
-        "PREDACORE_MODE": ("mode",),
         "PREDACORE_NAME": ("name",),
         "PREDACORE_HOME": ("home_dir",),
         "PREDACORE_AGENT": ("agent",),
@@ -748,10 +717,10 @@ def load_config(
     _sync_runtime_policy_env(cfg)
 
     logger.info(
-        "PredaCore config loaded: profile=%s, mode=%s, trust=%s, llm=%s",
+        "PredaCore config loaded: profile=%s, trust=%s, approvals=%s, llm=%s",
         cfg.launch.profile,
-        cfg.mode,
         cfg.security.trust_level,
+        "on" if cfg.launch.approvals_required else "off",
         cfg.llm.provider,
     )
     return cfg
@@ -761,20 +730,25 @@ def save_default_config(
     path: str | None = None,
     *,
     provider: str = "gemini-cli",
-    trust_level: str = "normal",
+    trust_level: str | None = None,
     model: str = "",
     channels: list[str] | None = None,
+    profile: str = DEFAULT_PROFILE,
 ) -> Path:
     """Write config.yaml for setup, applying user's choices.
 
     Args:
         path: Destination config path (defaults to DEFAULT_CONFIG_FILE).
         provider: LLM provider name.
-        trust_level: yolo | normal | paranoid.
+        trust_level: yolo | normal. If None, derived from profile
+            (enterprise→normal, beast→yolo).
         model: Optional explicit model name (empty = auto-detect).
         channels: List of channel names to enable. Defaults to ["webchat"].
-            Valid values: webchat, telegram, discord, whatsapp, signal, imessage, email, slack.
+        profile: Launch profile — enterprise | beast (default: enterprise).
     """
+    # Derive trust_level from profile if not explicitly set.
+    if trust_level is None:
+        trust_level = "yolo" if profile == "beast" else "normal"
     target = Path(path) if path else DEFAULT_CONFIG_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -802,7 +776,6 @@ def save_default_config(
 
 name: PredaCore
 agent: default             # Active agent (folder under ~/.predacore/agents/)
-mode: personal          # personal | public | enterprise
 
 llm:
   provider: {provider}  # openai | gemini | gemini-cli | anthropic | groq | xai
@@ -826,10 +799,8 @@ channels:
 {_channels_block}
 
 security:
-  trust_level: {trust_level}   # yolo | normal | paranoid
-  docker_sandbox: false
-  max_concurrent_tasks: 5
-  task_timeout_seconds: 300
+  trust_level: {trust_level}   # yolo | normal
+  # Every other security setting inherits from the launch profile preset.
 
 daemon:
   enabled: false
@@ -841,17 +812,10 @@ memory:
   working_memory_capacity: 7
 
 launch:
-  profile: balanced         # balanced | public_beast | enterprise_lockdown
-  approvals_required: true
-  egm_mode: "off"            # off | log_only | strict (enable for enterprise)
-  default_code_network: false
-  enable_openclaw_bridge: false
-  enable_plugin_marketplace: true
-  enable_self_evolution: false
-  max_tool_iterations: 10
-  enable_persona_drift_guard: true
-  persona_drift_threshold: 0.42
-  persona_drift_max_regens: 1
+  profile: {profile}        # enterprise | beast — all other launch settings
+                            # (approvals_required, egm_mode, self_evolution,
+                            # code_network, etc.) cascade from the profile preset.
+                            # Override any of them below only if you need to.
 
 openclaw:
   base_url: ""              # set OPENCLAW_BRIDGE_URL for runtime

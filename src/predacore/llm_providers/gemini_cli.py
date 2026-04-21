@@ -22,6 +22,7 @@ from typing import Any
 
 from .base import LLMProvider
 from .text_tool_adapter import build_full_text_prompt, parse_tool_calls
+from .types import AssistantResponse, Message, ToolResultRef
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,56 @@ class GeminiCLIProvider(LLMProvider):
 
     name = "gemini-cli"
     supports_native_tools = False  # Text-based tool calling — PredaCore controls the loop
+
+    # ------------------------------------------------------------------
+    # Tool-turn serialization (Phase A refactor — 2026-04-21).
+    #
+    # Gemini CLI is text-only: tool calls arrive embedded in model output as
+    # ``<tool_call>{...}</tool_call>`` XML blocks and results go back as plain
+    # text in user turns. The CLI model doesn't understand the ``"tool"``
+    # role, so we override to route results into ``role="user"`` turns
+    # with formatted text content. For assistant turns we re-inject the
+    # model's own ``<tool_call>`` blocks into ``content`` so the text prompt
+    # on the next turn echoes what the model originally emitted.
+    # ------------------------------------------------------------------
+
+    def append_assistant_turn(
+        self,
+        messages: list[Message],
+        response: AssistantResponse,
+    ) -> None:
+        import json
+
+        content = response.content
+        for tc in response.tool_calls:
+            block = json.dumps({"name": tc.name, "arguments": tc.arguments})
+            content += f"\n<tool_call>{block}</tool_call>"
+        messages.append(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=list(response.tool_calls),
+            )
+        )
+
+    def append_tool_results_turn(
+        self,
+        messages: list[Message],
+        results: list[ToolResultRef],
+    ) -> None:
+        if not results:
+            return
+        lines = []
+        for r in results:
+            status = "ERROR" if r.is_error else "OK"
+            lines.append(f"[tool_result: {r.name}] ({status})\n{r.result}")
+        messages.append(
+            Message(
+                role="user",  # CLI model doesn't know the "tool" role
+                content="\n\n".join(lines),
+                tool_results=list(results),
+            )
+        )
 
     async def chat(
         self,

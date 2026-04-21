@@ -243,14 +243,14 @@ class TestDataclassDefaults:
 
     def test_launch_profile_config_defaults(self):
         cfg = LaunchProfileConfig()
-        assert cfg.profile == "balanced"
-        # Raised 10 → 200 per "remove all limits"
-        assert cfg.max_tool_iterations == 200
+        assert cfg.profile == "enterprise"
+        # 2-mode simplification: resource limits maxed on both profiles
+        assert cfg.max_tool_iterations == 1000
         assert cfg.enable_persona_drift_guard is True
-        assert cfg.persona_drift_threshold == pytest.approx(0.42)
-        assert cfg.persona_drift_max_regens == 1
-        assert cfg.max_spawn_depth == 4
-        assert cfg.max_spawn_fanout == 8
+        assert cfg.persona_drift_threshold == pytest.approx(0.32)
+        assert cfg.persona_drift_max_regens == 5
+        assert cfg.max_spawn_depth == 16
+        assert cfg.max_spawn_fanout == 64
 
     def test_memory_config_defaults(self):
         cfg = MemoryConfig()
@@ -280,7 +280,6 @@ class TestPredaCoreConfigMaster:
         cfg = PredaCoreConfig()
         assert cfg.name == "PredaCore"
         assert cfg.version == "0.1.0"
-        assert cfg.mode == "personal"
         assert cfg.agent == "default"
 
     def test_post_init_sets_paths(self):
@@ -328,56 +327,62 @@ class TestPredaCoreConfigMaster:
 
 
 class TestProfilePresets:
-    """Tests for the 3 launch profile presets."""
+    """Tests for the 2 launch profile presets (enterprise + beast)."""
 
-    def test_balanced_exists(self):
-        assert "balanced" in PROFILE_PRESETS
+    def test_enterprise_exists(self):
+        assert "enterprise" in PROFILE_PRESETS
 
-    def test_public_beast_exists(self):
-        assert "public_beast" in PROFILE_PRESETS
+    def test_beast_exists(self):
+        assert "beast" in PROFILE_PRESETS
 
-    def test_enterprise_lockdown_exists(self):
-        assert "enterprise_lockdown" in PROFILE_PRESETS
+    def test_exactly_two_profiles(self):
+        assert set(PROFILE_PRESETS.keys()) == {"enterprise", "beast"}
 
-    def test_balanced_trust_normal(self):
-        p = PROFILE_PRESETS["balanced"]
+    def test_enterprise_posture(self):
+        p = PROFILE_PRESETS["enterprise"]
         assert p["security"]["trust_level"] == "normal"
-        assert p["security"]["docker_sandbox"] is False
-        # Raised 10→50 for modern models — see docs/AUTONOMY.md
-        assert p["launch"]["max_tool_iterations"] == 50
-
-    def test_public_beast_is_aggressive(self):
-        p = PROFILE_PRESETS["public_beast"]
-        assert p["security"]["trust_level"] == "yolo"
         assert p["security"]["docker_sandbox"] is True
-        # Autonomy-leaning profile — raised 30→150
-        assert p["launch"]["max_tool_iterations"] == 150
-        assert p["launch"]["enable_self_evolution"] is True
-        assert p["launch"]["max_spawn_fanout"] == 16
-
-    def test_enterprise_lockdown_is_strict(self):
-        p = PROFILE_PRESETS["enterprise_lockdown"]
-        assert p["security"]["trust_level"] == "paranoid"
-        assert p["security"]["docker_sandbox"] is True
-        assert p["launch"]["max_tool_iterations"] == 6
+        assert p["launch"]["approvals_required"] is True
         assert p["launch"]["egm_mode"] == "strict"
         assert p["launch"]["enable_self_evolution"] is False
-        assert p["launch"]["max_spawn_depth"] == 2
+        assert p["launch"]["enable_plugin_marketplace"] is False
+        assert p["launch"]["default_code_network"] is False
+
+    def test_beast_posture(self):
+        p = PROFILE_PRESETS["beast"]
+        assert p["security"]["trust_level"] == "yolo"
+        assert p["security"]["docker_sandbox"] is True
+        assert p["launch"]["approvals_required"] is False
+        assert p["launch"]["egm_mode"] == "off"
+        assert p["launch"]["enable_self_evolution"] is True
+        assert p["launch"]["enable_plugin_marketplace"] is True
+        assert p["launch"]["default_code_network"] is True
+
+    def test_resource_limits_maxed_on_both(self):
+        # Both modes share maxed-out resource limits; the split is governance-only.
+        for name in ("enterprise", "beast"):
+            p = PROFILE_PRESETS[name]
+            assert p["security"]["max_concurrent_tasks"] == 100
+            assert p["security"]["task_timeout_seconds"] == 3600
+            assert p["launch"]["max_spawn_depth"] == 16
+            assert p["launch"]["max_spawn_fanout"] == 64
+            assert p["launch"]["max_tool_iterations"] == 1000
+            assert p["launch"]["persona_drift_max_regens"] == 5
 
     def test_get_profile_defaults_valid(self):
-        result = _get_profile_defaults("balanced")
-        assert result == PROFILE_PRESETS["balanced"]
+        result = _get_profile_defaults("enterprise")
+        assert result == PROFILE_PRESETS["enterprise"]
 
     def test_get_profile_defaults_unknown_falls_back(self):
         result = _get_profile_defaults("nonexistent_profile")
         assert result == PROFILE_PRESETS[DEFAULT_PROFILE]
 
     def test_resolve_profile_from_override(self):
-        assert _resolve_profile_name({}, "public_beast") == "public_beast"
+        assert _resolve_profile_name({}, "beast") == "beast"
 
     def test_resolve_profile_from_merged(self):
-        merged = {"launch": {"profile": "enterprise_lockdown"}}
-        assert _resolve_profile_name(merged, None) == "enterprise_lockdown"
+        merged = {"launch": {"profile": "enterprise"}}
+        assert _resolve_profile_name(merged, None) == "enterprise"
 
     def test_resolve_profile_default(self):
         assert _resolve_profile_name({}, None) == DEFAULT_PROFILE
@@ -428,9 +433,8 @@ class TestDictToConfig:
         assert cfg.name == "PredaCore"
 
     def test_top_level_fields(self):
-        cfg = _dict_to_config({"name": "MyBot", "mode": "enterprise"})
+        cfg = _dict_to_config({"name": "MyBot"})
         assert cfg.name == "MyBot"
-        assert cfg.mode == "enterprise"
 
     def test_nested_sub_config(self):
         cfg = _dict_to_config({
@@ -455,7 +459,7 @@ class TestDictToConfig:
             "security": {"trust_level": "yolo"},
             "daemon": {"enabled": True},
             "memory": {"decay_rate": 0.05},
-            "launch": {"profile": "public_beast"},
+            "launch": {"profile": "beast"},
             "openclaw": {"base_url": "http://bridge"},
             "operators": {"macro_max_steps": 100},
         }
@@ -466,7 +470,7 @@ class TestDictToConfig:
         assert cfg.security.trust_level == "yolo"
         assert cfg.daemon.enabled is True
         assert cfg.memory.decay_rate == pytest.approx(0.05)
-        assert cfg.launch.profile == "public_beast"
+        assert cfg.launch.profile == "beast"
         assert cfg.openclaw.base_url == "http://bridge"
         assert cfg.operators.macro_max_steps == 100
 
@@ -550,7 +554,7 @@ class TestLoadConfig:
         cfg = load_config(config_path=str(tmp_path / "nonexistent.yaml"))
         assert isinstance(cfg, PredaCoreConfig)
         assert cfg.name == "PredaCore"
-        assert cfg.launch.profile == "balanced"
+        assert cfg.launch.profile == "enterprise"
 
     def test_yaml_override(self, tmp_path):
         config_file = tmp_path / "config.yaml"
@@ -569,10 +573,10 @@ class TestLoadConfig:
     def test_profile_override(self, tmp_path):
         cfg = load_config(
             config_path=str(tmp_path / "none.yaml"),
-            profile_override="enterprise_lockdown",
+            profile_override="beast",
         )
-        assert cfg.launch.profile == "enterprise_lockdown"
-        assert cfg.security.trust_level == "paranoid"
+        assert cfg.launch.profile == "beast"
+        assert cfg.security.trust_level == "yolo"
 
     def test_directories_created(self, tmp_path):
         home = tmp_path / "prom_home"
@@ -642,10 +646,10 @@ class TestModuleConstants:
         assert DEFAULT_HOME == Path.home() / ".predacore"
 
     def test_default_profile(self):
-        assert DEFAULT_PROFILE == "balanced"
+        assert DEFAULT_PROFILE == "enterprise"
 
     def test_default_agent(self):
         assert DEFAULT_AGENT == "default"
 
     def test_profile_presets_count(self):
-        assert len(PROFILE_PRESETS) == 3
+        assert len(PROFILE_PRESETS) == 2

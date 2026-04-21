@@ -1340,12 +1340,12 @@ async def _run_setup() -> None:
         if not api_key:
             console.print("    [glass.text.dim]Skipped. Set the env var later to enable this provider.[/glass.text.dim]")
 
-    # ── Step 3: Trust level ──
+    # ── Step 3: Mode ──
     console.print()
-    console.print(_step_rule(3, 5, "Trust level"))
+    console.print(_step_rule(3, 5, "Mode"))
     console.print()
 
-    def _trust_card(num: str, name: str, accent: str, headline: str, tagline: str) -> Panel:
+    def _mode_card(num: str, name: str, accent: str, headline: str, tagline: str) -> Panel:
         body = Text.assemble(
             (f"{num}  ", f"bold {accent}"),
             (name.upper(), f"bold {accent}"),
@@ -1359,34 +1359,34 @@ async def _run_setup() -> None:
             border_style=accent,
             box=box.ROUNDED,
             padding=(1, 2),
-            width=34,
+            width=40,
         )
 
-    trust_cards = [
-        _trust_card(
-            "1", "yolo", "glass.rose",
-            "Auto-run everything.",
-            "Maximum speed, minimum friction. Irreversible ops still confirm.",
+    mode_cards = [
+        _mode_card(
+            "1", "enterprise", "glass.cyan",
+            "Safe by default. Approvals on.",
+            "Strict governance, no self-evolution, no plugin marketplace. "
+            "Trust level = normal. Recommended starting point.",
         ),
-        _trust_card(
-            "2", "normal", "glass.cyan",
-            "Auto-run reads. Confirm writes.",
-            "Recommended default. Good balance of speed and safety.",
-        ),
-        _trust_card(
-            "3", "paranoid", "glass.mint",
-            "Confirm every action.",
-            "For sensitive environments or when you're auditing behavior.",
+        _mode_card(
+            "2", "beast", "glass.rose",
+            "Autonomous. Approvals off.",
+            "Self-evolution on, plugins open, code network on. "
+            "Trust level = yolo. Pick this for max-autonomy agent work.",
         ),
     ]
-    console.print(Columns(trust_cards, equal=True, expand=False, padding=(0, 1)))
+    console.print(Columns(mode_cards, equal=True, expand=False, padding=(0, 1)))
     console.print()
-    trust_choice = console.input(
-        "  [glass.violet]❯[/glass.violet]  [glass.text]Choose trust level[/glass.text] "
-        "[glass.text.dim]\\[2 = normal]:[/glass.text.dim] "
-    ).strip() or "2"
-    trust_map = {"1": "yolo", "2": "normal", "3": "paranoid"}
-    trust_level = trust_map.get(trust_choice, "normal")
+    mode_choice = console.input(
+        "  [glass.violet]❯[/glass.violet]  [glass.text]Choose mode[/glass.text] "
+        "[glass.text.dim]\\[1 = enterprise]:[/glass.text.dim] "
+    ).strip() or "1"
+    profile_map = {"1": "enterprise", "2": "beast"}
+    profile = profile_map.get(mode_choice, "enterprise")
+    # Trust level derives from profile — enterprise→normal, beast→yolo.
+    # Users can edit ~/.predacore/config.yaml to override if they need the other axis.
+    trust_level = "yolo" if profile == "beast" else "normal"
 
     # ── Step 4: Channels ──
     console.print()
@@ -1496,6 +1496,7 @@ async def _run_setup() -> None:
         model=model,
         trust_level=trust_level,
         channels=selected_channels,
+        profile=profile,
     )
     console.print(f"  [glass.mint]◆[/glass.mint]  Config written to [glass.cyan]{config_path}[/glass.cyan]")
 
@@ -1635,7 +1636,6 @@ def _show_status(config_path: str | None = None, profile: str | None = None) -> 
         tbl.add_column("key", style="muted", width=16)
         tbl.add_column("value")
 
-        tbl.add_row("Mode", config.mode)
         tbl.add_row("Profile", config.launch.profile)
         tbl.add_row("Provider", config.llm.provider)
         tbl.add_row("Model", config.llm.model or "auto")
@@ -1743,8 +1743,8 @@ Commands:
     chat_parser.add_argument("--config", "-c", help="Path to config file")
     chat_parser.add_argument(
         "--profile",
-        choices=["balanced", "public_beast", "enterprise_lockdown"],
-        help="Launch profile override",
+        choices=["enterprise", "beast"],
+        help="Launch profile override (enterprise | beast)",
     )
 
     # Start command
@@ -1761,13 +1761,24 @@ Commands:
     start_parser.add_argument("--config", "-c", help="Path to config file")
     start_parser.add_argument(
         "--profile",
-        choices=["balanced", "public_beast", "enterprise_lockdown"],
-        help="Launch profile override",
+        choices=["enterprise", "beast"],
+        help="Launch profile override (enterprise | beast)",
     )
-    start_parser.add_argument(
-        "--public",
+    # Approvals toggle — works on both profiles. Overrides the profile default.
+    start_approvals = start_parser.add_mutually_exclusive_group()
+    start_approvals.add_argument(
+        "--approvals",
+        dest="approvals",
         action="store_true",
-        help="Shortcut for --profile public_beast",
+        default=None,
+        help="Require approvals before risky actions (overrides profile default)",
+    )
+    start_approvals.add_argument(
+        "--no-approvals",
+        dest="approvals",
+        action="store_false",
+        default=None,
+        help="Skip approvals (overrides profile default)",
     )
 
     # Stop command
@@ -1816,8 +1827,8 @@ Commands:
     status_parser.add_argument("--config", "-c", help="Path to config file")
     status_parser.add_argument(
         "--profile",
-        choices=["balanced", "public_beast", "enterprise_lockdown"],
-        help="Launch profile override",
+        choices=["enterprise", "beast"],
+        help="Launch profile override (enterprise | beast)",
     )
 
     # Doctor command
@@ -1841,8 +1852,8 @@ Commands:
     )
     doctor_parser.add_argument(
         "--profile",
-        choices=["balanced", "public_beast", "enterprise_lockdown"],
-        help="Launch profile override",
+        choices=["enterprise", "beast"],
+        help="Launch profile override (enterprise | beast)",
     )
 
     args = parser.parse_args()
@@ -2161,6 +2172,41 @@ def _run_doctor(
 
         config = load_config(config_path, profile_override=profile)
         ok("Config loaded", f"Home: {config.home_dir}")
+
+        # Resolved config summary — the answer to "what mode am I actually in?"
+        # Mirrors predacore status so operators can verify posture from either entry.
+        def _on(flag: bool) -> str:
+            return "[success]on[/success]" if flag else "[muted]off[/muted]"
+
+        console.print(f"     [muted]Profile:[/muted]             "
+                      f"[bold]{config.launch.profile}[/bold]")
+        console.print(f"     [muted]Trust level:[/muted]         "
+                      f"{config.security.trust_level}")
+        console.print(f"     [muted]Approvals required:[/muted]  "
+                      f"{_on(config.launch.approvals_required)}")
+        console.print(f"     [muted]EGM mode:[/muted]            "
+                      f"{config.launch.egm_mode}")
+        console.print(f"     [muted]Docker sandbox:[/muted]      "
+                      f"{_on(config.security.docker_sandbox)}")
+        console.print(f"     [muted]Code network:[/muted]        "
+                      f"{_on(config.launch.default_code_network)}")
+        console.print(f"     [muted]Self-evolution:[/muted]      "
+                      f"{_on(config.launch.enable_self_evolution)}")
+        console.print(f"     [muted]Plugin marketplace:[/muted]  "
+                      f"{_on(config.launch.enable_plugin_marketplace)}")
+        console.print(f"     [muted]OpenClaw bridge:[/muted]     "
+                      f"{_on(config.launch.enable_openclaw_bridge)}")
+        console.print(f"     [muted]Max tool iterations:[/muted] "
+                      f"{config.launch.max_tool_iterations}")
+        console.print(f"     [muted]Spawn limits:[/muted]        "
+                      f"depth={config.launch.max_spawn_depth}, "
+                      f"fanout={config.launch.max_spawn_fanout}")
+        console.print(f"     [muted]Concurrent tasks:[/muted]    "
+                      f"{config.security.max_concurrent_tasks}")
+        console.print(f"     [muted]Task timeout:[/muted]        "
+                      f"{config.security.task_timeout_seconds}s")
+        console.print(f"     [muted]Channels:[/muted]            "
+                      f"{', '.join(config.channels.enabled) or '(none)'}")
     except (OSError, ValueError, KeyError) as e:
         fail(f"Config load failed: {e}")
         config = None
@@ -2271,8 +2317,11 @@ def _run_start(args) -> None:
     from .config import load_config
     from .services.daemon import PIDManager, PredaCoreDaemon
 
-    profile = "public_beast" if args.public else args.profile
-    config = load_config(args.config, profile_override=profile)
+    # Honor --approvals / --no-approvals by staging it into the env var the
+    # config loader already reads (PREDACORE_APPROVALS_REQUIRED).
+    if getattr(args, "approvals", None) is not None:
+        os.environ["PREDACORE_APPROVALS_REQUIRED"] = "1" if args.approvals else "0"
+    config = load_config(args.config, profile_override=args.profile)
     daemon = PredaCoreDaemon(config)
     pid_manager = PIDManager(str(Path(config.home_dir) / "predacore.pid"))
 

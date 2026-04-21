@@ -116,6 +116,17 @@ class PersonaDriftAssessment:
 # ---------------------------------------------------------------------------
 
 
+def _load_identity_file(filename: str, config: PredaCoreConfig) -> str:
+    """Load an identity file from the agent workspace, falling back to built-ins.
+
+    Shim over `IdentityEngine._load_workspace_or_builtin()` which owns the
+    actual loading (agent-workspace → built-in fallback, prompt-injection scan).
+    Preserves the module-level call site used by tests and downstream callers.
+    """
+    from .identity import get_identity_engine
+    return get_identity_engine(config)._load_workspace_or_builtin(filename)
+
+
 def _load_self_meta_prompt(config: PredaCoreConfig) -> str:
     """
     Load optional self-optimization meta prompt text.
@@ -292,10 +303,9 @@ def _get_system_prompt(config: PredaCoreConfig) -> str:
 
 # \u2699\ufe0f Runtime Context (Current Session)
 
-- **Mode**: {config.mode}
+- **Profile**: {_launch_profile}
 - **Trust Level**: {trust.upper()} — {policy['description']}
 - **Date**: {time.strftime('%Y-%m-%d %H:%M %Z')}
-- **Launch Profile**: {_launch_profile}
 - **Active Model**: {_active_model}
 - **Channels Enabled**: {_enabled_channels}
 - **Priority Chain**: SOUL_SEED (immutable guardrails) > Identity files > This runtime section.

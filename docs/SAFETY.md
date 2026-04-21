@@ -109,9 +109,8 @@ Summed score is matched against the profile's threshold:
 
 | Profile | Threshold | Max regens |
 |---|---|---|
-| `balanced` | 0.42 | 1 |
-| `public_beast` | 0.60 | 1 |
-| `enterprise_lockdown` | 0.32 | 2 |
+| `enterprise` | 0.32 | 5 |
+| `beast` | 0.60 | 5 |
 
 Over threshold → **regenerate the turn** up to `persona_drift_max_regens` times. If regeneration fails to resolve drift, the response goes out with a warning in the JOURNAL.
 
@@ -250,9 +249,8 @@ Switchable per-session via the `trust_policy` config. No environment-variable ov
 
 | Profile | Trust | Max iter/turn | Drift threshold | Max regens |
 |---|---|---|---|---|
-| `balanced` | normal | 50 | 0.42 | 1 |
-| `public_beast` | yolo | 150 | 0.60 | 1 |
-| `enterprise_lockdown` | paranoid | 6 | 0.32 | 2 |
+| `enterprise` | normal | 1000 | 0.32 | 5 |
+| `beast` | yolo | 1000 | 0.60 | 5 |
 
 Full spec: [`docs/launch_profiles.md`](launch_profiles.md).
 
