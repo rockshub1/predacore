@@ -135,6 +135,8 @@ python -m predacore.evals.longmemeval --dataset longmemeval_s_cleaned.json --jso
 
 ~55 min on Apple Silicon. Zero per-query API cost. Full artifacts in [`benchmarks/`](https://github.com/rockshub1/predacore/tree/main/benchmarks).
 
+**Re-run instantly with response cache:** `PREDACORE_IDEMPOTENT=1` caches every deterministic LLM call locally (SQLite, 24h TTL). Subsequent benchmark runs skip the API entirely for prompts already seen — useful when quota caps kick in or you want iteration speed on eval tuning. Works with any provider (Anthropic/OpenAI + compat/Gemini).
+
 ---
 
 ## Trust profiles
