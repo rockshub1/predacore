@@ -381,7 +381,7 @@ class TelegramAdapter(ChannelAdapter):
         await update.message.reply_text(
             "✅ *PredaCore Status: Online*\n"
             f"Channel: Telegram\n"
-            f"Mode: {self.config.mode}\n"
+            f"Profile: {self.config.launch.profile}\n"
             f"Trust: {self.config.security.trust_level}\n",
             parse_mode="Markdown",
         )

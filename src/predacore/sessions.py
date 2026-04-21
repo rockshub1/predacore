@@ -31,34 +31,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# ── Legacy stub sanitizer ─────────────────────────────────────────────
-# Older agent-loop turns saved synthetic `[Calling tool: X]` /
-# `[Tool Result: X]` text stubs into session history because the loop
-# used flat strings instead of structured Anthropic content blocks for
-# tool round trips. Replaying those stubs into the prompt teaches the
-# model — via in-context learning — to emit the bracket syntax as prose
-# instead of real tool_use blocks. Strip them on load so existing
-# sessions self-heal the next time they're used.
-_LEGACY_CALLING_STUB_RE = re.compile(
-    r"\s*\[\s*Calling tool\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\]\s*",
-    re.IGNORECASE,
-)
-_LEGACY_TOOL_RESULT_STUB_RE = re.compile(
-    r"\s*\[\s*Tool Result\s*:\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\][^\n]*",
-    re.IGNORECASE,
-)
-
-
-def _sanitize_legacy_tool_stubs(text: str) -> str:
-    """Strip legacy synthetic tool-call / tool-result stubs from saved text."""
-    if not text:
-        return text
-    cleaned = _LEGACY_CALLING_STUB_RE.sub("\n", text)
-    cleaned = _LEGACY_TOOL_RESULT_STUB_RE.sub("", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return cleaned
-
-
 @dataclass
 class Message:
     """A single message in a conversation."""
@@ -351,13 +323,6 @@ class Session:
             msg: Message, *, recent_rank: int | None
         ) -> dict[str, str] | None:
             content = msg.content
-            # Strip legacy [Calling tool: X] / [Tool Result: X] stubs from
-            # assistant messages so they never re-enter the LLM prompt and
-            # retrain the model to emit the bracket syntax as prose.
-            if msg.role == "assistant" and content:
-                content = _sanitize_legacy_tool_stubs(content)
-                if not content:
-                    content = "(tool call)"
             token_count = self.estimate_tokens(content)
             if recent_rank is None:
                 token_limit = min(self.OLDER_MSG_TOKEN_LIMIT, max(self.OLDER_MSG_TOKEN_FLOOR, budget_remaining))

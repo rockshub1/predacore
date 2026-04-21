@@ -31,6 +31,7 @@ from typing import Any
 from . import predacore_sdk as psdk
 from .base import LLMProvider
 from .text_tool_adapter import build_tool_prompt, parse_tool_calls
+from .types import AssistantResponse, Message, ToolCallRef, ToolResultRef
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,85 @@ class GeminiProvider(LLMProvider):
     """Google Gemini provider — raw httpx via PredaCore SDK."""
 
     name = "gemini"
+
+    # ------------------------------------------------------------------
+    # Tool-turn serialization (Phase A refactor — 2026-04-21).
+    #
+    # Gemini's wire format differs from OpenAI + Anthropic:
+    #   - Roles: ``model`` (assistant) / ``user`` (everything else, incl. tool)
+    #   - Turns have ``parts[]`` not ``content``
+    #   - Tool calls: ``{"functionCall": {"name", "args"}}`` part
+    #   - Tool results: ``{"functionResponse": {"name", "response"}}`` part
+    #   - No native tool-call IDs — linkage by position; we synthesize
+    #     stable IDs so the abstract ``ToolCallRef.id`` round-trips
+    #
+    # Both append_* methods override to stash wire-ready ``parts`` in
+    # ``provider_extras["parts"]``. ``_build_payload`` prefers those parts
+    # over reconstructing from ``content``.
+    # ------------------------------------------------------------------
+
+    def append_assistant_turn(
+        self,
+        messages: list["Message"],
+        response: "AssistantResponse",
+    ) -> None:
+        import uuid
+
+        parts: list[dict[str, Any]] = []
+        if response.content:
+            parts.append({"text": response.content})
+        normalized_tool_calls: list[ToolCallRef] = []
+        for i, tc in enumerate(response.tool_calls):
+            # Gemini doesn't emit IDs — synthesize stable one if absent so the
+            # downstream ``ToolResultRef.call_id`` has something to match.
+            tc_id = tc.id or f"gemini_{i}_{uuid.uuid4().hex[:8]}"
+            normalized_tool_calls.append(
+                ToolCallRef(id=tc_id, name=tc.name, arguments=tc.arguments)
+            )
+            parts.append(
+                {"functionCall": {"name": tc.name, "args": tc.arguments}}
+            )
+
+        messages.append(
+            Message(
+                role="assistant",  # abstract — _build_payload maps to "model"
+                content=response.content,
+                tool_calls=normalized_tool_calls,
+                provider_extras={
+                    **response.provider_extras,
+                    "parts": parts,
+                },
+            )
+        )
+
+    def append_tool_results_turn(
+        self,
+        messages: list["Message"],
+        results: list["ToolResultRef"],
+    ) -> None:
+        if not results:
+            return
+        parts: list[dict[str, Any]] = []
+        for r in results:
+            response_obj: dict[str, Any] = {"result": r.result}
+            if r.is_error:
+                response_obj["is_error"] = True
+            parts.append(
+                {
+                    "functionResponse": {
+                        "name": r.name,
+                        "response": response_obj,
+                    }
+                }
+            )
+        messages.append(
+            Message(
+                role="user",  # Gemini: tool results go in a user turn
+                content="",  # Gemini ignores text content when parts[] is present
+                tool_results=list(results),
+                provider_extras={"parts": parts},
+            )
+        )
 
     async def chat(
         self,
@@ -177,6 +257,10 @@ def _build_payload(
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        # NEW (Phase A): prefer pre-built parts from provider_extras when our
+        # append_*_turn methods stashed wire-ready functionCall/functionResponse.
+        # Falls back to text-based reconstruction for legacy callers.
+        prebuilt_parts = msg.get("parts")
         # Tolerate list-of-blocks content (strip to text)
         if isinstance(content, list):
             content = "".join(
@@ -185,11 +269,19 @@ def _build_payload(
                 if isinstance(b, dict) and b.get("type") == "text"
             )
         if role == "system":
-            system_parts.append(content)
+            if isinstance(prebuilt_parts, list):
+                system_parts.extend(
+                    p.get("text", "") for p in prebuilt_parts if isinstance(p, dict) and "text" in p
+                )
+            else:
+                system_parts.append(content)
         elif role == "assistant":
-            contents.append({"role": "model", "parts": [{"text": content}]})
+            parts = prebuilt_parts if isinstance(prebuilt_parts, list) else [{"text": content}]
+            contents.append({"role": "model", "parts": parts})
         else:
-            contents.append({"role": "user", "parts": [{"text": content}]})
+            # user OR tool (which we route into user turn per Gemini convention)
+            parts = prebuilt_parts if isinstance(prebuilt_parts, list) else [{"text": content}]
+            contents.append({"role": "user", "parts": parts})
 
     payload: dict[str, Any] = {"contents": contents}
 

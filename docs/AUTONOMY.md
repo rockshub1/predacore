@@ -29,13 +29,11 @@ turn. Defaults:
 
 | Profile | Cap | Rationale |
 |---|---|---|
-| `balanced` | **50** | Raised from 10. Chat-first, but modern models are good enough that 10 was cramping normal work. |
-| `public_beast` | **150** | Raised from 30. Autonomy-leaning profile — a single chat turn can now do real multi-step work. |
-| `enterprise_lockdown` | 6 | Deliberately tight. Every action audited. |
+| `enterprise` | **1000** | Safe-by-default but resource-maxed. meta_cognition loop detector catches runaway. |
+| `beast` | **1000** | Autonomous, same cap. Identical resource limits on both profiles — modes differ on governance, not capacity. |
 
 Hard ceiling is `_ABSOLUTE_MAX_ITERATIONS = 1000` in `core.py` regardless
-of config. Raise the profile default or override per-deployment via
-`MAX_TOOL_ITERATIONS=N` env var.
+of config. Override per-deployment via `MAX_TOOL_ITERATIONS=N` env var.
 
 ## Safety rails worth knowing
 
@@ -111,7 +109,7 @@ security:
 
 ## TL;DR
 
-- Foreground cap = 50 (balanced), 150 (public_beast). That's enough for
+- Foreground cap = 1000 on both profiles. That's more than enough for
   most work; no separate background tool needed.
 - For teams or long runs: use `multi_agent` (+ `use_daf=true` for
   persistence).

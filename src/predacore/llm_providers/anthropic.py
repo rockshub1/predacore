@@ -35,6 +35,7 @@ from .base import LLMProvider
 from .claude_models import DEFAULT_CLAUDE_MODEL, resolve_claude_model
 from .message_validator import repair_tool_flow
 from .text_tool_adapter import build_tool_prompt, parse_tool_calls
+from .types import Message, ToolResultRef
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,57 @@ class AnthropicProvider(LLMProvider):
     """
 
     name = "anthropic"
+
+    # ------------------------------------------------------------------
+    # Tool-turn serialization (Phase A refactor — 2026-04-21).
+    #
+    # Anthropic's API expects all tool_result blocks in a SINGLE user turn
+    # whose content is a list of content blocks. This diverges from the
+    # OpenAI-shaped default (one ``role="tool"`` turn per result), so we
+    # override ``append_tool_results_turn`` to bundle.
+    #
+    # ``append_assistant_turn`` uses the default — it copies
+    # ``response.provider_extras`` which carries ``content_blocks`` (thinking
+    # signatures + tool_use ids) from ``wire.parse_response()``. The wire
+    # serializer then round-trips those blocks verbatim, satisfying
+    # Anthropic's extended-thinking contract.
+    # ------------------------------------------------------------------
+
+    def append_tool_results_turn(
+        self,
+        messages: list[Message],
+        results: list[ToolResultRef],
+    ) -> None:
+        if not results:
+            return
+        # Pre-build wire-ready content_blocks so the existing
+        # _anthropic_wire.build_conv_messages path finds them under
+        # provider_extras["content_blocks"] and uses them verbatim. The
+        # abstract ``tool_results`` field stays populated for any future
+        # caller that prefers the typed form.
+        wire_blocks: list[dict[str, Any]] = []
+        for r in results:
+            block: dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": r.call_id,
+                "content": r.result,
+            }
+            if r.is_error:
+                block["is_error"] = True
+            wire_blocks.append(block)
+
+        summary_lines = [
+            f"[{r.name}] {'ERROR: ' if r.is_error else ''}{r.result[:200]}"
+            for r in results
+        ]
+        messages.append(
+            Message(
+                role="user",
+                content="\n".join(summary_lines),
+                tool_results=list(results),
+                provider_extras={"content_blocks": wire_blocks},
+            )
+        )
 
     async def chat(
         self,

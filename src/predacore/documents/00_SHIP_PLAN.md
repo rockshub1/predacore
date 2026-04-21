@@ -89,7 +89,7 @@ Each layer gets: **Read doc → Read code → Fix → Test → Verify → Next**
   - Default config loads without any file
   - YAML override merges correctly
   - Env var override takes precedence
-  - All 3 profiles (balanced, public_beast, enterprise_lockdown)
+  - Both profiles (enterprise, beast)
   - All dataclass defaults are sensible
   - `load_config()` creates directories
   - `save_default_config()` writes valid YAML

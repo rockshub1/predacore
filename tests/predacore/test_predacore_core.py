@@ -174,7 +174,7 @@ class TestSystemPromptAssembly:
         """System prompt should include dynamic runtime context."""
         prompt = _get_system_prompt(config)
         assert "Runtime Context" in prompt
-        assert config.mode in prompt
+        assert config.launch.profile in prompt
         assert "NORMAL" in prompt
 
     def test_prompt_contains_trust_policy(self, config):
@@ -315,10 +315,9 @@ class TestConfigSystem:
         """Default config should have sensible values."""
         cfg = PredaCoreConfig()
         assert cfg.name == "PredaCore"
-        assert cfg.mode == "personal"
         assert cfg.llm.provider == "gemini-cli"
         assert cfg.security.trust_level == "normal"
-        assert cfg.launch.profile == "balanced"
+        assert cfg.launch.profile == "enterprise"
 
     def test_home_dir_defaults(self):
         """Home dir should default to ~/.prometheus."""
@@ -363,30 +362,28 @@ class TestConfigSystem:
     def test_launch_profile_config_defaults(self):
         """Launch profile defaults should be deterministic."""
         lp = LaunchProfileConfig()
-        assert lp.profile == "balanced"
+        assert lp.profile == "enterprise"
         assert lp.approvals_required is True
         assert lp.default_code_network is False
-        # Tool iterations cap was raised from 10 to 200 under the "remove
-        # all limits" directive — see config.py::LaunchProfileConfig.
-        assert lp.max_tool_iterations == 200
+        # 2-mode simplification: resource limits maxed on both profiles.
+        assert lp.max_tool_iterations == 1000
         assert lp.enable_persona_drift_guard is True
-        assert lp.persona_drift_threshold == 0.42
-        assert lp.persona_drift_max_regens == 1
+        assert lp.persona_drift_threshold == 0.32
+        assert lp.persona_drift_max_regens == 5
 
-    def test_load_config_public_profile_from_env(self, tmp_path, monkeypatch):
-        """Public profile should apply preset defaults and sync runtime env."""
+    def test_load_config_beast_profile_from_env(self, tmp_path, monkeypatch):
+        """Beast profile should apply preset defaults and sync runtime env."""
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("name: PredaCore\n")
 
-        monkeypatch.setenv("PREDACORE_PROFILE", "public_beast")
+        monkeypatch.setenv("PREDACORE_PROFILE", "beast")
         cfg = load_config(str(cfg_file))
 
-        assert cfg.launch.profile == "public_beast"
-        assert cfg.mode == "public"
+        assert cfg.launch.profile == "beast"
         assert cfg.security.trust_level == "yolo"
         assert cfg.launch.approvals_required is False
         assert cfg.launch.egm_mode == "off"
-        assert cfg.launch.max_tool_iterations == 30
+        assert cfg.launch.max_tool_iterations == 1000
         assert cfg.launch.persona_drift_threshold == 0.60
         assert os.environ.get("APPROVALS_REQUIRED") == "0"
         assert os.environ.get("DEFAULT_CODE_NETWORK") == "1"
@@ -396,12 +393,11 @@ class TestConfigSystem:
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("name: PredaCore\n")
 
-        monkeypatch.setenv("PREDACORE_PROFILE", "public_beast")
-        cfg = load_config(str(cfg_file), profile_override="enterprise_lockdown")
+        monkeypatch.setenv("PREDACORE_PROFILE", "beast")
+        cfg = load_config(str(cfg_file), profile_override="enterprise")
 
-        assert cfg.launch.profile == "enterprise_lockdown"
-        assert cfg.mode == "enterprise"
-        assert cfg.security.trust_level == "paranoid"
+        assert cfg.launch.profile == "enterprise"
+        assert cfg.security.trust_level == "normal"
         assert cfg.launch.approvals_required is True
         assert os.environ.get("APPROVALS_REQUIRED") == "1"
 
@@ -412,7 +408,7 @@ class TestConfigSystem:
             textwrap.dedent(
                 """
                 launch:
-                  profile: public_beast
+                  profile: beast
                 security:
                   max_concurrent_tasks: 42
                 channels:
@@ -423,7 +419,7 @@ class TestConfigSystem:
         )
 
         cfg = load_config(str(cfg_file))
-        assert cfg.launch.profile == "public_beast"
+        assert cfg.launch.profile == "beast"
         assert cfg.security.max_concurrent_tasks == 42
         assert "telegram" in cfg.channels.enabled
 
@@ -437,7 +433,7 @@ class TestConfigSystem:
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("name: PredaCore\n")
 
-        monkeypatch.setenv("PREDACORE_PROFILE", "public_beast")
+        monkeypatch.setenv("PREDACORE_PROFILE", "beast")
         monkeypatch.setenv("OPENCLAW_BRIDGE_URL", "https://bridge.example.com")
         monkeypatch.setenv("OPENCLAW_BRIDGE_API_KEY", "test-token")
         monkeypatch.setenv("OPENCLAW_BRIDGE_MODEL", "openclaw:main")
@@ -869,7 +865,7 @@ class TestCoreLaunchBehavior:
             logs_dir=str(tmp_home / "logs"),
             llm=LLMConfig(provider="gemini-cli"),
             launch=LaunchProfileConfig(
-                profile="public_beast",
+                profile="beast",
                 approvals_required=False,
                 egm_mode="off",
                 default_code_network=True,
@@ -1220,14 +1216,14 @@ class TestIntegration:
 
     def test_prompt_with_all_configs(self, config):
         """Prompt should work with various config combinations."""
-        for trust in ["yolo", "normal", "paranoid"]:
-            for mode in ["personal", "enterprise"]:
+        for trust in ["yolo", "normal"]:
+            for profile in ["enterprise", "beast"]:
                 config.security.trust_level = trust
-                config.mode = mode
+                config.launch.profile = profile
                 prompt = _get_system_prompt(config)
                 assert len(prompt) > 0
                 assert trust.upper() in prompt
-                assert mode in prompt
+                assert profile in prompt
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1240,7 +1236,6 @@ class TestEdgeCases:
 
     def test_prompt_never_empty(self, config):
         """System prompt should never be empty, regardless of config."""
-        config.mode = ""
         prompt = _get_system_prompt(config)
         assert len(prompt) > 100
 

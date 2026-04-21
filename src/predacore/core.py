@@ -1216,6 +1216,17 @@ class PredaCoreCore:
                 _stream_this_iter = (
                     stream_fn if (not _tools_this_iter or _provider_owns_tool_loop) else None
                 )
+                # Phase B: let the active provider annotate messages/tools with
+                # its own cache markers before inference (Anthropic cache_control,
+                # Gemini cachedContent, etc.). Fail-open — cache failures must
+                # never block inference.
+                try:
+                    _provider = self.llm.active_provider_instance
+                    # Messages are dicts on this path; providers that need typed
+                    # Messages for cache hints can convert via message_from_dict.
+                    _provider.apply_cache_hints(messages, _tools_this_iter)  # type: ignore[arg-type]
+                except Exception as _cache_err:  # noqa: BLE001
+                    logger.debug("apply_cache_hints failed (non-fatal): %s", _cache_err)
                 response = await self.llm.chat(
                     messages=messages,
                     tools=_tools_this_iter,
@@ -1308,44 +1319,6 @@ class PredaCoreCore:
                 )
                 continue
 
-            # Detect a POISONED fake-tool-call: the model typed the literal
-            # string `[Calling tool: X]` as prose instead of emitting a real
-            # tool_use block. This happens when prior turns' synthetic stubs
-            # taught the model the bracket syntax via in-context learning.
-            # Strip the stub and retry with an explicit enforcement reminder.
-            _FAKE_TOOL_CALL_RE = re.compile(
-                r"\[\s*Calling tool\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]",
-                re.IGNORECASE,
-            )
-            _fake_match = _FAKE_TOOL_CALL_RE.search(content or "") if not tool_calls else None
-            if _fake_match and tool_announcement_retry < 2:
-                faked_tool = _fake_match.group(1)
-                tool_announcement_retry += 1
-                logger.warning(
-                    "LLM emitted fake tool-call stub '[Calling tool: %s]' as text "
-                    "(poisoned context, attempt %d/2). Stripping and retrying.",
-                    faked_tool,
-                    tool_announcement_retry,
-                )
-                clean = _FAKE_TOOL_CALL_RE.sub("", content).strip()
-                messages.append(
-                    {"role": "assistant", "content": clean or "(retrying)"}
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "[System: Your previous response contained the literal text "
-                            f"`[Calling tool: {faked_tool}]` but no real tool_use block. "
-                            "That is NOT how you call tools. Emit a structured tool_use "
-                            "block — do not type the square-bracket syntax as prose. "
-                            "Either call the tool properly now, or give your final "
-                            "answer without mentioning tools.]"
-                        ),
-                    }
-                )
-                continue
-
             # Detect tool refusal / harness-limitation responses when tools are available.
             if (
                 not tool_calls
@@ -1393,10 +1366,6 @@ class PredaCoreCore:
 
             # No tool calls → we're done
             if not tool_calls:
-                # Guard: if the LLM just echoed a tool-call marker as its
-                # "response", replace it with a useful summary prompt.
-                if content.strip().startswith("[Calling tool:"):
-                    content = ""
                 if not content.strip() and _tools_used:
                     # LLM returned empty/marker content after tool use —
                     # ask it to summarize what happened.
@@ -1736,9 +1705,64 @@ class PredaCoreCore:
                     return s[:12000] + "\n...[truncated]...\n" + s[-2000:]
                 return s
 
-            if structured_path:
-                # ONE assistant turn preserving thinking + tool_use blocks,
-                # followed by ONE user turn with all tool_result blocks.
+            # Phase A refactor (2026-04-21): provider-delegated tool-turn
+            # serialization. Each provider builds its OWN wire-format turns
+            # via the typed LLMProvider.append_*_turn methods — no more
+            # structured/flat fork here, no more "[Calling tool: X]" text
+            # stubs for non-Anthropic providers.
+            #
+            # Default is ON. Set PREDACORE_NEW_TOOL_TURNS=0 to force the
+            # legacy path (emergency rollback only — the legacy path is
+            # scheduled for removal).
+            _use_new_tool_turns = os.getenv("PREDACORE_NEW_TOOL_TURNS", "1") != "0"
+
+            if _use_new_tool_turns:
+                from .llm_providers import (
+                    AssistantResponse,
+                    ToolCallRef,
+                    ToolResultRef,
+                    message_from_dict,
+                    message_to_dict,
+                )
+
+                # Build typed response — the provider's chat() still returns a
+                # dict so we normalize here at the core↔provider boundary.
+                typed_tool_calls = [
+                    ToolCallRef(
+                        id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
+                        name=tc.get("name", ""),
+                        arguments=tc.get("arguments", {}) or tc.get("input", {}) or {},
+                    )
+                    for idx, tc in enumerate(tool_calls)
+                ]
+                typed_response = AssistantResponse(
+                    content=content or "",
+                    tool_calls=typed_tool_calls,
+                    provider_extras={"content_blocks": response_blocks} if response_blocks else {},
+                )
+                # Build typed tool results from (tc, result_str) pairs
+                typed_results: list[ToolResultRef] = []
+                for idx, (tc, result_str) in enumerate(collected):
+                    capped = _cap_result(result_str)
+                    typed_results.append(
+                        ToolResultRef(
+                            call_id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
+                            name=tc.get("name", ""),
+                            result=capped,
+                            is_error=capped.startswith("[Error") or capped.startswith("Error:"),
+                        )
+                    )
+
+                # Provider owns serialization — no more fork, no more poison stubs
+                provider = self.llm.active_provider_instance
+                typed_msgs = [message_from_dict(m) for m in messages]
+                provider.append_assistant_turn(typed_msgs, typed_response)
+                provider.append_tool_results_turn(typed_msgs, typed_results)
+                # Re-sync dict-based messages list in place
+                messages[:] = [message_to_dict(m) for m in typed_msgs]
+            elif structured_path:
+                # LEGACY structured path (Anthropic only) — kept for one-week
+                # rollback window. Identical to pre-Phase-A behavior.
                 tool_result_blocks: list[dict] = []
                 summary_lines: list[str] = []
                 for tc, result_str in collected:
@@ -1769,7 +1793,10 @@ class PredaCoreCore:
                     }
                 )
             else:
-                # Flat path for non-Anthropic providers: legacy per-tool stubs.
+                # LEGACY flat path — kept for one-week rollback window.
+                # This is the PATH THAT CAUSED CONTEXT POISONING via literal
+                # "[Calling tool: X]" text stubs. It will be deleted in A.8
+                # once PREDACORE_NEW_TOOL_TURNS=1 is the default.
                 for tc, result_str in collected:
                     capped = _cap_result(result_str)
                     messages.append(

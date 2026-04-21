@@ -114,6 +114,93 @@ class OpenAIProvider(LLMProvider):
 
     name = "openai"
 
+    # ------------------------------------------------------------------
+    # Tool-turn serialization (Phase A refactor — 2026-04-21).
+    #
+    # OpenAI's wire format for tool round-trips is already what the default
+    # ``append_*_turn`` methods on LLMProvider produce at the abstract level
+    # (``role="assistant"`` with ``tool_calls``; one ``role="tool"`` Message
+    # per result). So we inherit both defaults unchanged.
+    #
+    # The ONLY twist is that the default emits our abstract dict shape:
+    #
+    #     {"role": "assistant", "content": "...",
+    #      "tool_calls": [{"id": X, "name": Y, "arguments": {...}}]}
+    #
+    # while OpenAI's API expects its native nested shape:
+    #
+    #     {"role": "assistant", "content": "...",
+    #      "tool_calls": [{"id": X, "type": "function",
+    #                      "function": {"name": Y, "arguments": "<json-str>"}}]}
+    #
+    # ``_serialize_messages_for_wire`` is called inside ``chat()`` to do the
+    # translation. Old-format dicts (legacy callers not yet migrated) are
+    # passed through unchanged so the migration can happen incrementally.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _serialize_messages_for_wire(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Translate abstract-format messages to OpenAI wire format.
+
+        Accepts a mix of legacy-format dicts (plain role/content, no
+        ``tool_calls``/``tool_results`` keys) and new abstract-format dicts
+        produced by ``types.message_to_dict``. Legacy dicts pass through
+        unchanged; abstract dicts are rewritten to OpenAI's nested shape.
+        """
+        import json
+
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role", "user")
+
+            # Abstract assistant turn with tool_calls → OpenAI assistant shape
+            if role == "assistant" and m.get("tool_calls"):
+                wire_tool_calls = []
+                for tc in m["tool_calls"]:
+                    args = tc.get("arguments", {})
+                    args_str = args if isinstance(args, str) else json.dumps(args)
+                    wire_tool_calls.append(
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": args_str,
+                            },
+                        }
+                    )
+                wire_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": m.get("content") or None,
+                    "tool_calls": wire_tool_calls,
+                }
+                out.append(wire_msg)
+                continue
+
+            # Abstract tool turn → OpenAI role="tool" with tool_call_id
+            if role == "tool" and m.get("tool_results"):
+                for tr in m["tool_results"]:
+                    out.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tr.get("call_id", ""),
+                            "content": tr.get("result", ""),
+                        }
+                    )
+                continue
+
+            # Legacy or non-tool turn — pass through, but strip our abstract
+            # keys so they don't leak to the API.
+            passthrough = {k: v for k, v in m.items() if k not in ("tool_calls", "tool_results", "content_blocks")}
+            # Preserve content-only assistant/tool turns from legacy callers
+            if "tool_calls" in m and not m.get("tool_calls"):
+                pass  # empty list — no-op
+            out.append(passthrough)
+
+        return out
+
     def _resolve_endpoint(self) -> tuple[str, str, str]:
         """Resolve API key, base URL, and default model for the active provider.
 
@@ -184,7 +271,7 @@ class OpenAIProvider(LLMProvider):
 
         body: dict[str, Any] = {
             "model": model,
-            "messages": list(messages),
+            "messages": self._serialize_messages_for_wire(list(messages)),
             "temperature": (
                 temperature if temperature is not None else self.config.temperature
             ),

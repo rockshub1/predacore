@@ -1,107 +1,117 @@
 # Prometheus Launch Profiles
 
-This document defines runtime launch postures for PredaCore.
+Two modes. Pick one.
 
 ## Profiles
 
-### `balanced` (default)
-- `mode`: `personal`
-- `trust_level`: `normal`
-- `docker_sandbox`: `false`
-- `approvals_required`: `true`
-- `egm_mode`: `log_only`
-- `default_code_network`: `false`
+### `enterprise` (default)
 
-Use for local development and iterative testing.
+Safe-by-default. Strict governance posture, approvals required, no self-evolution.
 
-### `public_beast`
-- `mode`: `public`
-- `trust_level`: `yolo`
-- `docker_sandbox`: `true`
-- `max_concurrent_tasks`: `12`
-- `task_timeout_seconds`: `600`
-- `approvals_required`: `false`
-- `egm_mode`: `off`
-- `default_code_network`: `true`
-- `enable_openclaw_bridge`: `true` (active bridge tool path)
-- `enable_plugin_marketplace`: `true`
-- `enable_self_evolution`: `true`
-- `max_spawn_depth`: `0` (unbounded by profile)
-- `max_spawn_fanout`: `0` (unbounded by profile)
-- `max_tool_iterations`: `64`
+| Setting | Value |
+|---|---|
+| `trust_level` | `normal` |
+| `approvals_required` | `true` *(user-toggleable)* |
+| `egm_mode` | `strict` |
+| `docker_sandbox` | `true` |
+| `default_code_network` | `false` |
+| `enable_openclaw_bridge` | `false` |
+| `enable_plugin_marketplace` | `false` |
+| `enable_self_evolution` | `false` |
+| `persona_drift_threshold` | `0.32` |
 
-Use for high-capability public launches where speed and breadth are prioritized.
+### `beast`
 
-### `enterprise_lockdown`
-- `mode`: `enterprise`
-- `trust_level`: `paranoid`
-- `docker_sandbox`: `true`
-- `max_concurrent_tasks`: `3`
-- `task_timeout_seconds`: `180`
-- `approvals_required`: `true`
-- `egm_mode`: `strict`
-- `default_code_network`: `false`
-- `enable_openclaw_bridge`: `false`
-- `enable_plugin_marketplace`: `false`
-- `enable_self_evolution`: `false`
+Autonomous posture. No approvals, self-evolution on, plugins open.
 
-Use for regulated or high-assurance enterprise deployments.
+| Setting | Value |
+|---|---|
+| `trust_level` | `yolo` |
+| `approvals_required` | `false` *(user-toggleable)* |
+| `egm_mode` | `off` |
+| `docker_sandbox` | `true` |
+| `default_code_network` | `true` |
+| `enable_openclaw_bridge` | `true` |
+| `enable_plugin_marketplace` | `true` |
+| `enable_self_evolution` | `true` |
+| `persona_drift_threshold` | `0.60` |
+
+## Resource limits — maxed on both
+
+Every resource cap is identical across modes. The split is governance, not capacity.
+
+| Setting | Value |
+|---|---|
+| `max_concurrent_tasks` | `100` |
+| `task_timeout_seconds` | `3600` (1 hour) |
+| `max_spawn_depth` | `16` |
+| `max_spawn_fanout` | `64` |
+| `max_tool_iterations` | `1000` |
+| `persona_drift_max_regens` | `5` |
 
 ## CLI Usage
 
 ```bash
-# Public launch
-prometheus start --public --daemon
+# Default (enterprise)
+predacore start --daemon
 
-# Explicit profile launch
-prometheus start --profile public_beast --daemon
+# Beast mode
+predacore start --profile beast --daemon
 
-# Enterprise launch
-prometheus start --profile enterprise_lockdown --daemon
+# Enterprise, but skip approval prompts (e.g. for CI)
+predacore start --profile enterprise --no-approvals --daemon
+
+# Beast, but require approvals (belt-and-suspenders)
+predacore start --profile beast --approvals --daemon
 ```
 
 ## Environment Overrides
 
-You can set profile and launch flags via environment variables:
-
 ```bash
-export PREDACORE_PROFILE=public_beast
-export PREDACORE_APPROVALS_REQUIRED=0
-export PREDACORE_EGM_MODE=off
+export PREDACORE_PROFILE=beast              # enterprise | beast
+export PREDACORE_APPROVALS_REQUIRED=0        # 0 or 1 — overrides profile default
+export PREDACORE_EGM_MODE=off                # off | log_only | strict
 export PREDACORE_DEFAULT_CODE_NETWORK=1
 export PREDACORE_ENABLE_OPENCLAW_BRIDGE=1
 export PREDACORE_ENABLE_PLUGIN_MARKETPLACE=1
 export PREDACORE_ENABLE_SELF_EVOLUTION=1
-export PREDACORE_MAX_SPAWN_DEPTH=0
-export PREDACORE_MAX_SPAWN_FANOUT=0
-export PREDACORE_MAX_TOOL_ITERATIONS=64
+export PREDACORE_MAX_SPAWN_DEPTH=16
+export PREDACORE_MAX_SPAWN_FANOUT=64
+export PREDACORE_MAX_TOOL_ITERATIONS=1000
+export PREDACORE_TRUST_LEVEL=yolo            # yolo | normal
 
+# OpenClaw bridge (only used if enable_openclaw_bridge=true)
 export OPENCLAW_BRIDGE_URL=https://bridge.example.com
-export OPENCLAW_BRIDGE_TASK_PATH=/v1/responses
+export OPENCLAW_BRIDGE_API_KEY=...
 export OPENCLAW_BRIDGE_MODEL=openclaw
 export OPENCLAW_BRIDGE_AGENT_ID=main
-# legacy async APIs only:
-# export OPENCLAW_BRIDGE_STATUS_PATH=/v1/tasks/{task_id}
 export OPENCLAW_BRIDGE_TIMEOUT=180
-export OPENCLAW_BRIDGE_VERIFY_TLS=1
-export OPENCLAW_BRIDGE_MAX_RETRIES=2
-export OPENCLAW_BRIDGE_RETRY_BACKOFF=1.0
-export OPENCLAW_BRIDGE_POLL_INTERVAL=1.5
-export OPENCLAW_BRIDGE_MAX_POLL_SECONDS=180
-export PREDACORE_ACTION_LEDGER_PATH=~/.predacore/logs/openclaw_actions.jsonl
-export PREDACORE_IDEMPOTENCY_DB_PATH=~/.predacore/memory/openclaw_idempotency.db
-export PREDACORE_KILL_SWITCH=0
-# optional:
-# export OPENCLAW_BRIDGE_API_KEY=...
 ```
+
+**Precedence order:** profile defaults → YAML config → environment variables → CLI flags.
+(Later wins. So `--no-approvals` beats `PREDACORE_APPROVALS_REQUIRED=1` beats YAML beats preset.)
 
 ## Runtime Policy Sync
 
-When `load_config()` runs, it syncs policy variables used by service modules:
+When `load_config()` runs, it mirrors the resolved policy into env vars that
+service modules read at runtime:
 
+- `PREDACORE_PROFILE`
 - `APPROVALS_REQUIRED`
 - `EGM_MODE`
 - `DEFAULT_CODE_NETWORK`
-- `PREDACORE_PROFILE`
+- `MAX_TOOL_ITERATIONS`
+- `PREDACORE_ENABLE_PERSONA_DRIFT_GUARD` / `_THRESHOLD` / `_MAX_REGENS`
 
-This keeps CLI and service behavior aligned with the selected launch profile.
+This keeps CLI and service behavior aligned with the selected profile.
+
+## Verifying active posture
+
+```bash
+predacore doctor      # shows the full resolved config (Profile + every toggle)
+predacore status      # one-screen summary of the same
+```
+
+Both commands now print the active profile, trust level, approvals state, and
+every launch toggle. If either says something unexpected, check env vars first
+(`env | grep PREDACORE_`), then the YAML at `~/.predacore/config.yaml`.

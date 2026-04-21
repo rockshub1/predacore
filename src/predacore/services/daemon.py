@@ -236,8 +236,9 @@ class PredaCoreDaemon:
             "started_at": self._started_at,
             "heartbeat_count": self._heartbeat_count,
             "config": {
-                "mode": self.config.mode,
+                "profile": self.config.launch.profile,
                 "trust_level": self.config.security.trust_level,
+                "approvals_required": self.config.launch.approvals_required,
                 "llm_provider": self.config.llm.provider,
                 "channels": self.config.channels.enabled,
             },

@@ -66,7 +66,7 @@ def _make_config(tmp_path: Path, **overrides) -> PredaCoreConfig:
         daemon=DaemonConfig(enabled=False),
         memory=MemoryConfig(persistence_dir=str(tmp_path / "prometheus" / "memory")),
         launch=LaunchProfileConfig(
-            profile="balanced",
+            profile="enterprise",
             enable_persona_drift_guard=True,
             persona_drift_threshold=0.42,
             persona_drift_max_regens=1,
@@ -83,6 +83,23 @@ def _make_config(tmp_path: Path, **overrides) -> PredaCoreConfig:
               cfg.memory.persistence_dir, cfg.agent_dir, cfg.flame_dir]:
         Path(d).mkdir(parents=True, exist_ok=True)
     return cfg
+
+
+def _test_provider_instance():
+    """A minimal LLMProvider with default append_*_turn methods.
+
+    Mock-based tests set this as ``llm_inst.active_provider_instance`` so
+    core.py's Phase-A provider-delegated tool-turn serialization path has
+    something real to call (Mocks don't mutate messages on append_*_turn).
+    """
+    from predacore.llm_providers.base import LLMProvider, ProviderConfig
+
+    class _TestProvider(LLMProvider):
+        name = "test"
+        async def chat(self, messages, tools=None, temperature=None, max_tokens=None, stream_fn=None):
+            return {"content": "", "tool_calls": [], "usage": {}, "finish_reason": "stop"}
+
+    return _TestProvider(config=ProviderConfig())
 
 
 def _mock_llm_response(content: str = "Hello! I'm PredaCore.", **extra) -> dict:
@@ -186,6 +203,9 @@ class TestFullConversationFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -209,6 +229,9 @@ class TestFullConversationFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -234,6 +257,9 @@ class TestFullConversationFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -265,6 +291,9 @@ class TestFullConversationFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -317,6 +346,9 @@ class TestToolExecutionFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -357,6 +389,9 @@ class TestToolExecutionFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -401,6 +436,9 @@ class TestToolExecutionFlow:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -643,27 +681,25 @@ class TestConfigLoading:
         assert cfg.name == "PredaCore"
         assert cfg.llm.provider == "gemini-cli"  # default provider
         assert cfg.security.trust_level == "normal"
-        assert cfg.launch.profile == "balanced"
+        assert cfg.launch.profile == "enterprise"
 
     def test_yaml_overrides_apply(self, tmp_path):
         """YAML config overrides defaults."""
         yaml_path = tmp_path / "config.yaml"
         yaml_path.write_text(
             "name: CUSTOM-PredaCore\n"
-            "mode: enterprise\n"
             "llm:\n"
             "  provider: openai\n"
             "  temperature: 0.3\n"
             "security:\n"
-            "  trust_level: paranoid\n"
+            "  trust_level: yolo\n"
         )
         cfg = load_config(config_path=str(yaml_path))
 
         assert cfg.name == "CUSTOM-PredaCore"
-        assert cfg.mode == "enterprise"
         assert cfg.llm.provider == "openai"
         assert cfg.llm.temperature == 0.3
-        assert cfg.security.trust_level == "paranoid"
+        assert cfg.security.trust_level == "yolo"
 
     def test_env_vars_override_yaml(self, tmp_path):
         """Environment variables take precedence over YAML."""
@@ -690,30 +726,35 @@ class TestConfigLoading:
     def test_profile_presets_apply(self, tmp_path):
         """Profile override applies the correct preset defaults."""
         bogus_path = str(tmp_path / "no.yaml")
-        cfg = load_config(config_path=bogus_path, profile_override="public_beast")
+        cfg = load_config(config_path=bogus_path, profile_override="beast")
 
-        assert cfg.launch.profile == "public_beast"
+        assert cfg.launch.profile == "beast"
         assert cfg.security.trust_level == "yolo"
-        assert cfg.launch.max_tool_iterations == 150
+        assert cfg.launch.max_tool_iterations == 1000
+        assert cfg.launch.enable_self_evolution is True
 
-    def test_enterprise_lockdown_profile(self, tmp_path):
-        """Enterprise lockdown profile restricts everything."""
+    def test_enterprise_profile(self, tmp_path):
+        """Enterprise profile applies safe-by-default governance posture."""
         cfg = load_config(
             config_path=str(tmp_path / "no.yaml"),
-            profile_override="enterprise_lockdown",
+            profile_override="enterprise",
         )
-        assert cfg.security.trust_level == "paranoid"
-        assert cfg.launch.max_tool_iterations == 6
-        assert cfg.launch.max_spawn_depth == 2
+        assert cfg.security.trust_level == "normal"
+        assert cfg.launch.approvals_required is True
+        assert cfg.launch.egm_mode == "strict"
+        assert cfg.launch.enable_self_evolution is False
+        # Resource limits are maxed on both profiles.
+        assert cfg.launch.max_tool_iterations == 1000
+        assert cfg.launch.max_spawn_depth == 16
 
     def test_save_and_reload_config(self, tmp_path):
         """save_default_config creates a file that load_config can read."""
         config_path = str(tmp_path / "saved_config.yaml")
-        save_default_config(path=config_path, provider="openai", trust_level="paranoid")
+        save_default_config(path=config_path, provider="openai", trust_level="yolo")
 
         cfg = load_config(config_path=config_path)
         assert cfg.llm.provider == "openai"
-        assert cfg.security.trust_level == "paranoid"
+        assert cfg.security.trust_level == "yolo"
 
     def test_config_directories_created(self, tmp_path):
         """load_config creates all required directories."""
@@ -941,6 +982,9 @@ class TestErrorRecovery:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -967,6 +1011,9 @@ class TestErrorRecovery:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1002,6 +1049,9 @@ class TestErrorRecovery:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1025,6 +1075,9 @@ class TestErrorRecovery:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1134,6 +1187,9 @@ class TestPersonaDriftGuard:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1164,6 +1220,9 @@ class TestPersonaDriftGuard:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1187,6 +1246,9 @@ class TestPersonaDriftGuard:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1221,6 +1283,9 @@ class TestPersonaDriftGuard:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1425,6 +1490,9 @@ class TestConfigCoreIntegration:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1448,6 +1516,9 @@ class TestConfigCoreIntegration:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1468,6 +1539,9 @@ class TestConfigCoreIntegration:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
@@ -1494,6 +1568,9 @@ class TestMemoryCoreIntegration:
             llm_inst.active_model = "test-model"
             llm_inst._provider_name = "mock"
             llm_inst.executes_tool_loop_internally = False
+            # Phase A: core.py calls provider.append_*_turn for tool round-trips.
+            # Give it a real LLMProvider instance that uses default impls.
+            llm_inst.active_provider_instance = _test_provider_instance()
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
