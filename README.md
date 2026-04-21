@@ -111,6 +111,18 @@ Routed through `secret_set`, `channel_configure`, `mcp_add`. Writes land in `~/.
 | `predacore[full]` | + spaCy · desktop automation · Android ADB | +200 MB |
 | `predacore[server]` | + FastAPI · Redis · Prometheus · DAF gRPC | +150 MB |
 
+### Upgrade
+
+```bash
+pipx upgrade predacore                    # pipx install
+pip install --upgrade "predacore[full]"   # plain pip
+uv pip install --upgrade predacore        # uv
+
+predacore --version                       # verify
+```
+
+Existing memory in `~/.predacore/` migrates automatically — config, identity files, memory DB all carry over.
+
 ---
 
 ## Benchmarks
