@@ -66,9 +66,37 @@ class GeminiProvider(LLMProvider):
     ) -> None:
         import uuid
 
-        parts: list[dict[str, Any]] = []
-        if response.content:
-            parts.append({"text": response.content})
+        # When the parser stashed the raw ``parts[]`` from the Gemini response
+        # under provider_extras["content_parts"], replay them verbatim. This
+        # preserves ``thoughtSignature`` (required on functionCall parts for
+        # Gemini 2.5+/3.x reasoning models — omitting it causes HTTP 400
+        # "Function call is missing a thought_signature") plus any other
+        # per-part metadata Google may add later. Mirrors the Anthropic
+        # ``content_blocks`` round-trip pattern.
+        raw_parts = response.provider_extras.get("content_parts")
+        use_raw = (
+            isinstance(raw_parts, list)
+            and any(
+                isinstance(p, dict) and "functionCall" in p
+                for p in raw_parts
+            )
+        )
+
+        if use_raw:
+            parts = list(raw_parts)
+        else:
+            # Fallback path — rebuild parts from typed fields. Used when the
+            # response came via the text-tool fallback (no native functionCall
+            # parts) or when a caller constructs AssistantResponse manually.
+            # Loses thoughtSignature, but that only matters on the native path.
+            parts = []
+            if response.content:
+                parts.append({"text": response.content})
+            for tc in response.tool_calls:
+                parts.append(
+                    {"functionCall": {"name": tc.name, "args": tc.arguments}}
+                )
+
         normalized_tool_calls: list[ToolCallRef] = []
         for i, tc in enumerate(response.tool_calls):
             # Gemini doesn't emit IDs — synthesize stable one if absent so the
@@ -76,9 +104,6 @@ class GeminiProvider(LLMProvider):
             tc_id = tc.id or f"gemini_{i}_{uuid.uuid4().hex[:8]}"
             normalized_tool_calls.append(
                 ToolCallRef(id=tc_id, name=tc.name, arguments=tc.arguments)
-            )
-            parts.append(
-                {"functionCall": {"name": tc.name, "args": tc.arguments}}
             )
 
         messages.append(
@@ -438,7 +463,7 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
             "gemini cache hit: %d / %d prompt tokens cached (%.0f%%)",
             cached_tokens, prompt_tokens, cache_hit_ratio * 100,
         )
-    return {
+    result: dict[str, Any] = {
         "content": content_text,
         "tool_calls": tool_calls_out,
         "finish_reason": finish_reason,
@@ -454,3 +479,22 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
         "thinking": thinking_text,
         "model": model_name,
     }
+
+    # Preserve the raw ``parts[]`` from the response when it contains native
+    # functionCall parts. Gemini 2.5+/3.x reasoning models attach a
+    # ``thoughtSignature`` as a sibling field on each functionCall part; the
+    # next request must echo that signature back verbatim or Gemini rejects
+    # with HTTP 400 ("Function call is missing a thought_signature"). Rather
+    # than thread thoughtSignature through the neutral type system, we stash
+    # the whole parts list and let ``append_assistant_turn`` replay it.
+    # Skipped for text-only responses and for the text-tool fallback path
+    # (tool_calls_out would be empty from the native parse since the server
+    # never emitted a functionCall part in that case).
+    if tool_calls_out and candidates:
+        raw_parts = candidates[0].get("content", {}).get("parts", [])
+        if isinstance(raw_parts, list) and any(
+            isinstance(p, dict) and "functionCall" in p for p in raw_parts
+        ):
+            result["content_parts"] = list(raw_parts)
+
+    return result

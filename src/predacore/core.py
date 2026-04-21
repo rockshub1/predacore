@@ -1735,10 +1735,20 @@ class PredaCoreCore:
                     )
                     for idx, tc in enumerate(tool_calls)
                 ]
+                # Carry per-provider round-trip state through provider_extras
+                # so each provider's append_*_turn can replay it verbatim.
+                #   - Anthropic: content_blocks (thinking signatures, tool_use ids)
+                #   - Gemini:    content_parts  (thoughtSignature on functionCall)
+                _extras: dict[str, Any] = {}
+                if response_blocks:
+                    _extras["content_blocks"] = response_blocks
+                _content_parts = response.get("content_parts")
+                if isinstance(_content_parts, list) and _content_parts:
+                    _extras["content_parts"] = _content_parts
                 typed_response = AssistantResponse(
                     content=content or "",
                     tool_calls=typed_tool_calls,
-                    provider_extras={"content_blocks": response_blocks} if response_blocks else {},
+                    provider_extras=_extras,
                 )
                 # Build typed tool results from (tc, result_str) pairs
                 typed_results: list[ToolResultRef] = []
