@@ -114,14 +114,55 @@ Routed through `secret_set`, `channel_configure`, `mcp_add`. Writes land in `~/.
 ### Upgrade
 
 ```bash
-pipx upgrade predacore                    # pipx install
-pip install --upgrade "predacore[full]"   # plain pip
-uv pip install --upgrade predacore        # uv
-
-predacore --version                       # verify
+pipx upgrade predacore          # pipx
+pip install -U predacore         # pip
+uv pip install -U predacore      # uv
 ```
 
-Existing memory in `~/.predacore/` migrates automatically — config, identity files, memory DB all carry over.
+Then restart the daemon so it picks up the new code:
+
+```bash
+predacore stop && predacore start --daemon
+predacore --version              # verify
+```
+
+Existing memory in `~/.predacore/` migrates automatically — config, identity files, memory DB all carry over. Configs written by a pre-v0.1.5 setup wizard may contain legacy keys (`mode: personal`, old profile names like `balanced` / `public_beast`); if `predacore doctor` shows unexpected values, back up and regenerate with `predacore setup`.
+
+<details><summary><b>First-time install — Linux</b></summary>
+
+```bash
+# Debian / Ubuntu
+sudo apt install pipx && pipx ensurepath
+
+# Fedora
+sudo dnf install pipx && pipx ensurepath
+
+# Arch
+sudo pacman -S python-pipx && pipx ensurepath
+
+pipx install "predacore[full]"
+```
+</details>
+
+<details><summary><b>First-time install — macOS</b></summary>
+
+```bash
+brew install pipx && pipx ensurepath
+pipx install "predacore[full]"
+```
+</details>
+
+<details><summary><b>First-time install — Windows</b></summary>
+
+```powershell
+python -m pip install --user pipx
+python -m pipx ensurepath
+# Restart the terminal so `predacore` is on PATH
+pipx install "predacore[full]"
+```
+
+`desktop_control` and `screen_vision` are macOS + Linux only on Windows; webchat, channels, MCP, sandbox, and memory all work.
+</details>
 
 ---
 
@@ -151,13 +192,57 @@ python -m predacore.evals.longmemeval --dataset longmemeval_s_cleaned.json --jso
 
 ---
 
-## Trust profiles
+## Launch modes
 
-| Profile | Behavior |
-|---|---|
-| `paranoid` | Confirms every tool · ethical keyword guard active |
-| `normal` *(default)* | Auto-approves 12 read-only · confirms 16 destructive |
-| `yolo` | Full autonomy · arg-regex still blocks `rm -rf`, `sudo`, `dd if=` |
+Two profiles. Every resource cap is identical — they differ only on governance posture.
+
+| | `enterprise` *(default)* | `beast` |
+|---|---|---|
+| Trust level | `normal` | `yolo` |
+| Approvals before risky actions | **required** | **off** |
+| EGM compliance mode | `strict` | `off` |
+| Code network access | off | on |
+| Self-evolution | off | on |
+| Plugin marketplace | off | on |
+| OpenClaw bridge | off | on |
+| Docker sandbox | on | on |
+| Max tool iterations | 1000 | 1000 |
+| Spawn depth · fanout | 16 · 64 | 16 · 64 |
+| Max concurrent tasks | 100 | 100 |
+
+```bash
+predacore start --daemon                                # enterprise (safe default)
+predacore start --profile beast --daemon                # beast (autonomous)
+predacore start --profile beast --approvals --daemon    # beast, keep approval prompts
+```
+
+Override any field in `~/.predacore/config.yaml` or via `PREDACORE_*` env vars. Full reference → [`docs/launch_profiles.md`](https://github.com/rockshub1/predacore/blob/main/docs/launch_profiles.md).
+
+### Daily commands
+
+```bash
+predacore setup              # guided first-time setup wizard
+predacore start --daemon     # start in background
+predacore stop               # stop the daemon
+predacore status             # live status of the running daemon
+predacore doctor             # full health check — mode, config, providers, etc.
+predacore logs -f            # tail daemon logs
+predacore chat               # interactive terminal chat
+```
+
+Config lives in `~/.predacore/config.yaml`. API keys in `~/.predacore/.env` (chmod 600). Logs in `~/.predacore/logs/daemon.log`.
+
+### Adding API keys later
+
+Edit `~/.predacore/.env` directly:
+
+```bash
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.predacore/.env
+chmod 600 ~/.predacore/.env
+predacore stop && predacore start --daemon   # restart to reload
+```
+
+Supported keys: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`. Or run `predacore setup` to re-enter them with the wizard.
 
 ---
 
