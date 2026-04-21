@@ -1623,33 +1623,118 @@ async def _run_setup() -> None:
 # ── Status Command ───────────────────────────────────────────────────
 
 
+def _fetch_live_daemon_status(config) -> dict | None:
+    """Fetch live state from the running daemon's /status endpoint.
+
+    Returns None if the daemon isn't running or the endpoint is unreachable.
+    The returned dict is the authoritative view of what's actually running —
+    preferred over load_config() output, which only shows what the YAML would
+    resolve to on next start.
+    """
+    from .services.daemon import PIDManager
+
+    pid_manager = PIDManager(str(Path(config.home_dir) / "predacore.pid"))
+    if not pid_manager.is_running():
+        return None
+
+    import urllib.error
+    import urllib.request
+
+    port = config.daemon.webhook_port
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/status", timeout=2
+        ) as resp:
+            return json.loads(resp.read())
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _resolve_view(config, live: dict | None) -> dict:
+    """Merge live daemon status (authoritative) with loaded config (fallback).
+
+    When the daemon is up, its `/status` payload wins — that's the truth.
+    When it's down, we fall back to what the YAML would resolve to.
+    """
+    live_cfg = (live or {}).get("config", {}) if live else {}
+
+    def pick(key, default):
+        return live_cfg.get(key, default) if key in live_cfg else default
+
+    return {
+        "profile": pick("profile", config.launch.profile),
+        "trust_level": pick("trust_level", config.security.trust_level),
+        "approvals_required": pick(
+            "approvals_required", config.launch.approvals_required
+        ),
+        "egm_mode": pick("egm_mode", config.launch.egm_mode),
+        "default_code_network": pick(
+            "default_code_network", config.launch.default_code_network
+        ),
+        "enable_openclaw_bridge": pick(
+            "enable_openclaw_bridge", config.launch.enable_openclaw_bridge
+        ),
+        "enable_plugin_marketplace": pick(
+            "enable_plugin_marketplace", config.launch.enable_plugin_marketplace
+        ),
+        "enable_self_evolution": pick(
+            "enable_self_evolution", config.launch.enable_self_evolution
+        ),
+        "max_tool_iterations": pick(
+            "max_tool_iterations", config.launch.max_tool_iterations
+        ),
+        "max_spawn_depth": pick("max_spawn_depth", config.launch.max_spawn_depth),
+        "max_spawn_fanout": pick("max_spawn_fanout", config.launch.max_spawn_fanout),
+        "docker_sandbox": pick("docker_sandbox", config.security.docker_sandbox),
+        "max_concurrent_tasks": pick(
+            "max_concurrent_tasks", config.security.max_concurrent_tasks
+        ),
+        "task_timeout_seconds": pick(
+            "task_timeout_seconds", config.security.task_timeout_seconds
+        ),
+        "llm_provider": pick("llm_provider", config.llm.provider),
+        "llm_model": pick("llm_model", config.llm.model),
+        "channels": pick("channels", config.channels.enabled),
+    }
+
+
 def _show_status(config_path: str | None = None, profile: str | None = None) -> None:
-    """Show PredaCore status summary."""
+    """Show PredaCore status summary — prefers live daemon state over YAML."""
     from .config import load_config
 
     console.print(_banner())
 
     try:
         config = load_config(config_path, profile_override=profile)
+        live = _fetch_live_daemon_status(config)
+        view = _resolve_view(config, live)
+
+        if live is not None:
+            uptime = live.get("uptime_seconds", 0)
+            pid = live.get("pid", "?")
+            source = f"[success]live[/success] [muted](PID {pid}, uptime {uptime:.0f}s)[/muted]"
+        else:
+            source = "[warning]config only — daemon not running[/warning]"
 
         tbl = Table(show_header=False, box=None, padding=(0, 1), expand=False)
         tbl.add_column("key", style="muted", width=16)
         tbl.add_column("value")
 
-        tbl.add_row("Profile", config.launch.profile)
-        tbl.add_row("Provider", config.llm.provider)
-        tbl.add_row("Model", config.llm.model or "auto")
-        tbl.add_row("Trust", config.security.trust_level)
+        tbl.add_row("Source", source)
+        tbl.add_row("Profile", view["profile"])
+        tbl.add_row("Provider", view["llm_provider"])
+        tbl.add_row("Model", view["llm_model"] or "auto")
+        tbl.add_row("Trust", view["trust_level"])
         tbl.add_row("Home", str(config.home_dir))
-        tbl.add_row("Channels", ", ".join(config.channels.enabled))
-        tbl.add_row("Approvals", "on" if config.launch.approvals_required else "off")
-        tbl.add_row("EGM Mode", config.launch.egm_mode)
-        tbl.add_row(
-            "Code Network", "on" if config.launch.default_code_network else "off"
-        )
-        tbl.add_row("OpenClaw", "on" if config.launch.enable_openclaw_bridge else "off")
+        tbl.add_row("Channels", ", ".join(view["channels"]))
+        tbl.add_row("Approvals", "on" if view["approvals_required"] else "off")
+        tbl.add_row("EGM Mode", view["egm_mode"])
+        tbl.add_row("Code Network", "on" if view["default_code_network"] else "off")
+        tbl.add_row("OpenClaw", "on" if view["enable_openclaw_bridge"] else "off")
 
-        if config.launch.enable_openclaw_bridge:
+        # OpenClaw bridge sub-details are read from config (they're static per-start
+        # and the /status endpoint covers the on/off state above).
+        if view["enable_openclaw_bridge"]:
             bridge_url = config.openclaw.base_url or "(unset)"
             tbl.add_row("  Bridge URL", bridge_url)
             tbl.add_row("  Bridge Status", config.openclaw.status_path)
@@ -1667,10 +1752,8 @@ def _show_status(config_path: str | None = None, profile: str | None = None) -> 
             )
             tbl.add_row("  Bridge Ledger", ledger_path)
 
-        tbl.add_row(
-            "Marketplace", "on" if config.launch.enable_plugin_marketplace else "off"
-        )
-        if config.launch.enable_plugin_marketplace:
+        tbl.add_row("Marketplace", "on" if view["enable_plugin_marketplace"] else "off")
+        if view["enable_plugin_marketplace"]:
             skills_dir = (
                 os.getenv("PREDACORE_OPENCLAW_SKILLS_DIR")
                 or os.getenv("OPENCLAW_SKILLS_DIR")
@@ -1683,14 +1766,12 @@ def _show_status(config_path: str | None = None, profile: str | None = None) -> 
             )
             tbl.add_row("  Skills Path", str(skills_dir))
 
-        tbl.add_row(
-            "Self-Evolve", "on" if config.launch.enable_self_evolution else "off"
-        )
+        tbl.add_row("Self-Evolve", "on" if view["enable_self_evolution"] else "off")
         tbl.add_row(
             "Spawn Limits",
-            f"depth={config.launch.max_spawn_depth}, fanout={config.launch.max_spawn_fanout}",
+            f"depth={view['max_spawn_depth']}, fanout={view['max_spawn_fanout']}",
         )
-        tbl.add_row("Tool Loop Cap", str(config.launch.max_tool_iterations))
+        tbl.add_row("Tool Loop Cap", str(view["max_tool_iterations"]))
 
         console.print(
             Panel(
@@ -2171,42 +2252,56 @@ def _run_doctor(
         from .config import load_config
 
         config = load_config(config_path, profile_override=profile)
-        ok("Config loaded", f"Home: {config.home_dir}")
+        live = _fetch_live_daemon_status(config)
+        view = _resolve_view(config, live)
+
+        if live is not None:
+            ok(
+                "Config loaded (live daemon)",
+                f"Home: {config.home_dir} · PID {live.get('pid', '?')} "
+                f"· uptime {live.get('uptime_seconds', 0):.0f}s",
+            )
+            source_label = "[success](live daemon)[/success]"
+        else:
+            ok("Config loaded", f"Home: {config.home_dir}")
+            source_label = "[warning](config only — daemon not running)[/warning]"
 
         # Resolved config summary — the answer to "what mode am I actually in?"
-        # Mirrors predacore status so operators can verify posture from either entry.
+        # When the daemon is up, values come from its /status endpoint
+        # (authoritative). Otherwise from load_config (what'd run on next start).
         def _on(flag: bool) -> str:
             return "[success]on[/success]" if flag else "[muted]off[/muted]"
 
+        console.print(f"     [muted]Source:[/muted]              {source_label}")
         console.print(f"     [muted]Profile:[/muted]             "
-                      f"[bold]{config.launch.profile}[/bold]")
+                      f"[bold]{view['profile']}[/bold]")
         console.print(f"     [muted]Trust level:[/muted]         "
-                      f"{config.security.trust_level}")
+                      f"{view['trust_level']}")
         console.print(f"     [muted]Approvals required:[/muted]  "
-                      f"{_on(config.launch.approvals_required)}")
+                      f"{_on(view['approvals_required'])}")
         console.print(f"     [muted]EGM mode:[/muted]            "
-                      f"{config.launch.egm_mode}")
+                      f"{view['egm_mode']}")
         console.print(f"     [muted]Docker sandbox:[/muted]      "
-                      f"{_on(config.security.docker_sandbox)}")
+                      f"{_on(view['docker_sandbox'])}")
         console.print(f"     [muted]Code network:[/muted]        "
-                      f"{_on(config.launch.default_code_network)}")
+                      f"{_on(view['default_code_network'])}")
         console.print(f"     [muted]Self-evolution:[/muted]      "
-                      f"{_on(config.launch.enable_self_evolution)}")
+                      f"{_on(view['enable_self_evolution'])}")
         console.print(f"     [muted]Plugin marketplace:[/muted]  "
-                      f"{_on(config.launch.enable_plugin_marketplace)}")
+                      f"{_on(view['enable_plugin_marketplace'])}")
         console.print(f"     [muted]OpenClaw bridge:[/muted]     "
-                      f"{_on(config.launch.enable_openclaw_bridge)}")
+                      f"{_on(view['enable_openclaw_bridge'])}")
         console.print(f"     [muted]Max tool iterations:[/muted] "
-                      f"{config.launch.max_tool_iterations}")
+                      f"{view['max_tool_iterations']}")
         console.print(f"     [muted]Spawn limits:[/muted]        "
-                      f"depth={config.launch.max_spawn_depth}, "
-                      f"fanout={config.launch.max_spawn_fanout}")
+                      f"depth={view['max_spawn_depth']}, "
+                      f"fanout={view['max_spawn_fanout']}")
         console.print(f"     [muted]Concurrent tasks:[/muted]    "
-                      f"{config.security.max_concurrent_tasks}")
+                      f"{view['max_concurrent_tasks']}")
         console.print(f"     [muted]Task timeout:[/muted]        "
-                      f"{config.security.task_timeout_seconds}s")
+                      f"{view['task_timeout_seconds']}s")
         console.print(f"     [muted]Channels:[/muted]            "
-                      f"{', '.join(config.channels.enabled) or '(none)'}")
+                      f"{', '.join(view['channels']) or '(none)'}")
     except (OSError, ValueError, KeyError) as e:
         fail(f"Config load failed: {e}")
         config = None
@@ -2351,11 +2446,25 @@ def _run_start(args) -> None:
             module_name = "src.predacore.cli"
         else:
             module_name = __name__.rsplit(".", 1)[0] + ".cli"
+
+        daemon_cmd = [
+            sys.executable, "-m", module_name, "start",
+            "--daemon", "--foreground",
+            "--config", str(Path(config.home_dir) / "config.yaml"),
+        ]
+        # Propagate transient CLI overrides onto the subprocess argv so the
+        # detached daemon resolves the same config the parent just computed,
+        # even if the YAML disagrees or the env doesn't inherit.
+        if getattr(args, "profile", None):
+            daemon_cmd.extend(["--profile", args.profile])
+        if getattr(args, "approvals", None) is True:
+            daemon_cmd.append("--approvals")
+        elif getattr(args, "approvals", None) is False:
+            daemon_cmd.append("--no-approvals")
+
         with open(log_file, "a") as log_fh:
             proc = subprocess.Popen(
-                [sys.executable, "-m", module_name, "start",
-                 "--daemon", "--foreground",
-                 "--config", str(Path(config.home_dir) / "config.yaml")],
+                daemon_cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,

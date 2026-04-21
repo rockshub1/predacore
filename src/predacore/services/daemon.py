@@ -228,7 +228,7 @@ class PredaCoreDaemon:
         return time.time() - self._started_at
 
     def get_status(self) -> dict[str, Any]:
-        """Full daemon status."""
+        """Full daemon status — authoritative source for CLI status/doctor."""
         status = {
             "running": not self._shutdown_event.is_set(),
             "pid": os.getpid(),
@@ -239,8 +239,21 @@ class PredaCoreDaemon:
                 "profile": self.config.launch.profile,
                 "trust_level": self.config.security.trust_level,
                 "approvals_required": self.config.launch.approvals_required,
+                "egm_mode": self.config.launch.egm_mode,
+                "default_code_network": self.config.launch.default_code_network,
+                "enable_openclaw_bridge": self.config.launch.enable_openclaw_bridge,
+                "enable_plugin_marketplace": self.config.launch.enable_plugin_marketplace,
+                "enable_self_evolution": self.config.launch.enable_self_evolution,
+                "max_tool_iterations": self.config.launch.max_tool_iterations,
+                "max_spawn_depth": self.config.launch.max_spawn_depth,
+                "max_spawn_fanout": self.config.launch.max_spawn_fanout,
+                "docker_sandbox": self.config.security.docker_sandbox,
+                "max_concurrent_tasks": self.config.security.max_concurrent_tasks,
+                "task_timeout_seconds": self.config.security.task_timeout_seconds,
                 "llm_provider": self.config.llm.provider,
+                "llm_model": self.config.llm.model,
                 "channels": self.config.channels.enabled,
+                "home_dir": self.config.home_dir,
             },
         }
 
