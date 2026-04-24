@@ -1815,6 +1815,12 @@ Commands:
   doctor    Run system health diagnostics
         """,
     )
+    from predacore import __version__ as _predacore_version
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"predacore {_predacore_version}",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
