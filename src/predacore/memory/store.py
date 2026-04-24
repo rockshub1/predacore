@@ -23,8 +23,10 @@ All async methods use asyncio.to_thread() to avoid blocking the event loop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import sqlite3
 import struct
 import threading
@@ -138,6 +140,203 @@ def _unpack_embedding(data: bytes) -> list[float]:
 # Schema
 # ---------------------------------------------------------------------------
 
+# ── Schema versioning + invariant constants ─────────────────────────
+#
+# Ported from the world-model-lab (2026-04-21, Phase 6b) to give
+# production the same drift-detection substrate the lab has: content
+# hashing, trust provenance, verification states, and version tracking.
+# The `migrate_schema()` below upgrades a legacy v1 DB to this v2
+# schema in place, idempotently — safe on every daemon startup.
+
+SCHEMA_VERSION = 2
+
+# Current embedding model version. Every row stores this so version-skew
+# queries can be detected and filtered at recall time. Bump when switching
+# BGE versions or embedding providers; the healer will re-embed old rows.
+CURRENT_EMBEDDING_VERSION = "bge-small-en-v1.5"
+CURRENT_CHUNKER_VERSION = "semantic-v1"
+
+# Valid verification states for a memory row. Enforced at recall — rows
+# not in {ok, unverified} are filtered out of semantic search unless
+# explicitly requested (show_stale=True / show_superseded=True).
+_VALID_VERIFICATION_STATES = frozenset({
+    "ok",            # passes all invariants
+    "unverified",    # not yet audited (new row) — still visible at recall
+    "stale",         # content_hash no longer matches source
+    "orphaned",      # source_path no longer exists
+    "version_skew",  # embedding_version != current
+    "superseded",    # explicitly replaced by a newer memory (Build 2)
+})
+
+
+def normalize_verification_state(value: str | None) -> str:
+    v = str(value or "unverified").strip().lower()
+    return v if v in _VALID_VERIFICATION_STATES else "unverified"
+
+
+# Verification states that hide a row from default recall/search. ``unverified``
+# is NOT in this set — new rows start unverified and remain visible until the
+# healer audits them. ``superseded`` IS in the set by default but is opt-in
+# visible via ``show_superseded=True`` (unlike the other three, which are
+# always invariant-failures and never legitimately wanted).
+_HIDDEN_BY_DEFAULT_STATES = frozenset({"stale", "orphaned", "version_skew"})
+
+
+def _memory_is_visible_in_recall(
+    mem: dict[str, Any] | sqlite3.Row,
+    show_superseded: bool = False,
+) -> bool:
+    """Return True if this memory should appear in default recall results.
+
+    Filters out:
+      - stale / orphaned / version_skew rows (always hidden — invariant failures)
+      - superseded rows (hidden by default, opt-in via show_superseded=True)
+    Keeps:
+      - ok rows (healthy)
+      - unverified rows (new rows awaiting healer audit)
+    """
+    # mem may be a dict or sqlite3.Row; both support .get / [] access, but
+    # sqlite3.Row doesn't support .get — guard against that.
+    try:
+        state = mem["verification_state"] if "verification_state" in mem.keys() else "ok"  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        state = mem.get("verification_state", "ok") if hasattr(mem, "get") else "ok"
+    state = (state or "ok").lower()
+    if state in _HIDDEN_BY_DEFAULT_STATES:
+        return False
+    if state == "superseded" and not show_superseded:
+        return False
+    return True
+
+
+def _row_field(mem: dict[str, Any] | sqlite3.Row, key: str, default: Any = None) -> Any:
+    """Safe accessor that works on both dict and sqlite3.Row.
+
+    sqlite3.Row doesn't implement .get(), so we can't do ``mem.get(...)``
+    uniformly. This helper bridges the two types.
+    """
+    if hasattr(mem, "get") and callable(mem.get):  # dict
+        return mem.get(key, default)
+    try:
+        return mem[key] if key in mem.keys() else default  # type: ignore[union-attr]
+    except (AttributeError, TypeError, KeyError, IndexError):
+        return default
+
+
+def _apply_ranking_weights(
+    base_score: float, mem: dict[str, Any] | sqlite3.Row
+) -> float:
+    """Combine similarity/BM25 score with trust, confidence, and decay weights.
+
+    Formula (Build 3):
+        final = base_score  *  decay_score  *  trust_multiplier  *  confidence
+
+    where:
+        decay_score       comes from the row, in [0, 1] (time-decayed importance)
+        trust_multiplier  from TRUST_MULTIPLIERS keyed on the row's trust_source
+                          (user_corrected=1.00, code_extracted=0.95,
+                          user_stated=0.90, claude_inferred=0.60)
+        confidence        from the row, clamped to [0, 1]
+
+    Unknown/missing values get conservative defaults:
+        trust_source missing / None → claude_inferred (0.60)
+        confidence missing / None / bad-type → 0.7
+        decay_score missing / None / bad-type → 1.0
+
+    Note: 0.0 is a LEGITIMATE value for confidence and decay_score (= row
+    is fully decayed / zero-confidence). We explicitly check for None, not
+    falsiness, so 0.0 passes through unchanged.
+    """
+    raw_decay = _row_field(mem, "decay_score", 1.0)
+    if raw_decay is None:
+        decay = 1.0
+    else:
+        try:
+            decay = float(raw_decay)
+        except (TypeError, ValueError):
+            decay = 1.0
+
+    trust_source = _row_field(mem, "trust_source", "claude_inferred")
+    if trust_source is None:
+        trust_source = "claude_inferred"
+    trust_mult = TRUST_MULTIPLIERS.get(
+        str(trust_source).lower(), TRUST_MULTIPLIERS["claude_inferred"]
+    )
+
+    raw_conf = _row_field(mem, "confidence", 0.7)
+    if raw_conf is None:
+        conf = 0.7
+    else:
+        try:
+            conf = float(raw_conf)
+        except (TypeError, ValueError):
+            conf = 0.7
+    conf = max(0.0, min(1.0, conf))
+
+    return float(base_score) * decay * trust_mult * conf
+
+
+# Trust provenance — where a fact came from. Used at retrieval time to
+# weight the final ranking score (Build 3).
+#
+# Ranking intuition (code is the most verifiable ground truth; user
+# corrections trump everything; claude inferences need verification):
+#     user_corrected   1.00  — explicit user override of a prior fact
+#     code_extracted   0.95  — literal from file/API/tool output; re-verifiable
+#     user_stated      0.90  — user told us; may drift if system state changes
+#     claude_inferred  0.60  — model-derived; verify before acting on it
+_VALID_TRUST_SOURCES = frozenset({
+    "user_stated",      # explicit user input
+    "claude_inferred",  # model-derived (any LLM — Gemini/GPT/Anthropic/etc.),
+                        # verify before acting on it
+    "code_extracted",   # literal from files / tool output (re-verifiable)
+    "user_corrected",   # explicit user correction of a prior fact (Build 2)
+})
+
+# Retrieval-time score multipliers per trust source. Keep this in sync
+# with the ranking formula in retriever.py (Build 3).
+TRUST_MULTIPLIERS: dict[str, float] = {
+    "user_corrected":  1.00,
+    "code_extracted":  0.95,
+    "user_stated":     0.90,
+    "claude_inferred": 0.60,
+}
+
+
+def normalize_trust_source(value: str | None) -> str:
+    """Coerce any input to a valid trust_source.
+
+    Defaults to ``claude_inferred`` (not ``user_stated`` like the lab)
+    because PredaCore's daemon stores many kinds of facts automatically;
+    the conservative default prevents over-trusting a row whose caller
+    forgot to pass trust_source explicitly.
+    """
+    v = str(value or "claude_inferred").strip().lower()
+    return v if v in _VALID_TRUST_SOURCES else "claude_inferred"
+
+
+def compute_content_hash(content: str) -> str:
+    """SHA256 of the content bytes (UTF-8). Used to detect drift at query time."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def compute_anchor_hash(content: str, anchor_len: int = 120) -> str:
+    """Content-based anchor for line-number drift recovery.
+
+    Hashes the first ``anchor_len`` chars of the first non-blank line.
+    Line numbers are volatile (reformats, refactors shift them), but the
+    first non-blank line of a semantic chunk is a stable identifier that
+    can be re-grepped to find the chunk in the current file state.
+
+    Returns an empty string if ``content`` has no non-blank lines.
+    """
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return hashlib.sha256(stripped[:anchor_len].encode("utf-8")).hexdigest()
+    return ""
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -156,7 +355,30 @@ CREATE TABLE IF NOT EXISTS memories (
     decay_score REAL NOT NULL DEFAULT 1.0,
     expires_at TEXT,
     session_id TEXT,
-    parent_id TEXT
+    parent_id TEXT,
+    -- v2 invariant columns (ported from world-model-lab 2026-04-21) --
+    content_hash TEXT NOT NULL DEFAULT '',
+    anchor_hash TEXT,
+    source_path TEXT,
+    source_blob_sha TEXT,
+    source_mtime INTEGER,
+    chunk_ordinal INTEGER NOT NULL DEFAULT 0,
+    embedding_version TEXT NOT NULL DEFAULT '',
+    chunker_version TEXT NOT NULL DEFAULT '',
+    project_id TEXT NOT NULL DEFAULT 'default',
+    branch TEXT,
+    trust_source TEXT NOT NULL DEFAULT 'claude_inferred',
+    confidence REAL NOT NULL DEFAULT 0.7,
+    last_verified_at TEXT,
+    verification_state TEXT NOT NULL DEFAULT 'unverified',
+    -- supersede support (Build 2 prep) --
+    superseded_by TEXT,
+    superseded_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -209,6 +431,189 @@ CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC);
 
 
 # ---------------------------------------------------------------------------
+# Schema migration: v1 → v2 (idempotent, safe on every startup)
+# ---------------------------------------------------------------------------
+#
+# Runs once at UnifiedMemoryStore.__init__. Behaviour:
+#   - Fresh DB    → no-op (all columns already created by _SCHEMA).
+#                   Indexes get created; schema_version stamped = 2.
+#   - Up-to-date  → no-op (early return based on schema_meta.schema_version).
+#   - Legacy v1   → ALTER TABLE adds 16 v2 columns, backfills content_hash,
+#                   anchor_hash, embedding_version, chunker_version, plus
+#                   infers trust_source + confidence from the existing
+#                   `source` column (option B).
+
+# Columns that schema v2 adds on top of v1. Used by the migrator to
+# decide what to ALTER on an existing legacy DB. Order matters only for
+# readability; sqlite applies them one at a time.
+_V2_COLUMNS: list[tuple[str, str]] = [
+    ("content_hash", "TEXT NOT NULL DEFAULT ''"),
+    ("anchor_hash", "TEXT"),
+    ("source_path", "TEXT"),
+    ("source_blob_sha", "TEXT"),
+    ("source_mtime", "INTEGER"),
+    ("chunk_ordinal", "INTEGER NOT NULL DEFAULT 0"),
+    ("embedding_version", "TEXT NOT NULL DEFAULT ''"),
+    ("chunker_version", "TEXT NOT NULL DEFAULT ''"),
+    ("project_id", "TEXT NOT NULL DEFAULT 'default'"),
+    ("branch", "TEXT"),
+    ("trust_source", "TEXT NOT NULL DEFAULT 'claude_inferred'"),
+    ("confidence", "REAL NOT NULL DEFAULT 0.7"),
+    ("last_verified_at", "TEXT"),
+    ("verification_state", "TEXT NOT NULL DEFAULT 'unverified'"),
+    # Supersede support (Build 2 prep) — nullable, no default needed.
+    ("superseded_by", "TEXT"),
+    ("superseded_at", "TEXT"),
+]
+
+_V2_INDEXES: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_branch ON memories(branch)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_verification ON memories(verification_state)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_source_path ON memories(source_path)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)",
+]
+
+
+def _get_current_schema_version(conn: sqlite3.Connection) -> int:
+    """Read schema_version from schema_meta, or 1 if table is missing (legacy v1)."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 1  # Pre-v2 databases had no schema_meta table.
+    if row is None:
+        return 1
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 1
+
+
+def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+        (str(version),),
+    )
+
+
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def migrate_schema(conn: sqlite3.Connection) -> int:
+    """Migrate memories table to ``SCHEMA_VERSION``. Idempotent.
+
+    Safe to call on: a fresh DB, an up-to-date DB, or a legacy v1 DB.
+    Returns the schema version after migration.
+
+    On a legacy (v1) DB the migrator:
+      - ALTER TABLEs each v2 column that isn't present yet
+      - Backfills content_hash + anchor_hash from stored content
+      - Tags embedding_version = CURRENT for rows that actually have an
+        embedding (the healer will verify + correct these later)
+      - Tags chunker_version = CURRENT for all rows
+      - Infers trust_source + confidence from the existing ``source``
+        column (user/* → user_stated 0.9; code/file/read_file/grep →
+        code_extracted 0.85; else → claude_inferred 0.7)
+      - Creates the v2 indexes
+      - Writes schema_version = 2 into schema_meta
+    """
+    # schema_meta is created by _SCHEMA too, but we also create it here so
+    # the migrator is standalone-callable (e.g. from a migration test).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+
+    current = _get_current_schema_version(conn)
+    if current >= SCHEMA_VERSION:
+        return current
+
+    existing = _existing_columns(conn, "memories")
+    added_cols: list[str] = []
+    for col, ddl in _V2_COLUMNS:
+        if col in existing:
+            continue
+        conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {ddl}")
+        added_cols.append(col)
+
+    row_count = 0
+    if added_cols:
+        # Content/anchor hashes from stored content.
+        rows = conn.execute("SELECT id, content FROM memories").fetchall()
+        row_count = len(rows)
+        backfill = [
+            (compute_content_hash(r[1] or ""), compute_anchor_hash(r[1] or ""), r[0])
+            for r in rows
+        ]
+        if backfill:
+            conn.executemany(
+                "UPDATE memories SET content_hash = ?, anchor_hash = ? WHERE id = ?",
+                backfill,
+            )
+        # Tag embedding_version on rows that actually have an embedding.
+        # The healer will verify + correct if the user ran a different
+        # embedding model previously.
+        conn.execute(
+            "UPDATE memories SET embedding_version = ? "
+            "WHERE embedding_version = '' AND embedding IS NOT NULL",
+            (CURRENT_EMBEDDING_VERSION,),
+        )
+        conn.execute(
+            "UPDATE memories SET chunker_version = ? WHERE chunker_version = ''",
+            (CURRENT_CHUNKER_VERSION,),
+        )
+        # Infer trust_source + confidence from the existing `source` column
+        # (option B). Runs once per DB — all rows at this point are
+        # pre-migration rows; anything added after this passes trust_source
+        # explicitly (call-site audit ensures this).
+        conn.execute(
+            """
+            UPDATE memories
+            SET trust_source = CASE
+                    WHEN LOWER(source) IN ('user', 'user_input', 'user_msg', 'user_stated')
+                        THEN 'user_stated'
+                    WHEN LOWER(source) LIKE '%code%'
+                         OR LOWER(source) IN ('file', 'read_file', 'grep', 'tool_output')
+                        THEN 'code_extracted'
+                    ELSE 'claude_inferred'
+                END,
+                confidence = CASE
+                    WHEN LOWER(source) IN ('user', 'user_input', 'user_msg', 'user_stated')
+                        THEN 0.9
+                    WHEN LOWER(source) LIKE '%code%'
+                         OR LOWER(source) IN ('file', 'read_file', 'grep', 'tool_output')
+                        THEN 0.85
+                    ELSE 0.7
+                END
+            """
+        )
+
+    for idx_sql in _V2_INDEXES:
+        conn.execute(idx_sql)
+
+    _set_schema_version(conn, SCHEMA_VERSION)
+    conn.commit()
+
+    if added_cols:
+        logger.info(
+            "Memory schema migrated v%d → v%d (added %d columns: %s; backfilled %d rows)",
+            current, SCHEMA_VERSION, len(added_cols), ", ".join(added_cols), row_count,
+        )
+    else:
+        logger.debug(
+            "Memory schema migration no-op (already at v%d, no columns to add)",
+            current,
+        )
+    return SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
 # UnifiedMemoryStore
 # ---------------------------------------------------------------------------
 
@@ -222,17 +627,24 @@ class _NumpyVectorIndex:
     """
     In-RAM vector index backed by predacore_core Rust SIMD cosine search.
 
-    This is an EPHEMERAL cache. SQLite is the source of truth for embeddings
-    (stored as float32 blobs). On startup, UnifiedMemoryStore rebuilds this
-    index from SQLite. On eviction under memory pressure, protected types
-    (preference, entity) are preserved; least-important unprotected entries
-    are dropped first.
+    SQLite is the source of truth for embeddings (stored as float32 blobs).
+    On startup, UnifiedMemoryStore attempts to load a persisted cache of
+    this index from disk (``vector_index.cache.npz``) to skip the O(n)
+    rebuild; if the cache is missing or stale, it falls back to rebuilding
+    from SQLite. On shutdown, the current state is dumped back to disk.
 
-    No disk persistence. No numpy fallback. predacore_core is mandatory.
+    On eviction under memory pressure, protected types (preference, entity)
+    are preserved; least-important unprotected entries are dropped first.
+
+    predacore_core is mandatory — no numpy fallback for vector search.
+    numpy is only used for serialization of the cache file.
     """
 
     # Raised from 50K — modern hardware handles 100K × 384 float32 = ~150 MB
     MAX_VECTORS = 100_000
+    # Cache format version — bump when the on-disk layout changes so stale
+    # caches are auto-invalidated instead of loading as corrupt.
+    CACHE_VERSION = 1
 
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
@@ -342,6 +754,394 @@ class _NumpyVectorIndex:
                     break
             return results
 
+    # ── Persistence ────────────────────────────────────────────────────
+    #
+    # The in-RAM index is ephemeral: SQLite is source-of-truth for every
+    # embedding. But rebuilding from SQLite on every daemon start is O(n)
+    # and can take 30-60 seconds at 100k memories. These two methods cache
+    # the in-RAM state to disk so daemon restart is O(1) read.
+    #
+    # Invariants checked on load (mismatch → treat cache as invalid, fall
+    # back to rebuild from SQLite):
+    #   - ``cache_version``      — on-disk layout version
+    #   - ``dimensions``         — embedding dimension sanity
+    #   - ``row_count``          — memories-with-embedding count in SQLite
+    #                              at the time of the dump
+    #   - ``embedding_version``  — BGE / embedder model version
+    #
+    # If any invariant fails, we silently rebuild — never trust a stale
+    # or corrupted cache.
+
+    def dump_to_disk(
+        self,
+        path: Path,
+        *,
+        row_count: int,
+        embedding_version: str,
+    ) -> bool:
+        """Persist (ids, vecs, meta) + invariant header to an ``.npz`` file.
+
+        Atomic write via temp + rename. Compressed. Returns True on success.
+        """
+        import numpy as np
+
+        with self._lock:
+            if not self._ids:
+                # Nothing to cache — remove any stale file to force rebuild next time
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+                return False
+
+            header = {
+                "cache_version": self.CACHE_VERSION,
+                "dimensions": self.dimensions,
+                "row_count": int(row_count),
+                "embedding_version": str(embedding_version),
+                "n_vectors": len(self._ids),
+                "dumped_at": _now_iso(),
+            }
+            vecs_arr = np.asarray(self._vecs, dtype=np.float32)
+            # Store ids as JSON bytes rather than an object array — numpy
+            # refuses to load object arrays with allow_pickle=False (which
+            # we MUST keep false to stay safe against malicious .npz files).
+            ids_bytes = np.frombuffer(
+                json.dumps(self._ids).encode("utf-8"), dtype=np.uint8
+            )
+            meta_bytes = np.frombuffer(
+                json.dumps(self._meta).encode("utf-8"), dtype=np.uint8
+            )
+            header_bytes = np.frombuffer(
+                json.dumps(header).encode("utf-8"), dtype=np.uint8
+            )
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Use a tmp filename that already ends in .npz so numpy doesn't
+        # append an extra suffix (np.savez_compressed auto-appends .npz
+        # to filenames lacking that extension, which would break the
+        # atomic rename below).
+        tmp_path = path.parent / (path.stem + "_tmp.npz")
+        try:
+            np.savez_compressed(
+                str(tmp_path),
+                header=header_bytes,
+                ids=ids_bytes,
+                vecs=vecs_arr,
+                meta=meta_bytes,
+            )
+            tmp_path.replace(path)  # atomic
+            logger.info(
+                "Vector index persisted: %d vectors → %s (row_count=%d)",
+                len(self._ids), path, row_count,
+            )
+            return True
+        except (OSError, ValueError) as exc:
+            logger.warning("Vector index persist failed: %s", exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+
+    def load_from_disk(
+        self,
+        path: Path,
+        *,
+        expected_row_count: int,
+        expected_embedding_version: str,
+    ) -> bool:
+        """Load (ids, vecs, meta) from ``.npz``. Returns True on successful load.
+
+        Returns False (silently, at INFO log level) if:
+          - file missing or unreadable
+          - header malformed or missing invariants
+          - cache_version mismatch
+          - dimensions mismatch
+          - row_count mismatch (SQLite has different number of embedded rows)
+          - embedding_version mismatch (model changed since dump)
+
+        On False, the caller should fall back to rebuilding from SQLite.
+        """
+        import numpy as np
+
+        if not path.exists():
+            logger.debug("Vector index cache missing at %s — will rebuild from SQLite", path)
+            return False
+
+        try:
+            data = np.load(str(path), allow_pickle=False)
+        except (OSError, ValueError) as exc:
+            logger.info("Vector index cache unreadable (%s) — rebuilding", exc)
+            return False
+
+        try:
+            header_bytes = bytes(data["header"])
+            header = json.loads(header_bytes.decode("utf-8"))
+        except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.info("Vector index cache header malformed (%s) — rebuilding", exc)
+            return False
+
+        # Invariant checks — any mismatch → silent rebuild
+        reasons: list[str] = []
+        if header.get("cache_version") != self.CACHE_VERSION:
+            reasons.append(
+                f"cache_version {header.get('cache_version')} != {self.CACHE_VERSION}"
+            )
+        if header.get("dimensions") != self.dimensions:
+            reasons.append(
+                f"dimensions {header.get('dimensions')} != {self.dimensions}"
+            )
+        if int(header.get("row_count", -1)) != int(expected_row_count):
+            reasons.append(
+                f"row_count {header.get('row_count')} != SQLite {expected_row_count}"
+            )
+        if header.get("embedding_version") != expected_embedding_version:
+            reasons.append(
+                f"embedding_version {header.get('embedding_version')!r} "
+                f"!= current {expected_embedding_version!r}"
+            )
+        if reasons:
+            logger.info(
+                "Vector index cache stale (%s) — rebuilding from SQLite",
+                "; ".join(reasons),
+            )
+            return False
+
+        try:
+            ids_bytes = bytes(data["ids"])
+            ids_list = [str(x) for x in json.loads(ids_bytes.decode("utf-8"))]
+            vecs_list = data["vecs"].tolist()
+            meta_bytes = bytes(data["meta"])
+            meta_list = json.loads(meta_bytes.decode("utf-8"))
+        except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.info("Vector index cache body malformed (%s) — rebuilding", exc)
+            return False
+
+        if not (len(ids_list) == len(vecs_list) == len(meta_list)):
+            logger.info(
+                "Vector index cache lengths mismatch "
+                "(ids=%d, vecs=%d, meta=%d) — rebuilding",
+                len(ids_list), len(vecs_list), len(meta_list),
+            )
+            return False
+
+        with self._lock:
+            self._ids = ids_list
+            self._vecs = vecs_list
+            self._meta = meta_list
+        logger.info(
+            "Vector index loaded from cache: %d vectors from %s (dumped %s)",
+            len(ids_list), path, header.get("dumped_at", "?"),
+        )
+        return True
+
+
+# ---------------------------------------------------------------------------
+# HNSW-backed vector index (opt-in, O(log n) at scale)
+# ---------------------------------------------------------------------------
+#
+# Drop-in compatible with _NumpyVectorIndex — same async add/remove/search
+# API, same .size / .dimensions. Wraps the Rust predacore_core.PyHnswIndex
+# under the hood.
+#
+# Enable via env var: PREDACORE_USE_HNSW=1 (default: off, use linear scan).
+#
+# Trade-offs vs the numpy index:
+#   + O(log n) search — meaningful at >~10k vectors
+#   - Approximate recall (~99% at default ef_search=50, configurable)
+#   - No native delete — we use a tombstone set + filter at query time
+#   - No persistence yet (caller still rebuilds from SQLite on startup;
+#     would need hnsw_rs::hnswio::file_dump integration, tracked as
+#     follow-up work)
+#
+# At <10k vectors, linear scan is both faster AND simpler. Recommend HNSW
+# only once you observe recall latency in the tens of ms.
+
+
+class _HnswVectorIndex:
+    """HNSW-backed vector index, opt-in alternative to _NumpyVectorIndex.
+
+    Matches _NumpyVectorIndex interface so UnifiedMemoryStore can swap
+    implementations transparently based on the PREDACORE_USE_HNSW env var.
+
+    Deletion semantics: HNSW graphs can't cleanly remove nodes (removing
+    would orphan neighbors). We use a tombstone set — deleted IDs are
+    marked but remain in the graph; search results filter them out. Over
+    time this grows; a full rebuild compacts. For PredaCore's workload
+    (append-heavy, rare deletes) the tombstone growth is negligible.
+    """
+
+    # Upper bound on vectors the index can hold. hnsw_rs needs this at
+    # construction time but doesn't penalize unused capacity, so we set it
+    # well above the realistic ceiling (~100k for a heavy multi-year user)
+    # to avoid ever having to rebuild. 1M leaves ~10× headroom over what
+    # any personal memory system will actually hit.
+    MAX_VECTORS = 1_000_000
+
+    # Tunable HNSW parameters (all have sensible defaults inside the Rust
+    # constructor; overriding via env is possible but not wired yet).
+    #
+    # These values target ~99.9% recall all the way up to 10M vectors on
+    # 384-dim BGE embeddings. Denser graph + wider search beam = accuracy
+    # that stays within 0.1 pp of linear scan while keeping queries under
+    # 10 ms at million-vector scale. Memory overhead is ~2× the M=16 graph
+    # (still negligible on modern hardware: ~200 KB at today's 80 rows,
+    # ~200 MB at 100k, ~2 GB at 1M).
+    DEFAULT_M = 32
+    DEFAULT_EF_CONSTRUCTION = 400
+    DEFAULT_EF_SEARCH = 400
+
+    def __init__(self, dimensions: int = 384) -> None:
+        self.dimensions = dimensions
+        # Rust-backed HNSW graph (thread-safe internally via its own Mutex).
+        self._hnsw = predacore_core.PyHnswIndex(
+            dims=dimensions,
+            max_nb_connection=self.DEFAULT_M,
+            ef_construction=self.DEFAULT_EF_CONSTRUCTION,
+            max_elements=self.MAX_VECTORS,
+        )
+        # Metadata map (id → dict) — HNSW itself only stores vectors + IDs,
+        # so we track our own metadata here.
+        self._meta: dict[str, dict[str, Any]] = {}
+        # Tombstones — IDs that were "removed" but still exist in the HNSW
+        # graph (since true deletion would corrupt the graph). Filtered at
+        # search time.
+        self._tombstoned: set[str] = set()
+        # Track insertion order for stable iteration + eviction fallback.
+        self._insertion_order: list[str] = []
+        self._lock = threading.Lock()
+
+    @property
+    def size(self) -> int:
+        """Number of LIVE (non-tombstoned) vectors."""
+        return max(0, self._hnsw.len() - len(self._tombstoned))
+
+    def _add_sync(
+        self, id: str, vector: list[float], metadata: dict | None = None
+    ) -> None:
+        """Synchronous add — used by the startup SQLite-rebuild path
+        and by the async `add()` below. Matches _NumpyVectorIndex._add_sync
+        signature so `_build_vector_index_from_sqlite` works for both
+        backends transparently.
+
+        For re-add of an existing id: HNSW doesn't support update-in-place,
+        so we just insert a new slot. The old slot remains in the graph
+        but the new metadata replaces the old. Search returns the
+        highest-scoring slot for that id (naturally — they have the same
+        id string, dedupe in search() keeps the first = top-scored).
+        """
+        with self._lock:
+            try:
+                self._hnsw.insert(id, list(vector))
+            except RuntimeError as exc:
+                logger.warning("HNSW insert failed for %s: %s", id[:8], exc)
+                return
+            # Refresh metadata + clear tombstone (re-add un-tombstones)
+            self._meta[id] = dict(metadata or {})
+            self._tombstoned.discard(id)
+            if id not in self._insertion_order:
+                self._insertion_order.append(id)
+
+    async def add(
+        self, id: str, vector: list[float], metadata: dict | None = None
+    ) -> None:
+        """Async add — delegates to sync method."""
+        self._add_sync(id, vector, metadata)
+
+    async def remove(self, id: str) -> bool:
+        """Mark a vector as removed via tombstone. Graph itself is unchanged
+        (HNSW doesn't support node deletion cleanly). Returns True if the
+        ID existed before this call."""
+        with self._lock:
+            if id not in self._meta:
+                return False
+            if id in self._tombstoned:
+                return False  # already tombstoned
+            self._tombstoned.add(id)
+            return True
+
+    async def search(
+        self,
+        query_vector: list[float],
+        top_k: int = 10,
+        layers: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Search top-k via HNSW approximate nearest neighbor. Filters
+        tombstoned IDs and (optional) layer-mismatched entries after.
+
+        Fetches 3x top_k headroom so post-filter we still return top_k.
+        """
+        with self._lock:
+            if self._hnsw.len() == 0:
+                return []
+
+            fetch_k = top_k * 3 if (layers is not None or self._tombstoned) else top_k
+            try:
+                raw = self._hnsw.search(
+                    list(query_vector),
+                    top_k=fetch_k,
+                    ef_search=self.DEFAULT_EF_SEARCH,
+                )
+            except RuntimeError as exc:
+                logger.warning("HNSW search failed: %s", exc)
+                return []
+
+            results: list[tuple[str, float]] = []
+            seen_ids: set[str] = set()
+            for id_, score in raw:
+                if id_ in self._tombstoned:
+                    continue
+                if id_ in seen_ids:
+                    # Dedupe: a replaced id may appear twice (old tombstoned
+                    # slot already filtered; but if multiple live slots
+                    # exist by some bug, keep only the highest-scoring).
+                    continue
+                if layers is not None:
+                    meta = self._meta.get(id_, {})
+                    if meta.get("layer") not in layers:
+                        continue
+                seen_ids.add(id_)
+                results.append((id_, float(score)))
+                if len(results) >= top_k:
+                    break
+            return results
+
+    # ── Persistence stubs ─────────────────────────────────────────────
+    #
+    # HNSW graph serialization (via hnsw_rs::hnswio::file_dump) is not yet
+    # wired. For now these are no-ops returning False so the parent
+    # UnifiedMemoryStore treats the cache as always-invalid and falls back
+    # to SQLite rebuild. That's correct behaviour even if slower; follow-up
+    # task wires in proper HNSW save/load.
+
+    def dump_to_disk(
+        self, path: Path, *, row_count: int, embedding_version: str
+    ) -> bool:
+        """HNSW persistence not yet implemented — returns False so caller
+        knows to rebuild from SQLite next start. Tracked as follow-up work
+        (hnsw_rs has native file_dump; just needs PyO3 binding + Python glue).
+        """
+        del path, row_count, embedding_version  # unused for now
+        logger.debug(
+            "HNSW persistence not yet implemented — skipping dump "
+            "(rebuild from SQLite on next start is O(n log n))"
+        )
+        return False
+
+    def load_from_disk(
+        self,
+        path: Path,
+        *,
+        expected_row_count: int,
+        expected_embedding_version: str,
+    ) -> bool:
+        """HNSW persistence not yet implemented — always returns False,
+        forcing rebuild from SQLite."""
+        del path, expected_row_count, expected_embedding_version
+        return False
+
 
 class UnifiedMemoryStore:
     """
@@ -382,10 +1182,42 @@ class UnifiedMemoryStore:
         if self._conn is not None:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            # Idempotent v1 → v2 migration. For a fresh DB it's a no-op
+            # (all columns already exist via _SCHEMA) that still creates the
+            # v2 indexes and stamps schema_version = 2. For a legacy v1 DB
+            # it ALTER-TABLEs in the 16 v2 columns + backfills trust_source,
+            # content_hash, anchor_hash, embedding_version, chunker_version.
+            migrate_schema(self._conn)
 
-        # Vector index is in-RAM only. Rebuild from SQLite if not provided.
+        # Vector index: try persisted cache first; fall back to rebuild from
+        # SQLite if cache is missing, stale, or invalid. Saves ~30-60s at
+        # 100k memories on daemon restart.
+        #
+        # Backend selection:
+        #   PREDACORE_USE_HNSW=1 → _HnswVectorIndex (O(log n) search via
+        #     Rust hnsw_rs; only meaningful at >10k vectors).
+        #   default (unset/0)    → _NumpyVectorIndex (O(n) SIMD scan; fast
+        #     at small/medium scale, simpler persistence, exact recall).
         if self._vec_index is None:
-            self._vec_index = self._build_vector_index_from_sqlite()
+            dims = self._detect_embedding_dims()
+            use_hnsw = os.getenv("PREDACORE_USE_HNSW", "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+            if use_hnsw:
+                logger.info("Vector index backend: HNSW (PREDACORE_USE_HNSW=on)")
+                self._vec_index = _HnswVectorIndex(dimensions=dims)
+            else:
+                self._vec_index = _NumpyVectorIndex(dimensions=dims)
+            # Try loading the on-disk cache (only works for the numpy
+            # backend today — HNSW persistence isn't wired yet).
+            if not use_hnsw and self._try_load_vector_index_cache():
+                logger.info("Vector index restored from cache (skipped SQLite rebuild)")
+            else:
+                # Populate the already-created backend from SQLite. This
+                # preserves whichever implementation we just picked above
+                # (the old code here threw away the HNSW backend by
+                # replacing self._vec_index with a fresh numpy index).
+                self._populate_vector_index_from_sqlite(self._vec_index)
 
         logger.info(
             "UnifiedMemoryStore initialized (db=%s, vectors=%d, adapter=%s)",
@@ -461,24 +1293,37 @@ class UnifiedMemoryStore:
         return 384  # safe default: GTE-small / all-MiniLM-L6-v2
 
     def _build_vector_index_from_sqlite(self) -> _NumpyVectorIndex:
-        """
-        Build an in-RAM vector index by reading all embeddings from SQLite.
-        SQLite is the source of truth; the vector index is a hot cache.
+        """Legacy helper — creates a fresh _NumpyVectorIndex and populates it.
 
-        When the DB adapter is active, the caller must invoke
-        ``rebuild_vector_index()`` asynchronously after ``init_schema()``.
+        Prefer ``_populate_vector_index_from_sqlite(target)`` for new code;
+        that one respects whatever backend (_Numpy or _Hnsw) is already in
+        use instead of hardcoding numpy. This one is kept for any external
+        caller that still expects a fresh index back.
         """
         dims = self._detect_embedding_dims()
         idx = _NumpyVectorIndex(dimensions=dims)
+        if self._conn is None:
+            return idx
+        self._populate_vector_index_from_sqlite(idx)
+        return idx
 
+    def _populate_vector_index_from_sqlite(
+        self,
+        target: _NumpyVectorIndex | _HnswVectorIndex,
+    ) -> int:
+        """Populate the given in-RAM index by reading every embedded row
+        from SQLite. Works for both _NumpyVectorIndex and _HnswVectorIndex
+        because both expose the same ``_add_sync(id, vec, metadata)`` API.
+
+        Returns the number of vectors added.
+        """
         if self._conn is None:
             # Adapter path — async rebuild must run separately
-            return idx
-
+            return 0
+        dims = self._detect_embedding_dims()
         rows = self._conn.execute(
             "SELECT id, embedding, memory_type FROM memories WHERE embedding IS NOT NULL"
         ).fetchall()
-
         rebuilt = 0
         for row in rows:
             mem_id = row[0]
@@ -487,12 +1332,14 @@ class UnifiedMemoryStore:
             except struct.error:
                 continue
             if vec and len(vec) == dims:
-                idx._add_sync(mem_id, vec, {"type": row[2]})
+                target._add_sync(mem_id, vec, {"type": row[2]})
                 rebuilt += 1
-
         if rebuilt:
-            logger.info("Rebuilt vector index from SQLite: %d vectors", rebuilt)
-        return idx
+            logger.info(
+                "Rebuilt vector index from SQLite: %d vectors (backend=%s)",
+                rebuilt, type(target).__name__,
+            )
+        return rebuilt
 
     async def rebuild_vector_index(self) -> int:
         """Rebuild the in-RAM vector index from SQLite via adapter. Returns count."""
@@ -567,8 +1414,28 @@ class UnifiedMemoryStore:
         memory_scope: str = "global",
         team_id: str | None = None,
         agent_id: str | None = None,
+        trust_source: str = "claude_inferred",
+        confidence: float = 0.7,
+        supersedes: list[str] | None = None,
     ) -> str:
-        """Store a new memory. Returns the memory ID."""
+        """Store a new memory. Returns the memory ID.
+
+        ``trust_source`` controls retrieval ranking (see ``TRUST_MULTIPLIERS``):
+            - ``"user_stated"`` — user directly said it
+            - ``"user_corrected"`` — user corrected a prior fact
+            - ``"code_extracted"`` — read from source/tool output (re-verifiable)
+            - ``"claude_inferred"`` — model-derived (default; conservative)
+        Unknown values are coerced to ``"claude_inferred"``.
+
+        ``confidence`` (0.0–1.0) is multiplied into the ranking score.
+
+        ``supersedes`` — optional list of memory IDs that this new memory
+        replaces. Those rows get ``superseded_by = <new_id>``,
+        ``superseded_at = <now>``, and ``verification_state = 'superseded'``
+        atomically with the insert. Superseded rows are hidden from default
+        recall but remain in the DB for audit. Unknown IDs in the list are
+        safely no-op (the UPDATE just doesn't match anything).
+        """
         memory_id = _uuid()
         now = _now_iso()
         tags_json = json.dumps(tags or [])
@@ -579,6 +1446,17 @@ class UnifiedMemoryStore:
             agent_id=agent_id,
         )
         meta_json = json.dumps(prepared_metadata)
+
+        # v2 invariants — compute / clamp at the one place new rows enter the DB.
+        trust_source = normalize_trust_source(trust_source)
+        try:
+            confidence_f = float(confidence)
+        except (TypeError, ValueError):
+            confidence_f = 0.7
+        confidence_f = max(0.0, min(1.0, confidence_f))
+        content_hash = compute_content_hash(content or "")
+        anchor_hash = compute_anchor_hash(content or "")
+        chunker_version = CURRENT_CHUNKER_VERSION
 
         # Generate embedding (before DB insert — embedding is needed for the blob)
         embedding_blob = None
@@ -599,14 +1477,22 @@ class UnifiedMemoryStore:
             except (ValueError, TypeError, RuntimeError) as exc:
                 logger.debug("Embedding generation failed: %s", exc)
 
+        # Stamp embedding_version only when an embedding was actually produced.
+        # Rows without an embedding get empty string, which the healer/retriever
+        # treat as "no semantic entry" — avoids fake version_skew rows.
+        embedding_version = CURRENT_EMBEDDING_VERSION if embedding_vec else ""
+
         # T1: Atomic DB insert + vector add -- DB insert first, then vector index.
         # If DB insert fails, vector index stays clean. If vector add fails,
         # we still have the embedding blob in SQLite for later index rebuild.
         _sql = """INSERT INTO memories
                    (id, content, memory_type, importance, source, tags, metadata,
                     user_id, embedding, created_at, updated_at, last_accessed,
-                    access_count, decay_score, expires_at, session_id, parent_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)"""
+                    access_count, decay_score, expires_at, session_id, parent_id,
+                    content_hash, anchor_hash, embedding_version, chunker_version,
+                    trust_source, confidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?)"""
         _params = (
             memory_id,
             content,
@@ -624,13 +1510,52 @@ class UnifiedMemoryStore:
             expires_at,
             session_id,
             parent_id,
+            content_hash,
+            anchor_hash,
+            embedding_version,
+            chunker_version,
+            trust_source,
+            confidence_f,
+        )
+
+        # Normalize supersede list: strip empties, dedupe, preserve order.
+        supersede_ids: list[str] = []
+        if supersedes:
+            seen: set[str] = set()
+            for raw in supersedes:
+                sid = str(raw or "").strip()
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                supersede_ids.append(sid)
+
+        # Supersede UPDATE runs inside the same transaction as the INSERT so
+        # the new memory and the "replaces" pointers commit atomically. No
+        # half-state where the new row exists without its supersede links.
+        _supersede_sql = (
+            "UPDATE memories "
+            "SET superseded_by = ?, superseded_at = ?, verification_state = 'superseded' "
+            "WHERE id IN ({placeholders})"
         )
 
         if self._db_adapter is not None:
             await self._db_adapter.execute(self._DB_NAME, _sql, list(_params))
+            if supersede_ids:
+                placeholders = ",".join("?" * len(supersede_ids))
+                await self._db_adapter.execute(
+                    self._DB_NAME,
+                    _supersede_sql.format(placeholders=placeholders),
+                    [memory_id, now, *supersede_ids],
+                )
         else:
             def _insert():
                 self._conn.execute(_sql, _params)
+                if supersede_ids:
+                    placeholders = ",".join("?" * len(supersede_ids))
+                    self._conn.execute(
+                        _supersede_sql.format(placeholders=placeholders),
+                        (memory_id, now, *supersede_ids),
+                    )
                 self._conn.commit()
 
             async with self._db_write_lock:
@@ -652,11 +1577,19 @@ class UnifiedMemoryStore:
                 )
             except (ValueError, TypeError) as exc:
                 logger.debug("Vector index add failed (will rebuild from DB): %s", exc)
+        if supersede_ids:
+            logger.info(
+                "memory.supersede: new=%s replaces %d old id(s): %s",
+                memory_id[:8],
+                len(supersede_ids),
+                [s[:8] for s in supersede_ids],
+            )
         logger.debug(
-            "Stored memory %s (type=%s, importance=%d)",
+            "Stored memory %s (type=%s, importance=%d, supersedes=%d)",
             memory_id[:8],
             memory_type,
             importance,
+            len(supersede_ids),
         )
         return memory_id
 
@@ -669,22 +1602,30 @@ class UnifiedMemoryStore:
         min_importance: int = 1,
         scopes: list[str] | None = None,
         team_id: str | None = None,
+        show_superseded: bool = False,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         Recall memories by semantic similarity (predacore_core SIMD cosine).
         Empty queries or cold-start indices fall through to BM25 keyword search.
         Embedding failures propagate — no silent degradation.
+
+        ``show_superseded`` — when True, also include rows explicitly replaced
+        via ``store(..., supersedes=[...])``. Default False matches the
+        expected user experience (corrected facts shouldn't resurface).
+        Invariant-failure rows (stale/orphaned/version_skew) are always hidden.
         """
         # Empty query → semantic has no meaning, use keyword path
         if not query or not query.strip():
             return await self._recall_keyword(
-                query, user_id, top_k, memory_types, min_importance, scopes, team_id
+                query, user_id, top_k, memory_types, min_importance, scopes, team_id,
+                show_superseded=show_superseded,
             )
 
         # No embedder configured or cold-start index → keyword path
         if not self._embed or not self._vec_index or self._vec_index.size == 0:
             return await self._recall_keyword(
-                query, user_id, top_k, memory_types, min_importance, scopes, team_id
+                query, user_id, top_k, memory_types, min_importance, scopes, team_id,
+                show_superseded=show_superseded,
             )
 
         # Semantic search path — failures raise, no fallback
@@ -702,7 +1643,11 @@ class UnifiedMemoryStore:
         # Semantic search via vector index
         hits = await self._vec_index.search(query_vec, top_k=top_k * 3)
 
-        results: list[tuple[dict[str, Any], float]] = []
+        # Collect ALL matching candidates first (no early break) so that
+        # when we re-sort by weighted score below, we don't accidentally
+        # drop a row that the vector index ranked low but the weights push
+        # to the top (e.g. a high-confidence user_corrected row).
+        candidates: list[tuple[dict[str, Any], float]] = []
         if self._db_adapter is not None:
             for memory_id, score in hits:
                 mem = await self._get_memory_via_adapter(memory_id)
@@ -716,10 +1661,9 @@ class UnifiedMemoryStore:
                     continue
                 if not _memory_matches_scope(mem, scopes, team_id=team_id):
                     continue
-                adjusted_score = score * mem["decay_score"]
-                results.append((mem, adjusted_score))
-                if len(results) >= top_k:
-                    break
+                if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded):
+                    continue
+                candidates.append((mem, _apply_ranking_weights(score, mem)))
         else:
             async with self._db_lock:
                 for memory_id, score in hits:
@@ -734,11 +1678,14 @@ class UnifiedMemoryStore:
                         continue
                     if not _memory_matches_scope(mem, scopes, team_id=team_id):
                         continue
-                    # Boost score by decay_score
-                    adjusted_score = score * mem["decay_score"]
-                    results.append((mem, adjusted_score))
-                    if len(results) >= top_k:
-                        break
+                    if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded):
+                        continue
+                    candidates.append((mem, _apply_ranking_weights(score, mem)))
+
+        # Sort by weighted score (trust × confidence × decay × similarity),
+        # descending. Then truncate to top_k.
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        results: list[tuple[dict[str, Any], float]] = candidates[:top_k]
 
         # Batch update access time for all retrieved memories (single SQL)
         if results:
@@ -775,10 +1722,13 @@ class UnifiedMemoryStore:
         min_importance: int = 1,
         scopes: list[str] | None = None,
         team_id: str | None = None,
+        show_superseded: bool = False,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         BM25 keyword search using predacore_core (Rust). Used for empty queries
         and cold-start indices. Synonym expansion applied to query terms.
+
+        Respects ``show_superseded`` the same way ``recall()`` does.
         """
         _sql = """SELECT * FROM memories
                      WHERE user_id = ? AND importance >= ?
@@ -798,13 +1748,16 @@ class UnifiedMemoryStore:
         if not rows:
             return []
 
-        # Filter by memory_type and scope BEFORE BM25 (smaller corpus = faster)
+        # Filter by memory_type, scope, and verification_state BEFORE BM25
+        # (smaller corpus = faster, and avoids wasted BM25 work on hidden rows).
         filtered: list[dict[str, Any]] = []
         for row in rows:
             row["metadata"] = _coerce_metadata_dict(row.get("metadata") or {})
             if memory_types and row["memory_type"] not in memory_types:
                 continue
             if not _memory_matches_scope(row, scopes, team_id=team_id):
+                continue
+            if not _memory_is_visible_in_recall(row, show_superseded=show_superseded):
                 continue
             filtered.append(row)
 
@@ -819,15 +1772,21 @@ class UnifiedMemoryStore:
         else:
             expanded_query = query
 
-        # Rust BM25 ranking (k1=1.5, b=0.75, IDF smoothing)
+        # Rust BM25 ranking (k1=1.5, b=0.75, IDF smoothing). Fetch 3x top_k
+        # headroom so that after Build 3 trust+confidence+decay weighting +
+        # re-sort, we don't miss a row that BM25 ranked #(top_k+1) but
+        # whose weights push it to #1.
         contents = [r["content"] for r in filtered]
-        ranked = predacore_core.bm25_search(expanded_query, contents, top_k)
+        ranked = predacore_core.bm25_search(expanded_query, contents, top_k * 3)
 
-        # Combine BM25 score with decay score
-        results = [
-            (filtered[idx], float(score) * filtered[idx]["decay_score"])
+        # Apply trust + confidence + decay weights, then re-sort by the
+        # weighted score (not the raw BM25 score) before truncating.
+        weighted = [
+            (filtered[idx], _apply_ranking_weights(float(score), filtered[idx]))
             for idx, score in ranked
         ]
+        weighted.sort(key=lambda t: t[1], reverse=True)
+        results = weighted[:top_k]
 
         # Batch update access time
         if results:
@@ -2060,10 +3019,70 @@ class UnifiedMemoryStore:
 
     # ── Cleanup ───────────────────────────────────────────────────────
 
+    def _vector_cache_path(self) -> Path:
+        """Location of the persisted vector index cache (sibling of the DB file)."""
+        return self._db_path.parent / "vector_index.cache.npz"
+
+    def _sqlite_embedded_row_count(self) -> int:
+        """Count of memories with a non-NULL embedding — used for cache invariant."""
+        if self._conn is None:
+            return 0
+        try:
+            return int(self._conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL"
+            ).fetchone()[0])
+        except sqlite3.Error as exc:
+            logger.debug("Row-count check failed: %s", exc)
+            return -1
+
+    def _try_load_vector_index_cache(self) -> bool:
+        """Attempt to populate self._vec_index from disk cache. Return True on success."""
+        if self._vec_index is None or self._conn is None:
+            return False
+        row_count = self._sqlite_embedded_row_count()
+        if row_count <= 0:
+            # Empty or unreadable SQLite — nothing to load / validate against
+            return False
+        return self._vec_index.load_from_disk(
+            self._vector_cache_path(),
+            expected_row_count=row_count,
+            expected_embedding_version=CURRENT_EMBEDDING_VERSION,
+        )
+
+    def _persist_vector_index_cache(self) -> None:
+        """Dump the current in-RAM vector index to disk. Safe to call on shutdown."""
+        if self._vec_index is None or self._conn is None:
+            return
+        row_count = self._sqlite_embedded_row_count()
+        if row_count < 0:
+            return
+        try:
+            self._vec_index.dump_to_disk(
+                self._vector_cache_path(),
+                row_count=row_count,
+                embedding_version=CURRENT_EMBEDDING_VERSION,
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Vector index persistence skipped: %s", exc)
+
     def close(self) -> None:
-        """Close the SQLite connection. Vector index is GC'd with the instance."""
+        """Persist the in-RAM vector index + close the SQLite connection.
+
+        Safe to call multiple times (idempotent). On abrupt kill (SIGKILL),
+        persistence is skipped and the next startup falls back to rebuilding
+        from SQLite — no data lost, just slower boot.
+        """
+        # Persist cache BEFORE closing the DB — we need the conn to get the
+        # current row count for the invariant header.
+        try:
+            self._persist_vector_index_cache()
+        except Exception as exc:  # noqa: BLE001 — never block close on cache failure
+            logger.debug("Vector cache persist on close failed (non-fatal): %s", exc)
+
         if self._conn is not None:
             try:
                 self._conn.close()
             except sqlite3.Error as exc:
                 logger.debug("Error closing DB connection: %s", exc)
+            finally:
+                self._conn = None

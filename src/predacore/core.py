@@ -62,9 +62,31 @@ def _llm_error_message(exc: Exception) -> str:
 
 
 def _context_budget_for_provider(provider: str, model: str) -> tuple[int, int]:
-    """Choose a safe prompt budget for the active provider/model."""
-    budget_tokens = 36_000
-    history_min_tokens = 6_000
+    """Choose a safe prompt budget for the active provider/model.
+
+    Returns ``(budget_tokens, history_min_tokens)``.
+
+    - ``budget_tokens`` — target total prompt size per LLM call. Keep well
+      under any model's absolute max so attention stays in its high-quality
+      zone ("lost in the middle" measurably degrades past ~200k).
+    - ``history_min_tokens`` — floor reserved for recent turn history after
+      identity + memory recall + tools have taken their share. Prevents
+      "huge identity starves recent chat" pathologies.
+
+    Override via the ``PREDACORE_CONTEXT_BUDGET`` env var (integer token
+    count, e.g. 100000). When set, history floor scales to budget / 6.
+    """
+    env_budget = os.getenv("PREDACORE_CONTEXT_BUDGET", "").strip()
+    if env_budget.isdigit():
+        budget = int(env_budget)
+        # Floor history reserve at 4k; scale with budget for bigger windows.
+        return budget, max(budget // 6, 4_000)
+
+    # Default: 80k budget, 14k history floor. Works for every modern LLM
+    # (Opus 4.7 @ 1M, Gemini 3 Pro @ 2M, Sonnet @ 200k, GPT-5 @ 400k).
+    # At 80k we're comfortably in the 99%+ attention band on every model.
+    budget_tokens = 80_000
+    history_min_tokens = 14_000
     return budget_tokens, history_min_tokens
 
 

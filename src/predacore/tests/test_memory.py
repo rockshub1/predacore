@@ -549,8 +549,13 @@ class TestVectorIndexSyncRebuild:
         idx_sync._add_sync("b", [0.0, 1.0])
 
         idx_async = _NumpyVectorIndex(dimensions=2)
-        asyncio.get_event_loop().run_until_complete(idx_async.add("a", [1.0, 0.0]))
-        asyncio.get_event_loop().run_until_complete(idx_async.add("b", [0.0, 1.0]))
+        # Use asyncio.run() instead of the deprecated get_event_loop() +
+        # run_until_complete pattern. The old pattern breaks on Python 3.10+
+        # depending on whether a prior test left an event loop attached to
+        # the main thread — caused this test to pass in isolation but fail
+        # when run alongside other async tests in the suite.
+        asyncio.run(idx_async.add("a", [1.0, 0.0]))
+        asyncio.run(idx_async.add("b", [0.0, 1.0]))
 
         assert idx_sync._ids == idx_async._ids
         assert idx_sync._vecs == idx_async._vecs

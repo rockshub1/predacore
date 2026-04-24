@@ -193,6 +193,10 @@ async def _persist_team_memory(
             memory_scope="team",
             team_id=team_id,
             agent_id=agent_id,
+            # Multi-agent team output — model-derived team reasoning, not a
+            # direct user statement. claude_inferred + default confidence.
+            trust_source="claude_inferred",
+            confidence=0.7,
         )
     except (RuntimeError, OSError, ValueError, TypeError):
         logger.debug("Persisting team memory failed", exc_info=True)
