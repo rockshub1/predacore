@@ -123,7 +123,7 @@ Then restart the daemon so it picks up the new code:
 
 ```bash
 predacore stop && predacore start --daemon
-predacore --version              # verify
+predacore status                 # verify
 ```
 
 Existing memory in `~/.predacore/` migrates automatically — config, identity files, memory DB all carry over. Configs written by a pre-v0.1.5 setup wizard may contain legacy keys (`mode: personal`, old profile names like `balanced` / `public_beast`); if `predacore doctor` shows unexpected values, back up and regenerate with `predacore setup`.
