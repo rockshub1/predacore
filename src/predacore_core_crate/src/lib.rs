@@ -13,6 +13,7 @@ mod bm25;
 mod embedding;
 mod entity;
 mod fuzzy;
+mod hnsw_index;
 mod relations;
 mod synonyms;
 mod vector;
@@ -181,8 +182,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embedding_dim, m)?)?;
     m.add_function(wrap_pyfunction!(is_model_loaded, m)?)?;
 
+    // HNSW index class (O(log n) ANN vector search at scale)
+    m.add_class::<hnsw_index::PyHnswIndex>()?;
+
     // Module metadata
-    m.add("__version__", "0.1.0")?;
+    m.add("__version__", "1.1.1")?;
 
     Ok(())
 }

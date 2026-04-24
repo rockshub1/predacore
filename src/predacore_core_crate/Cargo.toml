@@ -1,6 +1,6 @@
 [package]
 name = "predacore_core"
-version = "0.1.2"
+version = "1.1.1"
 edition = "2021"
 description = "Rust-powered intelligence layer for PredaCore — embeddings, vector search, BM25, fuzzy matching, entity extraction, graph traversal"
 
@@ -22,6 +22,11 @@ candle-nn = "0.10"
 candle-transformers = "0.10"
 tokenizers = "0.22"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
+
+# Approximate nearest-neighbor — HNSW graph for O(log n) vector search at
+# scale. At <10k vectors we still use linear SIMD scan; HNSW kicks in
+# above that via _HnswVectorIndex (Python), opt-in via env flag.
+hnsw_rs = "0.3"
 
 [profile.release]
 opt-level = 3

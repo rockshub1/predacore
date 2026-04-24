@@ -25,9 +25,11 @@ from predacore_core._core import (
     embed,
     embedding_dim,
     is_model_loaded,
+    # HNSW index class (O(log n) ANN vector search at scale)
+    PyHnswIndex,
 )
 
-__version__ = "0.1.0"
+__version__ = "1.1.1"
 
 __all__ = [
     "cosine_similarity",
@@ -47,4 +49,5 @@ __all__ = [
     "embed",
     "embedding_dim",
     "is_model_loaded",
+    "PyHnswIndex",
 ]

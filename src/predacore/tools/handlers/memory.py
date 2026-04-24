@@ -131,6 +131,13 @@ async def handle_memory_store(args: dict[str, Any], ctx: ToolContext) -> str:
                 memory_scope=memory_scope,
                 team_id=team_id or None,
                 agent_id=agent_id,
+                # Explicit agent/user invocation of the memory_store tool —
+                # treat as user_stated with high confidence. Ranking weight
+                # is user_stated (0.90) per TRUST_MULTIPLIERS. Callers that
+                # want a different classification can instead call
+                # ctx.unified_memory.store() directly with trust_source set.
+                trust_source="user_stated",
+                confidence=0.9,
             )
             entities_msg = ""
             if memory_type_raw == "knowledge" and hasattr(ctx.unified_memory, "extract_entities"):

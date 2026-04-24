@@ -15,7 +15,11 @@ use tokenizers::Tokenizer;
 use once_cell::sync::Lazy;
 
 const MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
-const MAX_SEQ_LEN: usize = 256;
+// Phase 6b: raised 256 → 512 to match lab's kernel. Auto-chunking keeps
+// each chunk ≤ ~200 tokens either way, but longer un-chunked memories
+// (200-512 tokens) now get their full content embedded in one pass
+// instead of truncated.
+const MAX_SEQ_LEN: usize = 512;
 
 /// Cached model + tokenizer (loaded once, reused across calls).
 static MODEL: Lazy<Mutex<Option<EmbeddingModel>>> = Lazy::new(|| Mutex::new(None));
