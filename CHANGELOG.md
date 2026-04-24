@@ -2,6 +2,48 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.1.1] - 2026-04-24
+
+**Phase 1 memory upgrade — HNSW at scale, v2 schema, trust-weighted ranking.**
+
+### Added
+- **Schema v2** with 14 invariant columns (`trust_source`, `verification_state`, `embedding_version`, `chunker_version`, `anchor_hash`, `content_hash`, `parent_id`, `chunk_ordinal`, `superseded_at`, `superseded_by`, `last_verified_at`, `source_blob_sha`, `source_mtime`, `decay_score`). Idempotent v1 → v2 migrator runs on first open; existing rows backfill safely.
+- **Trust-weighted retrieval ranking** — recall score multiplied by `user_corrected=1.00`, `code_extracted=0.95`, `user_stated=0.90`, `claude_inferred=0.60` (alongside time decay and confidence).
+- **Supersede API** — `store(supersedes=[...])` atomically replaces old rows; `recall(show_superseded=False)` hides them by default. Clean way to correct/update memories without losing history.
+- **HNSW vector index** — `_HnswVectorIndex` opt-in via `PREDACORE_USE_HNSW=1`. Rust-backed via `hnsw_rs 0.3`, tombstone-based deletes, shared interface with `_NumpyVectorIndex`. O(log n) cosine ANN search instead of O(n) linear scan. Tuned for ~99.9% recall at 1M vectors: `M=32`, `ef_construction=400`, `ef_search=400`, `MAX_VECTORS=1,000,000`.
+- **Vector index persistence** — `.npz` cache of numpy backend survives daemon restarts; safe-skipped on row-count or embedding-version drift.
+- **Python 3.13** classifier added.
+- **`predacore --version`** flag.
+
+### Changed
+- **Context budget** raised 36k → 80k tokens (model-agnostic).
+- **Rust embedding** `MAX_SEQ_LEN` bumped 256 → 512 for longer memory content.
+- **Dependency pin** tightened: `predacore_core>=1.1.1`.
+
+### Packaging
+- `predacore_core` 0.1.2 → 1.1.1 (coordinated bump, reset series).
+- `predacore` 0.1.5 → 1.1.1.
+- Cross-platform wheels on PyPI: linux-x86_64, macOS universal2, windows-x86_64, sdist.
+
+### Tests
+- 51 new schema-migration tests covering migration, supersede, recall filters, trust ranking, context budget, vector cache, HNSW semantics.
+- Fixed pre-existing asyncio flake in `test_memory.py` (replaced deprecated `get_event_loop` with `asyncio.run`).
+- **139 tests passing** locally.
+
+### Live migration
+- Ran successfully on the 80-row production DB: zero data loss, schema jumped 17 → 33 columns, legacy rows defaulted to `trust_source=claude_inferred` (conservative 0.60× multiplier) and `verification_state=unverified` (healer processes over time).
+
+## [0.1.1 – 0.1.5] - 2026-04-18 to 2026-04-21
+
+Rapid iteration on the v0 series — see individual GitHub release notes at
+<https://github.com/rockshub1/predacore/releases> for per-version details.
+
+Highlights:
+- `0.1.5`: live daemon status/doctor · persist start flags · Gemini thought_signature fix
+- `0.1.4`: provider-owned tool turns · response cache · 2-mode simplification
+- `0.1.3`: browser_bridge reliability · Gemini cache telemetry
+- `0.1.2`: Rust kernel rename (`jarvis_core` → `predacore_core`), multi-platform wheel publishing
+
 ## [0.1.0] - 2026-04-15
 
 ### 🎉 Initial Public Release
