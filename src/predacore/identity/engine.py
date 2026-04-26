@@ -68,6 +68,42 @@ _MAX_DIFF_LINES = 200
 # EVOLUTION.md keeps the most recent N entries — prevents unbounded growth.
 _MAX_EVOLUTION_ENTRIES = 200
 
+# Operational guide for the memory subsystem — engineering knowledge that
+# describes how the memory tools work and when to use them. Lives in code so
+# it ships with every release and stays aligned with the actual tool surface
+# (no migration gap from frozen workspace files). Distinct from MEMORY.md
+# which holds the agent's curated content (preferences, decisions, lessons).
+_MEMORY_GUIDE = """\
+Memory has two complementary layers:
+
+**Passive (auto-context)** — every turn, the retriever quietly pulls
+relevant memories into context based on the user's current message. You
+don't ask for it; it just shows up. This handles baseline recall.
+
+**Active (the memory tools)** — when you need to be deliberate:
+- `memory_store` — save something durable that next-week-you should know
+- `memory_recall` — targeted query when auto-context might've missed
+  something specific (a bug ID, a function name, a past decision)
+- `memory_get` — fetch one row by id (when you have an id from a prior recall)
+- `memory_delete` — when the user says "forget X" or a stored row is wrong
+- `memory_stats` — when the user asks "how's memory?" or for a health check
+- `memory_explain` — debug "why didn't memory X show up for query Y?"
+
+Plus an invisible infrastructure layer that runs without you asking:
+- File edits → auto-indexed via the write hook (don't call `memory_store`
+  for code chunks; the hook handles it)
+- Git mutations (checkout/merge/rebase/reset/pull) → memory auto-syncs to
+  the new working tree, including committed deltas
+- Background healer → drift checks, snapshot rotation, integrity audits
+- BGE embedder warmup at boot → first recall isn't slow
+
+Focus on the **synthesis layer**: code is canonical (Read/Grep retrieves
+it in 2ms); memory is for what Read can't tell you — the WHY behind
+decisions, the ROOT CAUSE behind bugs, the SURPRISES worth remembering.
+
+**Discipline:** healthy ratio is 0–5 stores per session. 20+ means you're
+storing noise. Keep it lean — every memory should earn its place."""
+
 # Maximum DECISIONS.md entries kept on disk.
 _MAX_DECISION_ENTRIES = 500
 
@@ -382,6 +418,16 @@ class IdentityEngine:
     def load_memory(self) -> str:
         """Load MEMORY.md (curated long-term memory) from workspace."""
         return _read_cached(self.workspace / "MEMORY.md") or ""
+
+    def memory_guide(self) -> str:
+        """Return the operational guide for the memory subsystem.
+
+        Engineering knowledge about HOW the memory tools work — distinct from
+        MEMORY.md which holds the agent's curated content. Lives in code so it
+        ships with every release and stays current; user workspaces can't drift
+        out of sync with the actual tool surface.
+        """
+        return _MEMORY_GUIDE
 
     def load_heartbeat_config(self) -> str:
         """Load HEARTBEAT.md (periodic check config) from workspace."""
@@ -749,8 +795,8 @@ class IdentityEngine:
 
         Layer order (horizontal-rule separated):
           SOUL_SEED → EVENT_HORIZON → IDENTITY → SOUL → USER
-          → structured profile → MEMORY → TOOLS → HEARTBEAT
-          → REFLECTION → BELIEFS → recent journal tail
+          → structured profile → memory_guide (code) → MEMORY (workspace)
+          → TOOLS → HEARTBEAT → REFLECTION → BELIEFS → recent journal tail
         """
         sections: list[str] = []
 
@@ -784,7 +830,8 @@ class IdentityEngine:
         if profile_parts:
             _add("\n".join(profile_parts))
 
-        _add(self.load_memory())
+        _add(self.memory_guide(), wrap="How Memory Works")
+        _add(self.load_memory(), wrap="Curated Memory (MEMORY.md)")
         _add(self.load_tools())
         _add(self.load_heartbeat_config(), wrap="Background Discipline (HEARTBEAT.md)")
         _add(self.load_reflection_rules(), wrap="Self-Correction Rules (REFLECTION.md)")

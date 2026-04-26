@@ -259,3 +259,69 @@ class TestHealerLifecycle:
         finally:
             if bundle.unified_memory:
                 bundle.unified_memory.close()
+
+
+class TestMemoryGuideInPrompt:
+    """v1.3.0: operational memory guide is code-baked, always in prompt.
+
+    The "How Memory Works" section is no longer in MEMORY.md (which is now
+    user-curated content only) — it lives in the `_MEMORY_GUIDE` constant
+    in `identity/engine.py` and gets injected into the assembled prompt.
+    Eliminates the upgrade-migration gap because the guide auto-updates
+    with every release instead of being frozen in a workspace file.
+    """
+
+    def test_memory_guide_is_a_nonempty_string(self, tmp_path):
+        from predacore.identity.engine import IdentityEngine, reset_identity_engine
+        reset_identity_engine()
+        engine = IdentityEngine(str(tmp_path), agent_name="guide_test")
+        guide = engine.memory_guide()
+        assert isinstance(guide, str)
+        assert len(guide) > 200, "guide should describe the 6 tools + infrastructure layer"
+
+    def test_memory_guide_mentions_all_six_tools(self, tmp_path):
+        from predacore.identity.engine import IdentityEngine, reset_identity_engine
+        reset_identity_engine()
+        engine = IdentityEngine(str(tmp_path), agent_name="guide_tools_test")
+        guide = engine.memory_guide()
+        for tool in ("memory_store", "memory_recall", "memory_get",
+                     "memory_delete", "memory_stats", "memory_explain"):
+            assert tool in guide, f"{tool} should appear in operational guide"
+
+    def test_guide_in_assembled_prompt_with_empty_workspace_memory(self, tmp_path):
+        """Even when MEMORY.md is empty, the guide is still in the prompt."""
+        from predacore.identity.engine import IdentityEngine, reset_identity_engine
+        reset_identity_engine()
+        engine = IdentityEngine(str(tmp_path), agent_name="empty_test")
+        # Force MEMORY.md to be empty (simulates a user who deleted theirs)
+        (engine.workspace / "MEMORY.md").write_text("")
+        prompt = engine.build_identity_prompt()
+        assert "How Memory Works" in prompt
+        assert "memory_store" in prompt
+        assert "memory_recall" in prompt
+
+    def test_guide_in_assembled_prompt_alongside_curated_memory(self, tmp_path):
+        """Guide and workspace MEMORY.md coexist in the prompt — both present."""
+        from predacore.identity.engine import IdentityEngine, reset_identity_engine
+        reset_identity_engine()
+        engine = IdentityEngine(str(tmp_path), agent_name="coexist_test")
+        (engine.workspace / "MEMORY.md").write_text(
+            "# Memory\n\n- User prefers tabs over spaces.\n"
+        )
+        prompt = engine.build_identity_prompt()
+        assert "How Memory Works" in prompt
+        assert "memory_store" in prompt
+        assert "Curated Memory" in prompt
+        assert "tabs over spaces" in prompt
+
+    def test_default_memory_md_no_longer_carries_operational_guide(self, tmp_path):
+        """v1.3.0 invariant: shipped MEMORY.md defaults must NOT contain
+        operational content (moved to code). Regression guard for the v1.2.0
+        mistake where operational guidance was edited into a defaults file."""
+        from predacore.identity.engine import IdentityEngine, reset_identity_engine
+        reset_identity_engine()
+        engine = IdentityEngine(str(tmp_path), agent_name="defaults_test")
+        seeded = (engine.workspace / "MEMORY.md").read_text()
+        assert "Two layers, complementary" not in seeded
+        # But the curated-content scaffold should be present
+        assert "What belongs here" in seeded or "curated" in seeded.lower()
