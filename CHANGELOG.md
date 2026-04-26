@@ -2,6 +2,38 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.2.1] - 2026-04-26
+
+**Patch — fixes two bugs shipped in 1.2.0.**
+
+### Fixed
+- `predacore --version` now correctly reports the installed version. Bumped
+  stale `__version__` constant in `src/predacore/__init__.py` (was hardcoded
+  to `"1.1.1"` and never bumped during the 1.2.0 release; package metadata
+  was correct at 1.2.0 but the in-code string lagged). Importing
+  `predacore.__version__` now matches the wheel's metadata.
+- **MEMORY.md defaults sync**: the W7 update for the dual-layer memory model
+  ("passive auto-context + active memory tools") and the 6-tool guidance was
+  written to top-level `agents/default/MEMORY.md` (which doesn't ship in the
+  wheel) instead of `src/predacore/identity/defaults/MEMORY.md` (the file
+  that's actually copied to a user's workspace on bootstrap). Synced the W7
+  content to the shipped defaults so fresh installs see the dual-layer
+  guidance. **Existing users**: bootstrap does NOT overwrite an existing
+  `~/.predacore/agents/default/MEMORY.md`, so to pick up the new defaults
+  after upgrading, manually replace your workspace copy:
+  ```bash
+  cp $(python -c "import predacore.identity.defaults as d, pathlib; print(pathlib.Path(d.__file__).parent / 'MEMORY.md')") ~/.predacore/agents/default/MEMORY.md
+  ```
+
+### Known issue (not blocking)
+- The top-level `agents/default/` directory at the repo root is a stale
+  developer mirror that does NOT ship in the wheel. 4 files there
+  (HEARTBEAT.md, IDENTITY.md, MEMORY.md, SOUL.md) diverge from the canonical
+  `src/predacore/identity/defaults/` versions; for HEARTBEAT/IDENTITY/SOUL the
+  defaults are NEWER, while MEMORY.md was edited at the top level (1.2.0's W7
+  bug — fixed here). Treat `src/predacore/identity/defaults/` as canonical
+  going forward. Cleanup of the top-level mirror deferred to a separate PR.
+
 ## [1.2.0] - 2026-04-26
 
 **Phase 2 memory upgrade — auto-trigger wiring, project isolation, verify-with-code.**
