@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predacore"
-version = "1.1.1"
+version = "1.2.0"
 description = "PredaCore — the apex autonomous agent. Hybrid Rust memory kernel, topped LongMemEval R@5 = 0.9574."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -242,6 +242,12 @@ addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
+# pytest-asyncio: auto-detect async tests, no need for @pytest.mark.asyncio
+asyncio_mode = "auto"
+# pytest-timeout: cap any test at 60s. The e2e_smoke fixture hung 10h once
+# because a channel listener waited on a connection that never came; this
+# global cap prevents repeats. Override per-test with @pytest.mark.timeout(N).
+timeout = 60
 markers = [
     # Tests that hit real external APIs (Anthropic, OpenAI, Gemini).
     # Skipped by default. Enable with `pytest --real` or `pytest -m real`.

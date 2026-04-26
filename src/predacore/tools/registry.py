@@ -425,7 +425,52 @@ BUILTIN_TOOLS_RAW = [
     (
         {
             "name": "memory_store",
-            "description": "Store information in long-term memory for later retrieval.",
+            "description": (
+                "Save a durable, cross-session fact to long-term memory. "
+                "Be deliberate — quality over quantity.\n"
+                "\n"
+                "WHEN TO CALL:\n"
+                "• User explicitly states a preference (\"I prefer X\", \"always do Y\") "
+                "— memory_type=preference, importance=high\n"
+                "• An architectural decision is made + the WHY matters "
+                "— memory_type=fact, importance=high\n"
+                "• A bug is fixed with a non-obvious root cause "
+                "— memory_type=fact (tag with bug ID)\n"
+                "• A surprising fact about the codebase comes up "
+                "— memory_type=fact\n"
+                "• Session highlight worth recalling later "
+                "— memory_type=conversation\n"
+                "\n"
+                "WHEN NOT TO CALL:\n"
+                "• Every detail of what just happened (use the conversation; "
+                "only save if it'll matter next week)\n"
+                "• Raw code snippets (Read can re-fetch — save the SYNTHESIS "
+                "instead, e.g. 'foo.py uses BFS because DFS would stack-overflow')\n"
+                "• Speculation you'd reject in 10 minutes\n"
+                "• Within-session state (use conversation context instead)\n"
+                "\n"
+                "CONTENT QUALITY:\n"
+                "• Include the WHY, not just the WHAT. 'We use BGE' is noise; "
+                "'We use BGE because CodeBERT hurt decision recall' is signal.\n"
+                "• 1–3 sentences preferred. One durable idea per call.\n"
+                "• Use tags generously — they filter future searches cheaply.\n"
+                "\n"
+                "Healthy ratio: 0–5 stores per session. 20+ means you're "
+                "storing noise.\n"
+                "\n"
+                "Note: file edits are AUTO-INDEXED via the write hook — you "
+                "don't need to call this for code chunks. Use this tool for "
+                "HUMAN-CURATED synthesis only.\n"
+                "\n"
+                "Project isolation: memories are auto-tagged with the current "
+                "project_id (cwd/git repo basename). Override with the "
+                "project_id parameter ONLY if you're saving something for a "
+                "DIFFERENT project than the one you're currently in (rare).\n"
+                "\n"
+                "Ingress safety: content with secrets (AWS / GitHub / OpenAI / "
+                "Anthropic / SSH / JWT patterns) is REFUSED at the store level "
+                "and an empty id is returned — the safety counter records the block."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -471,6 +516,16 @@ BUILTIN_TOOLS_RAW = [
                         "type": "string",
                         "description": "Optional absolute expiration timestamp (ISO-8601)",
                     },
+                    "project_id": {
+                        "type": "string",
+                        "description": (
+                            "Project namespace for cross-repo isolation. "
+                            "Auto-detected from current cwd/git repo when "
+                            "omitted — usually correct. Override only when "
+                            "you intend to tag a memory as belonging to a "
+                            "DIFFERENT project than the one you're working in."
+                        ),
+                    },
                 },
                 "required": ["key", "content"],
             },
@@ -484,7 +539,47 @@ BUILTIN_TOOLS_RAW = [
     (
         {
             "name": "memory_recall",
-            "description": "Recall information from long-term memory.",
+            "description": (
+                "Retrieve specific past memories via hybrid semantic + keyword "
+                "+ fuzzy search. Use this for TARGETED queries — relevant "
+                "memories are ALSO auto-injected into your context every turn, "
+                "so don't call this for routine baseline retrieval.\n"
+                "\n"
+                "WHEN TO CALL (before answering, when past context matters):\n"
+                "• 'What did we decide about X?' → query \"decision X\" or "
+                "\"X rationale\"\n"
+                "• 'Why is Y the way it is?' → query \"Y reason\" or \"why Y\"\n"
+                "• 'How does Z work?' → query \"how Z works\" or \"Z architecture\"\n"
+                "• 'What was that bug?' → query the bug ID or symptom keywords "
+                "verbatim\n"
+                "• 'Did we try X already?' → query \"X attempt\"\n"
+                "• Starting a task where past conventions might constrain you "
+                "→ query the subsystem name\n"
+                "\n"
+                "QUERY QUALITY:\n"
+                "• Rare identifiers (function names, bug IDs, error messages) "
+                "→ BM25 catches these; include them VERBATIM\n"
+                "• Plain English questions → BGE semantic path\n"
+                "• search_mode='keyword' for exact-string match (skips semantic)\n"
+                "• search_mode='entity' for entity-graph traversal "
+                "('what do we know about X?')\n"
+                "\n"
+                "WHEN NOT TO CALL:\n"
+                "• Find a symbol/function/class → use Grep instead\n"
+                "• Browse files → use Read/Glob\n"
+                "• 'What did I just say?' → just look at the conversation\n"
+                "• Routine context — auto-context retriever already handles it\n"
+                "\n"
+                "If results are empty, say 'no memory on that' — DON'T fabricate. "
+                "Use memory_explain to debug 'why didn't this match?' surprises.\n"
+                "\n"
+                "Project filter (DEFAULT: current project only): recall is "
+                "scoped to the current project (cwd/git repo) by default. "
+                "If results seem unexpectedly empty AND the user is asking "
+                "about something from a different repo, retry with "
+                "project_id=\"all\" to disable the filter, or pass the "
+                "specific project name."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -512,6 +607,18 @@ BUILTIN_TOOLS_RAW = [
                         "type": "string",
                         "description": "Required for team/scratch memory recall",
                     },
+                    "project_id": {
+                        "type": "string",
+                        "description": (
+                            "Project filter for cross-repo isolation. Defaults "
+                            "to the current project (auto-detected from cwd/git) "
+                            "so you only see memories from THIS workspace. "
+                            "Pass \"all\" to disable the filter (cross-project "
+                            "recall). Pass a specific project name to query "
+                            "another project's memories. Use \"all\" when the "
+                            "user explicitly references a different repo."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -521,6 +628,129 @@ BUILTIN_TOOLS_RAW = [
         True,
         False,
         15,  # optimal: vector search on large stores
+    ),
+    (
+        {
+            "name": "memory_get",
+            "description": (
+                "Fetch a single memory row by its ID. Use this when you have an "
+                "ID from a prior memory_recall result and want the full content + "
+                "metadata (tags, source_path, created_at, trust_source, "
+                "verification_state, etc.).\n"
+                "\n"
+                "If the ID doesn't exist, returns 'not found' rather than erroring."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID (UUID returned by memory_store or memory_recall)",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+        "memory",
+        "free",
+        True,
+        False,
+        5,
+    ),
+    (
+        {
+            "name": "memory_delete",
+            "description": (
+                "Delete a single memory row by its ID. DESTRUCTIVE — the row "
+                "AND its embedding are removed permanently (no undo).\n"
+                "\n"
+                "WHEN TO CALL:\n"
+                "• User explicitly says 'forget X' or 'delete the memory about Y'\n"
+                "• A stored memory turned out to be wrong and would mislead "
+                "future recall\n"
+                "\n"
+                "WHEN NOT TO CALL:\n"
+                "• Don't bulk-delete to 'clean up' memory — the consolidator + "
+                "healer handle pruning on their own cadence\n"
+                "• Don't delete on speculation; only delete specific known-bad rows"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID to delete (UUID from prior memory_store or memory_recall)",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+        "memory",
+        "free",
+        False,  # not parallelizable — writes serialize
+        True,   # requires confirmation — destructive
+        5,
+    ),
+    (
+        {
+            "name": "memory_stats",
+            "description": (
+                "Return memory subsystem health: total row count, breakdown by "
+                "memory_type, healer state (running/paused, last snapshot, "
+                "integrity status), embedder status, and safety counters "
+                "(secrets blocked, paths skipped).\n"
+                "\n"
+                "Use this when the user asks 'how's memory?' or you need to "
+                "verify the subsystem is healthy before relying on a recall."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        "memory",
+        "free",
+        True,
+        False,
+        5,
+    ),
+    (
+        {
+            "name": "memory_explain",
+            "description": (
+                "Run the memory recall pipeline for a query and return a "
+                "per-stage trace: hits with scores, verification-state breakdown, "
+                "counts of rows hidden by invariants "
+                "(stale / orphaned / version-skewed).\n"
+                "\n"
+                "USE THIS WHEN:\n"
+                "• A memory_recall returned unexpected or empty results\n"
+                "• You want to debug 'why didn't memory X show up for query Y?'\n"
+                "• The user asks for transparency into how memory works\n"
+                "\n"
+                "This tool is READ-ONLY — no rows change. Mirrors the lab MCP's "
+                "memory.explain."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The recall query to trace through the pipeline",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Max results to consider (default: 10)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        "memory",
+        "free",
+        True,
+        False,
+        10,
     ),
     # ── Agent & Planning ──
     (
@@ -2182,6 +2412,12 @@ TRUST_POLICIES = {
             "web_scrape",
             "memory_store",
             "memory_recall",
+            "memory_get",       # read-only — fetch one row by id
+            "memory_stats",     # read-only — health snapshot
+            "memory_explain",   # read-only — recall trace for debugging
+            # NOTE: memory_delete intentionally NOT auto-approved — it
+            # mutates state irreversibly; requires_confirmation=True at
+            # the schema level forces the executor to ask the user.
             "deep_search",
             "semantic_search",
             "pdf_reader",

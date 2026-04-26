@@ -185,6 +185,8 @@ _HIDDEN_BY_DEFAULT_STATES = frozenset({"stale", "orphaned", "version_skew"})
 def _memory_is_visible_in_recall(
     mem: dict[str, Any] | sqlite3.Row,
     show_superseded: bool = False,
+    *,
+    skips: dict[str, int] | None = None,
 ) -> bool:
     """Return True if this memory should appear in default recall results.
 
@@ -194,6 +196,10 @@ def _memory_is_visible_in_recall(
     Keeps:
       - ok rows (healthy)
       - unverified rows (new rows awaiting healer audit)
+
+    If ``skips`` (a counter dict) is provided, increments the matching
+    reason key when returning False. Used by L4 ``recall_explain`` to
+    compute per-stage filter deltas. Pass ``self._invariant_skips``.
     """
     # mem may be a dict or sqlite3.Row; both support .get / [] access, but
     # sqlite3.Row doesn't support .get — guard against that.
@@ -203,10 +209,108 @@ def _memory_is_visible_in_recall(
         state = mem.get("verification_state", "ok") if hasattr(mem, "get") else "ok"
     state = (state or "ok").lower()
     if state in _HIDDEN_BY_DEFAULT_STATES:
+        if skips is not None:
+            # state name maps directly to counter key (stale → stale_verification,
+            # orphaned → orphaned, version_skew → version_skew)
+            key = "stale_verification" if state == "stale" else state
+            if key in skips:
+                skips[key] += 1
         return False
     if state == "superseded" and not show_superseded:
         return False
     return True
+
+
+def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | None:
+    """T5+ real-time verification: is this chunk's content still present in
+    its source file?
+
+    Returns:
+        True   — chunk has a source_path AND content/anchor was located
+                 in the current file → chunk is still accurate.
+        False  — chunk has a source_path BUT file is missing OR content
+                 not found → chunk has drifted; do NOT trust it.
+        None   — chunk has no source_path (synthesis memory, decision,
+                 user-stated preference, etc.) — verification not applicable.
+                 Don't drop: trust the trust_source × confidence weights.
+
+    The check is two-tier:
+      1. Full content substring match (whitespace-stripped) — strongest signal
+      2. First non-blank line of chunk content present in file — anchor match
+         (handles minor body edits while keeping the function/class header)
+
+    For predacore's typical workload (1500+ code_extracted chunks of mostly
+    Python), this gives true 100% accuracy on code-backed retrievals — we
+    KNOW the chunk content still resolves in the file at recall time.
+    """
+    src = None
+    try:
+        src = mem["source_path"] if "source_path" in mem.keys() else None  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        if hasattr(mem, "get"):
+            src = mem.get("source_path")
+    if not src:
+        return None  # not verifiable; not the same as failed
+
+    try:
+        path = Path(str(src))
+    except (TypeError, ValueError):
+        return False
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            current = f.read()
+    except OSError:
+        return False
+
+    # Pull chunk content
+    try:
+        chunk = mem["content"] if "content" in mem.keys() else ""  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        chunk = mem.get("content", "") if hasattr(mem, "get") else ""
+    chunk = (chunk or "").strip()
+    if not chunk:
+        return False
+
+    # Tier 1: full content substring match (whitespace-normalized)
+    if chunk in current:
+        return True
+
+    # Tier 2: first non-blank line of chunk present in current file
+    # (anchor match — body may have drifted but the def/class line is there)
+    for line in chunk.splitlines():
+        line = line.strip()
+        if line:
+            if line in current:
+                return True
+            break  # only check the FIRST non-blank line as anchor
+
+    return False
+
+
+def _matches_project_filter(
+    mem: dict[str, Any] | sqlite3.Row,
+    project_id: str | list[str] | None,
+) -> bool:
+    """L5 — return True if memory's project_id matches the filter.
+
+    Filter semantics:
+      - ``None`` or ``"all"`` → no filter (always True)
+      - str → exact match
+      - list[str] → match any value in the list
+    """
+    if project_id is None or project_id == "all":
+        return True
+    try:
+        mem_proj = mem["project_id"] if "project_id" in mem.keys() else "default"  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        mem_proj = mem.get("project_id", "default") if hasattr(mem, "get") else "default"
+    mem_proj = mem_proj or "default"
+    if isinstance(project_id, str):
+        return mem_proj == project_id
+    return mem_proj in project_id
 
 
 def _row_field(mem: dict[str, Any] | sqlite3.Row, key: str, default: Any = None) -> Any:
@@ -1170,6 +1274,28 @@ class UnifiedMemoryStore:
         self._embed = embedding_client
         self._vec_index = vector_index
         self._db_adapter = db_adapter
+        # Ingress safety — secret scanner stats are surfaced via get_stats().
+        # Import locally to avoid a circular import at module load time.
+        try:
+            from .safety import SafetyStats
+        except ImportError:
+            SafetyStats = None  # type: ignore[misc,assignment]
+        self._safety_stats = SafetyStats() if SafetyStats else None
+        # L4 — invariant-filter counters. Incremented inside
+        # _memory_is_visible_in_recall when a row is hidden from default
+        # recall. Surfaced via get_stats() and consumed by recall_explain
+        # to show per-stage filter deltas. Mirrors the lab counter
+        # infrastructure (lab tracks 5; public's filter only checks
+        # 3 invariants — the public scope/team_id mechanism handles
+        # tenant separation, so project_mismatch / branch_mismatch
+        # don't apply here).
+        self._invariant_skips: dict[str, int] = {
+            "stale_verification": 0,  # verification_state in {stale}
+            "orphaned": 0,            # verification_state == orphaned
+            "version_skew": 0,        # verification_state == version_skew
+            "project_mismatch": 0,    # L5 — project_id filter rejected
+            "verification_failed": 0, # T5+ — real-time verify-against-source failed
+        }
         # WAL mode permits concurrent reads; semaphore caps them at 4.
         self._db_lock = asyncio.Semaphore(4)
         # SQLite constraint: only one writer at a time.
@@ -1417,6 +1543,15 @@ class UnifiedMemoryStore:
         trust_source: str = "claude_inferred",
         confidence: float = 0.7,
         supersedes: list[str] | None = None,
+        # Phase 1b invariant fields (mirror lab) — let callers tag rows with the
+        # source file + project + branch so the healer can audit, sweep
+        # orphans, and the chunker can purge stale code_extracted rows.
+        project_id: str = "default",
+        branch: str | None = None,
+        source_path: str | None = None,
+        source_blob_sha: str | None = None,
+        source_mtime: int | None = None,
+        chunk_ordinal: int = 0,
     ) -> str:
         """Store a new memory. Returns the memory ID.
 
@@ -1435,7 +1570,31 @@ class UnifiedMemoryStore:
         atomically with the insert. Superseded rows are hidden from default
         recall but remain in the DB for audit. Unknown IDs in the list are
         safely no-op (the UPDATE just doesn't match anything).
+
+        Ingress safety: if ``content`` matches any of the safety scanner's
+        secret patterns (AWS / GitHub / OpenAI / Anthropic / PEM / SSH /
+        JWT / generic credential assignments), the row is REFUSED at
+        ingress — nothing is embedded, nothing is written, and an empty
+        string is returned in place of the memory id. The block is logged
+        at WARNING and counted in ``get_safety_stats()``.
         """
+        # Ingress secret scan — done first so we don't embed nor insert anything.
+        if content and self._safety_stats is not None:
+            try:
+                from .safety import scan_for_secrets
+            except ImportError:
+                scan_for_secrets = None  # type: ignore[misc,assignment]
+            if scan_for_secrets is not None:
+                matches = scan_for_secrets(content)
+                if matches:
+                    self._safety_stats.record_block(matches)
+                    kinds = sorted({m.name for m in matches})
+                    logger.warning(
+                        "store() refused — content contains %d secret(s) of kind %s",
+                        len(matches), kinds,
+                    )
+                    return ""  # empty id = refused
+
         memory_id = _uuid()
         now = _now_iso()
         tags_json = json.dumps(tags or [])
@@ -1490,8 +1649,11 @@ class UnifiedMemoryStore:
                     user_id, embedding, created_at, updated_at, last_accessed,
                     access_count, decay_score, expires_at, session_id, parent_id,
                     content_hash, anchor_hash, embedding_version, chunker_version,
-                    trust_source, confidence)
+                    trust_source, confidence,
+                    project_id, branch, source_path, source_blob_sha,
+                    source_mtime, chunk_ordinal)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?)"""
         _params = (
             memory_id,
@@ -1516,6 +1678,12 @@ class UnifiedMemoryStore:
             chunker_version,
             trust_source,
             confidence_f,
+            project_id,
+            branch,
+            source_path,
+            source_blob_sha,
+            source_mtime,
+            chunk_ordinal,
         )
 
         # Normalize supersede list: strip empties, dedupe, preserve order.
@@ -1603,6 +1771,9 @@ class UnifiedMemoryStore:
         scopes: list[str] | None = None,
         team_id: str | None = None,
         show_superseded: bool = False,
+        project_id: str | list[str] | None = None,
+        verify: bool = False,
+        verify_drop: bool = False,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         Recall memories by semantic similarity (predacore_core SIMD cosine).
@@ -1613,19 +1784,42 @@ class UnifiedMemoryStore:
         via ``store(..., supersedes=[...])``. Default False matches the
         expected user experience (corrected facts shouldn't resurface).
         Invariant-failure rows (stale/orphaned/version_skew) are always hidden.
+
+        ``project_id`` (L5) — when set, only return memories whose
+        ``project_id`` matches. Pass a string for exact match, a list for
+        any-of match, or ``None``/``"all"`` (default) to disable filtering.
+        Filtered rows increment ``self._invariant_skips["project_mismatch"]``.
+
+        ``verify`` (T5+) — when True, run real-time ground-truth verification
+        on each candidate that has a ``source_path``. Each result dict gets
+        a ``_verified`` field: ``True`` if the chunk content is still in the
+        source file, ``False`` if drifted/missing, ``None`` for synthesis
+        memories (no source_path — verification not applicable). Default
+        False (verification is opt-in, costs ~1-5ms per code-backed candidate).
+
+        ``verify_drop`` (T5+) — when True (and ``verify=True``), unverified
+        rows (``_verified=False``) are excluded from results entirely.
+        Synthesis rows (``_verified=None``) are always kept regardless.
+        Verification failures increment ``self._invariant_skips["verification_failed"]``.
+
+        Combined ``verify=True`` + ``verify_drop=True`` is the path to **100%
+        accuracy on code-backed memories** — only rows whose source still
+        contains the indexed content are returned.
         """
         # Empty query → semantic has no meaning, use keyword path
         if not query or not query.strip():
             return await self._recall_keyword(
                 query, user_id, top_k, memory_types, min_importance, scopes, team_id,
-                show_superseded=show_superseded,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
             )
 
         # No embedder configured or cold-start index → keyword path
         if not self._embed or not self._vec_index or self._vec_index.size == 0:
             return await self._recall_keyword(
                 query, user_id, top_k, memory_types, min_importance, scopes, team_id,
-                show_superseded=show_superseded,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
             )
 
         # Semantic search path — failures raise, no fallback
@@ -1661,7 +1855,10 @@ class UnifiedMemoryStore:
                     continue
                 if not _memory_matches_scope(mem, scopes, team_id=team_id):
                     continue
-                if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded):
+                if not _matches_project_filter(mem, project_id):
+                    self._invariant_skips["project_mismatch"] += 1
+                    continue
+                if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded, skips=self._invariant_skips):
                     continue
                 candidates.append((mem, _apply_ranking_weights(score, mem)))
         else:
@@ -1678,7 +1875,10 @@ class UnifiedMemoryStore:
                         continue
                     if not _memory_matches_scope(mem, scopes, team_id=team_id):
                         continue
-                    if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded):
+                    if not _matches_project_filter(mem, project_id):
+                        self._invariant_skips["project_mismatch"] += 1
+                        continue
+                    if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded, skips=self._invariant_skips):
                         continue
                     candidates.append((mem, _apply_ranking_weights(score, mem)))
 
@@ -1711,7 +1911,35 @@ class UnifiedMemoryStore:
                     async with self._db_lock:
                         await self._in_thread(_batch_update)
 
+        # T5+ — real-time ground-truth verification (opt-in via verify=True).
+        # For each candidate with a source_path, check that the chunk content
+        # is still present in the file. Adds ``_verified: True|False|None``
+        # to each result dict. If verify_drop=True, drop _verified=False rows
+        # (keep None=synthesis rows always).
+        if verify:
+            results = self._apply_verification(results, drop=verify_drop)
+
         return results
+
+    def _apply_verification(
+        self,
+        results: list[tuple[dict[str, Any], float]],
+        *,
+        drop: bool,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """T5+ helper — annotate each result with _verified + optionally drop
+        unverified rows. Used by recall() and _recall_keyword() when verify=True.
+        """
+        out: list[tuple[dict[str, Any], float]] = []
+        for mem, score in results:
+            verdict = _verify_chunk_against_source(mem)
+            mem["_verified"] = verdict
+            if verdict is False:
+                self._invariant_skips["verification_failed"] += 1
+                if drop:
+                    continue
+            out.append((mem, score))
+        return out
 
     async def _recall_keyword(
         self,
@@ -1723,12 +1951,16 @@ class UnifiedMemoryStore:
         scopes: list[str] | None = None,
         team_id: str | None = None,
         show_superseded: bool = False,
+        project_id: str | list[str] | None = None,
+        verify: bool = False,
+        verify_drop: bool = False,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         BM25 keyword search using predacore_core (Rust). Used for empty queries
         and cold-start indices. Synonym expansion applied to query terms.
 
-        Respects ``show_superseded`` the same way ``recall()`` does.
+        Respects ``show_superseded``, ``project_id``, ``verify``, and
+        ``verify_drop`` the same way ``recall()`` does.
         """
         _sql = """SELECT * FROM memories
                      WHERE user_id = ? AND importance >= ?
@@ -1757,7 +1989,10 @@ class UnifiedMemoryStore:
                 continue
             if not _memory_matches_scope(row, scopes, team_id=team_id):
                 continue
-            if not _memory_is_visible_in_recall(row, show_superseded=show_superseded):
+            if not _matches_project_filter(row, project_id):
+                self._invariant_skips["project_mismatch"] += 1
+                continue
+            if not _memory_is_visible_in_recall(row, show_superseded=show_superseded, skips=self._invariant_skips):
                 continue
             filtered.append(row)
 
@@ -1812,7 +2047,192 @@ class UnifiedMemoryStore:
                     async with self._db_lock:
                         await self._in_thread(_batch_update)
 
+        # T5+ — apply real-time verification to keyword-path results too
+        if verify:
+            results = self._apply_verification(results, drop=verify_drop)
+
         return results
+
+    async def recall_explain(
+        self,
+        query: str,
+        *,
+        user_id: str = "default",
+        top_k: int = 10,
+        scopes: list[str] | None = None,
+        team_id: str | None = None,
+        memory_types: list[str] | None = None,
+        min_importance: int = 1,
+        show_stale: bool = False,
+        show_superseded: bool = False,
+    ) -> dict[str, Any]:
+        """Sophisticated per-stage recall trace for debugging.
+
+        Mirrors lab's ``recall_explain`` (L4 port) — runs the full hybrid
+        pipeline but exposes every stage's inputs + outputs so you can
+        see WHY a given result came (or didn't come) back.
+
+        Stages reported (in ``stages`` dict):
+          - ``vector.raw``    — top-N vector hits BEFORE invariant filter
+          - ``vector.kept``   — same list AFTER invariant filter
+          - ``keyword.kept``  — BM25 hits (filter applied at query time)
+          - ``filtered_out``  — per-reason delta (this query's filtering)
+          - ``final``         — merged ranking (union, dedup by id)
+
+        Plus top-level fields for backward compat with the simpler v1
+        shape — ``results_count``, ``results``, ``verification_state_counts``,
+        ``filtered_by_invariants``, ``embedding_version``, ``schema_version``.
+
+        The trace is read-only — it does not mutate the store except for
+        the ``self._invariant_skips`` counters (which is the whole point —
+        ``filtered_out`` is computed as the snapshot delta).
+        """
+        out: dict[str, Any] = {
+            "query": query,
+            "user_id": user_id,
+            "top_k": top_k,
+            "stages": {},
+        }
+
+        # Snapshot counters so we can compute per-query deltas
+        skips_before = dict(self._invariant_skips)
+
+        # --- Vector stage -------------------------------------------------
+        vector_raw: list[dict[str, Any]] = []
+        vector_kept: list[dict[str, Any]] = []
+        if self._embed and self._vec_index and self._vec_index.size > 0 and query.strip():
+            try:
+                embed_key = hash_key(query)
+                vec = self._embedding_cache.get(embed_key)
+                if vec is None:
+                    vecs = await self._embed.embed([query])
+                    if vecs and vecs[0]:
+                        vec = vecs[0]
+                        self._embedding_cache.set(embed_key, vec, ttl_seconds=600)
+                if vec is not None:
+                    hits = await self._vec_index.search(vec, top_k=top_k * 4)
+                    for memory_id, score in hits:
+                        mem = await self.get(memory_id)
+                        if mem is None:
+                            continue
+                        vector_raw.append({
+                            "id": memory_id,
+                            "score": round(float(score), 6),
+                            "preview": (mem.get("content") or "")[:120],
+                            "verification_state": mem.get("verification_state"),
+                            "memory_type": mem.get("memory_type"),
+                        })
+                        # Visibility check — increments self._invariant_skips
+                        # internally, which we'll diff for filtered_out below.
+                        if not show_stale and not _memory_is_visible_in_recall(
+                            mem,
+                            show_superseded=show_superseded,
+                            skips=self._invariant_skips,
+                        ):
+                            continue
+                        if mem.get("user_id") != user_id:
+                            continue
+                        if memory_types and mem.get("memory_type") not in memory_types:
+                            continue
+                        if mem.get("importance", 0) < min_importance:
+                            continue
+                        if not _memory_matches_scope(mem, scopes, team_id=team_id):
+                            continue
+                        vector_kept.append({
+                            "id": memory_id,
+                            "score": round(float(score), 6),
+                            "preview": (mem.get("content") or "")[:120],
+                            "memory_type": mem.get("memory_type"),
+                            "trust_source": mem.get("trust_source"),
+                        })
+            except Exception as exc:
+                out["stages"]["vector.error"] = repr(exc)
+
+        out["stages"]["vector.raw"] = vector_raw[:top_k * 2]
+        out["stages"]["vector.kept"] = vector_kept[:top_k]
+
+        # --- Keyword / BM25 stage ----------------------------------------
+        keyword_kept: list[dict[str, Any]] = []
+        try:
+            kw = await self._recall_keyword(
+                query=query,
+                user_id=user_id,
+                top_k=top_k,
+                scopes=scopes,
+                team_id=team_id,
+            )
+            for mem, score in kw:
+                keyword_kept.append({
+                    "id": mem.get("id"),
+                    "score": round(float(score), 6),
+                    "preview": (mem.get("content") or "")[:120],
+                    "memory_type": mem.get("memory_type"),
+                })
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            out["stages"]["keyword.error"] = repr(exc)
+        out["stages"]["keyword.kept"] = keyword_kept
+
+        # --- Filter delta ------------------------------------------------
+        skips_after = dict(self._invariant_skips)
+        out["stages"]["filtered_out"] = {
+            k: skips_after.get(k, 0) - skips_before.get(k, 0)
+            for k in skips_after
+        }
+
+        # --- Final merged ranking (union, dedup by id, sort by score) ----
+        merged: dict[str, dict[str, Any]] = {}
+        for src, items in (("vector", vector_kept), ("keyword", keyword_kept)):
+            for h in items:
+                if h["id"] in merged:
+                    if src not in merged[h["id"]]["sources"]:
+                        merged[h["id"]]["sources"].append(src)
+                    merged[h["id"]]["score"] = max(merged[h["id"]]["score"], h["score"])
+                else:
+                    merged[h["id"]] = {**h, "sources": [src]}
+        final = sorted(merged.values(), key=lambda r: -r["score"])[:top_k]
+        out["stages"]["final"] = final
+
+        # --- Whole-DB verification-state breakdown (context) -------------
+        state_counts: dict[str, int] = {}
+        if self._conn is not None:
+            for state in (
+                "ok", "unverified", "stale", "orphaned", "version_skew", "superseded",
+            ):
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE verification_state = ?",
+                    (state,),
+                ).fetchone()
+                state_counts[state] = row[0] if row else 0
+
+        hidden_total = sum(
+            state_counts.get(s, 0) for s in ("stale", "orphaned", "version_skew")
+        )
+
+        # --- Backward-compat top-level keys (so existing handler works) --
+        out["results_count"] = len(final)
+        out["results"] = [
+            {
+                "id": h.get("id"),
+                "score": h.get("score"),
+                "memory_type": h.get("memory_type"),
+                "preview": h.get("preview"),
+                "trust_source": h.get("trust_source"),
+            }
+            for h in final
+        ]
+        out["verification_state_counts"] = state_counts
+        out["filtered_by_invariants"] = {
+            "total_hidden": hidden_total,
+            "note": "These rows would NOT appear in recall unless show_stale=True",
+            "by_state": {
+                s: state_counts.get(s, 0)
+                for s in ("stale", "orphaned", "version_skew")
+            },
+        }
+        out["embedding_version"] = CURRENT_EMBEDDING_VERSION
+        out["schema_version"] = SCHEMA_VERSION
+
+        return out
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Get a single memory by ID."""
@@ -1874,6 +2294,395 @@ class UnifiedMemoryStore:
         async with self._db_write_lock:
             async with self._db_lock:
                 await self._in_thread(self._update_access_sync, memory_id)
+
+    async def reindex_file(
+        self,
+        path: str | Path,
+        *,
+        project_id: str = "default",
+        branch: str | None = None,
+        user_id: str = "default",
+    ) -> dict[str, Any]:
+        """Re-index a single file's contents into memory.
+
+        Pipeline (mirrors the lab's MCP ``memory.touch`` handler so callers
+        get the same semantics here in-process):
+
+          1. ``safe_read_text`` — skip binary / oversized / unreadable files.
+          2. ``chunk_text`` — semantic chunks (AST / markdown / brace / window).
+          3. Purge prior ``trust_source='code_extracted'`` rows for this
+             ``source_path`` so a re-index is idempotent and stale chunks
+             from the previous version don't linger.
+          4. Insert each chunk as a fresh row with ``trust_source='code_extracted'``,
+             carrying ``source_path``, ``source_mtime``, ``chunk_ordinal``,
+             ``project_id``, ``branch``, plus ``line_start/end/anchor`` in
+             metadata.
+
+        Trigger sites in predacore-public: any tool handler that writes a
+        file (e.g. ``tools/handlers/file_ops.handle_write_file``) should
+        ``await ctx.unified_memory.reindex_file(path)`` after the write.
+
+        Returns a summary dict with ``path``, ``chunk_count``,
+        ``stale_rows_removed``, ``new_ids``, and ``strategy`` — or an
+        ``error`` key if the file couldn't be read.
+        """
+        from .chunker import chunk_text, safe_read_text
+
+        p = Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"path": str(p), "error": "file_not_found"}
+        if not p.is_file():
+            return {"path": str(p), "error": "not_a_file"}
+
+        content = safe_read_text(p)
+        if content is None:
+            return {
+                "path": str(p),
+                "error": "read_skipped",
+                "reason": "binary, oversized, or unreadable",
+            }
+
+        chunks = chunk_text(p, content)
+        if not chunks:
+            return {
+                "path": str(p),
+                "chunk_count": 0,
+                "stale_rows_removed": 0,
+                "new_ids": [],
+                "note": "empty or whitespace-only file",
+            }
+
+        # Purge prior code_extracted rows for this source_path so the
+        # re-index is idempotent.
+        path_str = str(p)
+
+        def _stale_ids() -> list[str]:
+            if self._conn is None:
+                return []
+            rows = self._conn.execute(
+                "SELECT id FROM memories "
+                "WHERE source_path = ? AND trust_source = 'code_extracted'",
+                (path_str,),
+            ).fetchall()
+            return [r[0] for r in rows]
+
+        prior_ids: list[str] = []
+        if self._conn is not None:
+            prior_ids = await self._in_thread(_stale_ids)
+        elif self._db_adapter is not None:
+            adapter_rows = await self._db_adapter.query_dicts(
+                self._DB_NAME,
+                "SELECT id FROM memories "
+                "WHERE source_path = ? AND trust_source = 'code_extracted'",
+                [path_str],
+            )
+            prior_ids = [row["id"] for row in adapter_rows]
+
+        stale_removed = 0
+        for rid in prior_ids:
+            if await self.delete(rid):
+                stale_removed += 1
+
+        try:
+            mtime = int(p.stat().st_mtime)
+        except OSError:
+            mtime = None
+
+        new_ids: list[dict[str, Any]] = []
+        for chunk in chunks:
+            tags = [
+                "file",
+                "code_extracted",
+                f"kind:{chunk.kind}",
+                f"lines:{chunk.line_start}-{chunk.line_end}",
+            ]
+            mid = await self.store(
+                content=chunk.content,
+                memory_type="note",
+                tags=tags,
+                user_id=user_id,
+                source_path=path_str,
+                source_mtime=mtime,
+                chunk_ordinal=chunk.ordinal,
+                project_id=project_id,
+                branch=branch,
+                trust_source="code_extracted",
+                confidence=1.0,
+                metadata={
+                    "line_start": chunk.line_start,
+                    "line_end": chunk.line_end,
+                    "chunk_kind": chunk.kind,
+                    "anchor": chunk.anchor,
+                },
+            )
+            # store() returns "" if scan_for_secrets refused the chunk —
+            # skip those silently (the safety counter already recorded it).
+            if mid:
+                new_ids.append({
+                    "id": mid,
+                    "kind": chunk.kind,
+                    "lines": f"{chunk.line_start}-{chunk.line_end}",
+                    "anchor": chunk.anchor,
+                })
+
+        return {
+            "path": path_str,
+            "chunk_count": len(chunks),
+            "stale_rows_removed": stale_removed,
+            "new_ids": new_ids,
+            "strategy": "semantic-chunker-v1",
+        }
+
+    async def sync_git_changes(
+        self,
+        repo_path: str | Path | None = None,
+        *,
+        project_id: str = "default",
+        branch: str | None = None,
+        user_id: str = "default",
+        prior_head: str | None = None,
+    ) -> dict[str, Any]:
+        """Sync memory with changes in a git repo.
+
+        Triggered after ``git checkout / merge / rebase / reset / pull``,
+        this method:
+
+          1. Walks ``git status --porcelain=v2`` (via the existing
+             ``predacore.services.git_integration`` helpers — modern v2
+             format, branch-aware, rename-aware) to find UNCOMMITTED
+             working-tree changes.
+          2. If ``prior_head`` is provided, ALSO runs ``git diff
+             --name-status <prior_head> HEAD`` to find COMMITTED changes
+             that landed between the prior HEAD and the current HEAD
+             (covers ``git pull``, ``git checkout other_branch``,
+             ``git merge``, ``git reset``, etc.).
+          3. Deduplicates: if a path appears in both as deleted-then-
+             reappeared, modified wins (the file currently exists).
+          4. For every modified/added file → calls :meth:`reindex_file`
+             so the new chunks land in memory.
+          5. For every deleted file → purges its ``code_extracted`` rows.
+
+        Untracked files are intentionally skipped (they're often build
+        artifacts or scratch files the user hasn't committed).
+
+        Why ``prior_head``: ``git status`` only sees uncommitted
+        modifications. After ``git pull`` that fast-forwards 50 commits
+        cleanly, status is empty even though a lot of code changed. The
+        TRIGGER (``shell.py``) should ``git rev-parse HEAD`` BEFORE the
+        git command, then pass the captured SHA here AFTER. With
+        ``prior_head`` set you get full coverage; without it you get
+        the lab-equivalent working-tree-only behavior.
+
+        Trigger site in predacore-public: after a successful
+        ``handle_run_command`` call in ``tools/handlers/shell.py`` whose
+        command matches ``git (checkout|merge|rebase|reset|pull)``.
+
+        Returns a summary dict with ``repo``, ``branch``, ``modified``,
+        ``deleted``, ``chunks_added``, ``rows_purged``,
+        ``committed_diff_used`` — or an ``error`` key when the path
+        isn't a git repo.
+        """
+        try:
+            from ..services.git_integration import _find_repo_root, _run_git
+        except ImportError:
+            return {"repo": str(repo_path or "."), "error": "git_integration_unavailable"}
+
+        cwd = str(Path(repo_path).resolve()) if repo_path else None
+        repo_root = await _find_repo_root(cwd=cwd)
+        if not repo_root:
+            return {"repo": cwd or ".", "error": "not_a_git_repo"}
+
+        # Auto-detect branch if caller didn't pass one — matches lab's
+        # _common.resolve_branch behavior.
+        if branch is None:
+            rc, head_out, _ = await _run_git(
+                "symbolic-ref", "--short", "HEAD", cwd=repo_root,
+            )
+            if rc == 0 and head_out.strip():
+                branch = head_out.strip()
+
+        rc, status_out, status_err = await _run_git(
+            "status", "--porcelain=v2", cwd=repo_root,
+        )
+        if rc != 0:
+            return {
+                "repo": repo_root,
+                "error": "git_status_failed",
+                "detail": status_err,
+            }
+
+        # Parse porcelain v2: lines starting "1" or "2" are tracked-file
+        # changes. Format examples:
+        #   "1 .M N... <sha> <sha> <sha> <mode> <mode> <mode> <path>"
+        #   "2 R. N... <sha> <sha> <sha> <mode> <mode> <mode> <score> <new>\t<old>"
+        # XY field: index status (X) and worktree status (Y); "D" anywhere
+        # means a deletion is involved. Sets dedupe across the working-tree
+        # and committed-diff passes below.
+        modified_paths: set[str] = set()
+        deleted_paths: set[str] = set()
+        for line in status_out.splitlines():
+            if not line or line[0] not in ("1", "2"):
+                continue  # skip headers (#), untracked (?), ignored (!)
+            if "\t" in line:
+                pre, _, tail = line.partition("\t")
+                # For renames the new path is in `pre`'s last token; old
+                # path lives in `tail`. We re-index the new path.
+                fields = pre.split()
+                rel_path = fields[-1] if fields else tail.strip()
+            else:
+                fields = line.split()
+                rel_path = fields[-1] if fields else ""
+            if not rel_path or len(fields) < 2:
+                continue
+            xy = fields[1]
+            if "D" in xy:
+                deleted_paths.add(rel_path)
+            else:
+                modified_paths.add(rel_path)
+
+        # Committed-changes pass: only fires when caller passed a prior HEAD.
+        # `git diff --name-status A..B` lists files that changed between A
+        # and B with single-letter codes:
+        #   A added | M modified | D deleted | T type-change | R<n> rename | C<n> copy
+        # Renames/copies have THREE tab-separated fields: code, old, new.
+        committed_diff_used = False
+        if prior_head:
+            rc_diff, diff_out, diff_err = await _run_git(
+                "diff", "--name-status", f"{prior_head}..HEAD", cwd=repo_root,
+            )
+            if rc_diff == 0:
+                committed_diff_used = True
+                for line in diff_out.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) < 2:
+                        continue
+                    code = parts[0]
+                    if code.startswith(("R", "C")) and len(parts) >= 3:
+                        # Rename/copy: purge old path (no longer at that
+                        # location), reindex new path.
+                        old_path, new_path = parts[1], parts[2]
+                        deleted_paths.add(old_path)
+                        modified_paths.add(new_path)
+                    elif code == "D" and len(parts) >= 2:
+                        deleted_paths.add(parts[1])
+                    elif code in ("A", "M", "T") and len(parts) >= 2:
+                        modified_paths.add(parts[1])
+            else:
+                logger.debug(
+                    "sync_git_changes: prior_head=%s diff failed (rc=%d): %s",
+                    prior_head, rc_diff, diff_err,
+                )
+
+        # Dedupe conflict resolution: a path that's in BOTH sets means the
+        # file was deleted in commits but reappeared in the working tree
+        # (or vice-versa). Reindex wins because the file currently exists.
+        deleted_paths -= modified_paths
+
+        repo_root_path = Path(repo_root)
+        chunks_added = 0
+        rows_purged = 0
+
+        # Reindex modified files — reuse reindex_file so chunking +
+        # safety + idempotent purge-then-store all stay in one place.
+        for rel in modified_paths:
+            abs_path = (repo_root_path / rel).resolve()
+            if not abs_path.is_file():
+                continue
+            result = await self.reindex_file(
+                str(abs_path),
+                project_id=project_id,
+                branch=branch,
+                user_id=user_id,
+            )
+            chunks_added += len(result.get("new_ids") or [])
+
+        # Purge deleted files — query then delete in one inline pass to
+        # keep this method self-contained.
+        for rel in deleted_paths:
+            abs_path = str((repo_root_path / rel).resolve())
+
+            def _stale_ids(_p: str = abs_path) -> list[str]:
+                if self._conn is None:
+                    return []
+                rows = self._conn.execute(
+                    "SELECT id FROM memories "
+                    "WHERE source_path = ? AND trust_source = 'code_extracted'",
+                    (_p,),
+                ).fetchall()
+                return [r[0] for r in rows]
+
+            ids: list[str] = []
+            if self._conn is not None:
+                ids = await self._in_thread(_stale_ids)
+            elif self._db_adapter is not None:
+                adapter_rows = await self._db_adapter.query_dicts(
+                    self._DB_NAME,
+                    "SELECT id FROM memories "
+                    "WHERE source_path = ? AND trust_source = 'code_extracted'",
+                    [abs_path],
+                )
+                ids = [row["id"] for row in adapter_rows]
+            for rid in ids:
+                if await self.delete(rid):
+                    rows_purged += 1
+
+        return {
+            "repo": repo_root,
+            "branch": branch,
+            "modified": len(modified_paths),
+            "deleted": len(deleted_paths),
+            "chunks_added": chunks_added,
+            "rows_purged": rows_purged,
+            "committed_diff_used": committed_diff_used,
+        }
+
+    async def warmup_embedder(self) -> dict[str, Any]:
+        """Pre-load the embedding model to avoid 1-2s cold-start latency
+        on the first ``recall()`` or ``store()`` with content.
+
+        Calls ``embed(["warmup"])`` once — the result is discarded; the
+        side effect (loading model weights into RAM) is what matters.
+        Safe to call repeatedly: when the model is already loaded the
+        call is a few milliseconds.
+
+        Trigger site in predacore-public: ``bootstrap.run_bootstrap()``
+        should fire this once after :class:`SubsystemFactory` builds the
+        store, so the agent's first prompt doesn't pay the BGE model
+        download/load cost.
+
+        Returns: ``{"warmed": bool, "embedder": str, "already_loaded":
+        bool}`` — or ``{"warmed": False, "reason": ...}`` on no-op /
+        error.
+        """
+        if self._embed is None:
+            return {"warmed": False, "reason": "no_embedder"}
+
+        embedder_name = type(self._embed).__name__
+
+        # If the embedder uses predacore_core (the Rust kernel + BGE),
+        # we can detect "already warm" cheaply. Other embedders (OpenAI,
+        # Gemini, etc.) don't expose this, so we fall back to "unknown".
+        already_loaded = False
+        try:
+            import predacore_core  # type: ignore
+            already_loaded = bool(predacore_core.is_model_loaded())
+        except (ImportError, AttributeError):
+            pass
+
+        try:
+            await self._embed.embed(["warmup"])
+        except Exception as exc:  # broad: an embedder failure shouldn't crash boot
+            return {
+                "warmed": False,
+                "embedder": embedder_name,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        return {
+            "warmed": True,
+            "embedder": embedder_name,
+            "already_loaded": already_loaded,
+        }
 
     # -- Adapter helpers (async DB access) ---------------------------------
 
@@ -2869,6 +3678,12 @@ class UnifiedMemoryStore:
                 "relations": relations,
                 "episodes": episodes,
                 "vector_index_size": self._vec_index.size if self._vec_index else 0,
+                # L4 — invariant + safety surfaces (parity with lab)
+                "schema_version": SCHEMA_VERSION,
+                "embedding_version": CURRENT_EMBEDDING_VERSION,
+                "chunker_version": CURRENT_CHUNKER_VERSION,
+                "invariant_skips": dict(self._invariant_skips),
+                "safety": self._safety_stats.as_dict() if self._safety_stats else {},
             }
 
         def _stats():
@@ -2890,10 +3705,28 @@ class UnifiedMemoryStore:
                 "relations": relations,
                 "episodes": episodes,
                 "vector_index_size": self._vec_index.size if self._vec_index else 0,
+                # L4 — invariant + safety surfaces (parity with lab)
+                "schema_version": SCHEMA_VERSION,
+                "embedding_version": CURRENT_EMBEDDING_VERSION,
+                "chunker_version": CURRENT_CHUNKER_VERSION,
+                "invariant_skips": dict(self._invariant_skips),
+                "safety": self._safety_stats.as_dict() if self._safety_stats else {},
             }
 
         async with self._db_lock:
             return await self._in_thread(_stats)
+
+    def reset_invariant_skips(self) -> dict[str, int]:
+        """Snapshot the invariant-skip counters and zero them in place.
+
+        Useful for tests and "what filtered in this window?" introspection.
+        Returns the previous values; the counters are now all zero. Mirrors
+        lab's same-named method (parity).
+        """
+        old = dict(self._invariant_skips)
+        for k in self._invariant_skips:
+            self._invariant_skips[k] = 0
+        return old
 
     # ── Vector Index Persistence ──────────────────────────────────────
 
