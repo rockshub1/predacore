@@ -2,6 +2,58 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.3.0] - 2026-04-26
+
+**Operational memory guide moved to code — eliminates the workspace migration gap.**
+
+### Architectural change
+- Split MEMORY.md into two concerns: **engineering knowledge** ("how the
+  memory tools work, when to call them") now lives in code as the
+  `_MEMORY_GUIDE` constant in `src/predacore/identity/engine.py`, and
+  **user-curated content** (preferences, decisions, lessons) stays in the
+  workspace `MEMORY.md`. The guide auto-updates with every release; user
+  content is preserved across upgrades.
+- New `IdentityEngine.memory_guide()` method returns the operational guide.
+- `build_identity_prompt()` injects the guide as a "How Memory Works" section
+  immediately before the workspace MEMORY.md content (now wrapped as
+  "Curated Memory (MEMORY.md)"). Both layers are always present in the
+  assembled prompt.
+- New layer order: `… → memory_guide (code) → MEMORY (workspace) → TOOLS → …`
+
+### Why
+- Pre-1.3.0, operational guidance lived in `defaults/MEMORY.md` which was
+  copied to a user's workspace on first install and never overwritten on
+  upgrade. Adding/changing tools (e.g. v1.2.0's 4 new memory tools) meant
+  existing users wouldn't see the updated guidance — they'd be acting on
+  frozen instructions from whenever they first installed.
+- Code-level constant means: rename a tool, add a new one, change the
+  discipline rule — one edit, ships to every user on next pip upgrade,
+  no migration logic, no "predacore doctor --fix-defaults" needed.
+
+### MEMORY.md defaults stripped
+- Shipped `defaults/MEMORY.md` is now a scaffold for curated content only —
+  removed the dual-layer / 6-tool / infrastructure-layer sections (they
+  moved to the code constant). Keeps the "What belongs here / What doesn't"
+  guidance for the agent's own curation discipline.
+
+### Tests
+- 5 new tests in `test_memory_subsystem.py::TestMemoryGuideInPrompt`:
+  guide is non-empty, mentions all 6 tools, present in prompt even with
+  empty workspace MEMORY.md, coexists with curated content, and the
+  shipped defaults file does NOT carry the operational content (regression
+  guard for the 1.2.0 mistake).
+- **205 deterministic tests passing** (200 prior + 5 new).
+
+### Migration impact
+- **Existing users get the new operational guide automatically** on
+  upgrade — no manual `cp` step needed (unlike the v1.2.0 → 1.2.1 case),
+  because the guide is now in the code path that runs on every prompt
+  assembly. Their workspace `MEMORY.md` is left alone (still curated
+  content only, still respected).
+- The stale top-level `agents/default/MEMORY.md` developer mirror has
+  been synced to match the new defaults shape; cleanup of that mirror
+  remains deferred.
+
 ## [1.2.1] - 2026-04-26
 
 **Patch — fixes two bugs shipped in 1.2.0.**
