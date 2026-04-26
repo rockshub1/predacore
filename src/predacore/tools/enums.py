@@ -60,6 +60,10 @@ class ToolName(str, Enum):
     # Memory
     MEMORY_STORE = "memory_store"
     MEMORY_RECALL = "memory_recall"
+    MEMORY_GET = "memory_get"
+    MEMORY_DELETE = "memory_delete"
+    MEMORY_STATS = "memory_stats"
+    MEMORY_EXPLAIN = "memory_explain"
 
     # Voice
     SPEAK = "speak"

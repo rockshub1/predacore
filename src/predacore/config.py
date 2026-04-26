@@ -228,6 +228,12 @@ class MemoryConfig:
     working_memory_capacity: int = 7
     decay_rate: float = 0.01
     consolidation_threshold: int = 3
+    # Phase B+C — features ported from lab MCP. All default ON: matches the
+    # lab's mcp_server.py behavior so predacore-public agents get the same
+    # memory hygiene by default. Disable per-flag via PREDACORE_MEMORY_*.
+    enable_healer: bool = True
+    scan_for_secrets: bool = True
+    eager_warmup: bool = True
 
 
 @dataclass
@@ -485,6 +491,10 @@ def _env_overrides() -> dict[str, Any]:
         "WEBHOOK_PORT": ("daemon", "webhook_port"),
         "WEBHOOK_SECRET": ("daemon", "webhook_secret"),
         "PREDACORE_DB_SOCKET": ("daemon", "db_socket_path"),
+        # Memory subsystem (Phase B+C — Healer, secret-scan, warmup)
+        "PREDACORE_MEMORY_ENABLE_HEALER": ("memory", "enable_healer"),
+        "PREDACORE_MEMORY_SCAN_SECRETS": ("memory", "scan_for_secrets"),
+        "PREDACORE_MEMORY_EAGER_WARMUP": ("memory", "eager_warmup"),
     }
 
     for env_var, path in env_map.items():
@@ -526,6 +536,9 @@ def _env_overrides() -> dict[str, Any]:
                 "enable_persona_drift_guard",
                 "verify_tls",
                 "auto_import_skills",
+                "enable_healer",
+                "scan_for_secrets",
+                "eager_warmup",
             ):
                 current[final_key] = _parse_bool(value)
             elif final_key in ("fallback_models", "fallback_providers"):

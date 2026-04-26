@@ -41,6 +41,7 @@ class SubsystemBundle:
     db_adapter: Any = None
     desktop_operator: Any = None
     unified_memory: Any = None
+    memory_healer: Any = None  # Background self-healing daemon (audit/sweep/snapshot/integrity)
     memory_service: Any = None
     mcts_planner: Any = None
     llm_for_collab: Any = None
@@ -165,6 +166,55 @@ class SubsystemFactory:
             )
             bundle.available.append("memory")
             logger.info("Unified memory enabled (db=%s)", um_db)
+
+            # D14 — eagerly warm the BGE embedder so the first recall
+            # doesn't pay the 1–2s cold-start latency. bootstrap.py:
+            # _check_bge_model already does this, but bootstrap only
+            # runs once per install (gated by a marker file); every
+            # subsequent process start benefits from this re-warmup.
+            # Sync call into predacore_core (NOT the async
+            # store.warmup_embedder) because _init_unified_memory runs
+            # in sync context. Skip when already loaded — cheap.
+            memory_cfg = getattr(config, "memory", None)
+            if memory_cfg is not None and getattr(memory_cfg, "eager_warmup", True):
+                try:
+                    import predacore_core as _pc
+                    if not _pc.is_model_loaded():
+                        import time as _time
+                        _t0 = _time.time()
+                        _pc.embed(["warmup"])
+                        logger.info(
+                            "BGE embedder warmed (%.2fs)",
+                            _time.time() - _t0,
+                        )
+                except (ImportError, AttributeError, RuntimeError) as _warm_exc:
+                    logger.debug("BGE warmup skipped: %s", _warm_exc)
+
+            # Start the self-healing daemon (gated on memory.enable_healer).
+            # Mirrors the lab mcp_server.py:McpServerState behavior — same
+            # Healer class, background thread, lifecycle owned by the bundle.
+            # Caller is responsible for `bundle.memory_healer.stop()` at
+            # daemon shutdown.
+            if memory_cfg is not None and getattr(memory_cfg, "enable_healer", True):
+                try:
+                    try:
+                        from predacore.memory import Healer
+                    except ImportError:
+                        from src.predacore.memory import Healer  # type: ignore
+                    healer_user = (
+                        os.environ.get("PREDACORE_MEMORY_USER")
+                        or os.environ.get("USER")
+                        or "default"
+                    )
+                    bundle.memory_healer = Healer(bundle.unified_memory, user=healer_user)
+                    bundle.memory_healer.start()
+                    bundle.available.append("memory_healer")
+                    logger.info("Memory healer enabled (user=%s)", healer_user)
+                except (ImportError, OSError, RuntimeError) as heal_exc:
+                    logger.warning(
+                        "Memory healer init failed (non-fatal — store still works): %s",
+                        heal_exc,
+                    )
         except (ImportError, OSError, ValueError, RuntimeError, sqlite3.OperationalError) as exc:
             if "database is locked" in str(exc).lower():
                 logger.info("Unified memory busy (db lock) — will use session memory only.")

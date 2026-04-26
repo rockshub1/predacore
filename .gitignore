@@ -67,3 +67,6 @@ benchmarks/*.log
 
 # Local audit tooling output (not shipped)
 .audit/
+
+# Reference snapshots for documentation passes (working artifact, not shipped)
+reference/

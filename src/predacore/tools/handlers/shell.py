@@ -64,6 +64,50 @@ def _sanitized_env() -> dict[str, str]:
     }
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# D13 — Memory auto-sync after git mutations
+#
+# When the agent runs `git checkout / merge / rebase / reset / pull /
+# switch / cherry-pick / revert`, the working tree may change in ways
+# that `git status` alone can't reveal — a clean `git pull` that fast-
+# forwards 50 commits leaves a clean working tree, so post-hoc status
+# queries miss the actual file changes. Capture HEAD BEFORE the command
+# runs; pass the captured SHA to UnifiedMemoryStore.sync_git_changes()
+# AFTER success so it can diff old..new HEAD as well as scan working-
+# tree dirt. Without this, sync would only catch uncommitted changes
+# (matching the lab hook's blind spot — fixed here in B5).
+# ──────────────────────────────────────────────────────────────────────────
+
+_GIT_MUTATION_RE = re.compile(
+    r"\bgit\s+(?:checkout|switch|merge|rebase|reset|pull|cherry-pick|revert)\b",
+    re.IGNORECASE,
+)
+
+
+async def _capture_git_head(cwd: str | None) -> str | None:
+    """Return the current HEAD SHA via `git rev-parse HEAD` in ``cwd``.
+
+    Bounded to a 2-second budget so a slow git command can't delay the
+    user's actual command. Returns None on failure (not a git repo, git
+    binary missing, timeout, etc.) — caller treats None as "no prior
+    HEAD captured" and sync still runs in working-tree-only mode.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=cwd,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+    except (FileNotFoundError, asyncio.TimeoutError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = out.decode(errors="replace").strip()
+    return sha or None
+
+
 async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
     """Execute a shell command and return stdout/stderr.
     
@@ -116,6 +160,14 @@ async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
     if timeout_seconds is not None:
         timeout_seconds = min(timeout_seconds, 24 * 60 * 60)
 
+    # D13 — capture HEAD BEFORE git mutations so the post-command sync
+    # can diff old..new HEAD (catches committed changes from `git pull` /
+    # `git checkout other_branch` that working-tree status can't see).
+    git_mutation = bool(_GIT_MUTATION_RE.search(command))
+    prior_head: str | None = None
+    if git_mutation and ctx.unified_memory:
+        prior_head = await _capture_git_head(cwd)
+
     shell_executable = os.getenv("SHELL", "")
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -157,6 +209,33 @@ async def handle_run_command(args: dict[str, Any], ctx: ToolContext) -> str:
             result += "\n[STDERR]\n" + stderr.decode(errors="replace")
         if proc.returncode != 0:
             result += f"\n[Exit code: {proc.returncode}]"
+
+        # D13 — after a SUCCESSFUL git mutation, sync memory with whatever
+        # changed. Pass prior_head so sync_git_changes() can run a real
+        # `git diff prior..HEAD --name-status` (catches committed changes,
+        # not just uncommitted dirt). Failures are non-fatal — memory issues
+        # must NOT alter what the agent sees as the command result.
+        if git_mutation and proc.returncode == 0 and ctx.unified_memory:
+            try:
+                # L5 — tag synced chunks with the current project_id so
+                # cross-repo memory stays partitioned. Resolve from the
+                # command's cwd (the actual repo root the user is in).
+                try:
+                    from predacore.memory.project_id import default_project
+                    proj = default_project(cwd=cwd or ".")
+                except ImportError:
+                    proj = "default"
+                await ctx.unified_memory.sync_git_changes(
+                    cwd or ".",
+                    prior_head=prior_head,
+                    project_id=proj,
+                )
+            except Exception as exc:  # broad: memory must not break shell
+                logger.debug(
+                    "Memory sync_git_changes after %r failed: %s",
+                    command[:80], exc,
+                )
+
         if len(result) > 50000:
             result = result[:25000] + "\n...[truncated]...\n" + result[-5000:]
         return result or "[Command completed with no output]"

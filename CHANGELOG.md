@@ -2,6 +2,64 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.2.0] - 2026-04-26
+
+**Phase 2 memory upgrade — auto-trigger wiring, project isolation, verify-with-code.**
+
+### Added
+- **Auto-trigger wiring** — `Edit`/`Write` automatically reindex via `reindex_file()`;
+  `git checkout/merge/rebase/reset/pull/cherry-pick/revert` automatically sync via
+  `sync_git_changes(prior_head=)`. Captures both working-tree AND committed deltas
+  (closes the gap that POST-only hook architectures still have).
+- **Project isolation** — `project_id` auto-detected from env → git rev-parse → cwd
+  basename → "default". 60s TTL cache, `ALL_PROJECTS="all"` sentinel for cross-project
+  queries. Filters surface a `project_mismatch` counter in `recall_explain`. Eliminates
+  cross-project pollution in shared DBs.
+- **Verify-with-code layer** — `recall(verify=True, verify_drop=True)` checks each
+  result's chunk content against the current `source_path` on disk. Achieves true
+  100% accuracy on code-backed memories. Three-state verdict (True/False/None)
+  preserves synthesis memories that have no source.
+- **Per-stage retrieval trace** — `_invariant_skips` counter with 5 keys
+  (stale_verification, orphaned, version_skew, project_mismatch, verification_failed)
+  surfaced via `get_stats()`. Sophisticated `recall_explain()` shows what each filter
+  dropped at each stage.
+- **4 new memory tools** — `memory_get`, `memory_delete`, `memory_stats`,
+  `memory_explain`. Auto-approve list opens read-only ops; `memory_delete` deliberately
+  requires confirmation (destructive).
+- **Eager BGE warmup at boot** — `subsystem_init` calls embedder once on init when
+  `eager_warmup=True`. Replaces "first recall is cold" with "first recall is hot"
+  on every process start.
+- **Healer auto-start** — `SubsystemFactory` starts the background drift / orphan /
+  snapshot daemon when `enable_healer=True`. New `MemoryConfig` flags + env vars:
+  `PREDACORE_MEMORY_ENABLE_HEALER`, `_SCAN_SECRETS`, `_EAGER_WARMUP`.
+- **Ingress secret scan** — `store()` refuses content matching API-key/credential
+  patterns; increments `_safety_stats`. Defense-in-depth on top of file ignores.
+- **3 new memory modules** — `chunker.py` (AST/markdown/brace/window strategies),
+  `safety.py` (secret scanner + `MemoryIgnore`), `healer.py` (background daemon),
+  `project_id.py` (auto-detection helper).
+- **Rich tool descriptions** — `memory_store` 56→1540 chars, `memory_recall`
+  36→1347 chars. Encodes WHEN-TO-CALL / WHEN-NOT / quality rules so agents use
+  memory deliberately, not reflexively.
+- **`agents/default/MEMORY.md`** updated with dual-layer model: passive auto-context
+  + active memory tools, "code is canonical, memory is for synthesis".
+
+### Changed
+- `predacore.memory` exports 9 symbols (was 3) — adds `Healer`, `MemoryIgnore`,
+  `scan_for_secrets`, `chunk_text`, `safe_read_text`, `is_sensitive_path`.
+- `recall_explain()` rewritten with sophisticated per-stage trace (replaces v1).
+- `auto_approve_tools` extended for read-only memory ops.
+
+### Tests
+- **+200 deterministic tests** (3.69s) across 8 new test files: chunker / safety /
+  project_id (70), store augmentations (34), tool handlers (28), subsystem +
+  Healer wiring (27), e2e auto-trigger round-trips (14), verify-with-code (16),
+  infrastructure smoke (11).
+- **+5 LLM-gated tests** (Gemini Flash behavioral, `--real` flag).
+- `pytest-timeout = 60s` global cap; `asyncio_mode = "auto"`.
+
+### Packaging
+- `predacore` 1.1.1 → 1.2.0 (Python-only — `predacore_core` Rust wheel unchanged at 1.1.1).
+
 ## [1.1.1] - 2026-04-24
 
 **Phase 1 memory upgrade — HNSW at scale, v2 schema, trust-weighted ranking.**

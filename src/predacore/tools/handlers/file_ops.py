@@ -1,6 +1,7 @@
 """File operation handlers: read_file, write_file, list_directory."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ from ._context import (
     missing_param,
     resource_not_found,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def handle_read_file(args: dict[str, Any], ctx: ToolContext) -> str:
@@ -111,6 +114,27 @@ async def handle_write_file(args: dict[str, Any], ctx: ToolContext) -> str:
             )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+    # Auto-index the freshly written file into memory so future recall
+    # reflects what we just wrote. Mirrors the lab Claude Code hook
+    # (memory_touch.py), but ported in-process because predacore-public
+    # dispatches its tools in-process. Failures are non-fatal — a memory
+    # subsystem hiccup must NEVER fail the file write itself. Binary /
+    # oversized / unreadable files are skipped by reindex_file's own
+    # safe_read_text gate.
+    if ctx.unified_memory:
+        try:
+            # L5 — tag the chunks with the current project_id (env →
+            # git repo basename → cwd basename → "default"), resolved
+            # from the file's parent dir so multi-repo agents don't
+            # cross-pollute memory across projects.
+            try:
+                from predacore.memory.project_id import default_project
+                proj = default_project(cwd=str(path.parent))
+            except ImportError:
+                proj = "default"
+            await ctx.unified_memory.reindex_file(str(path), project_id=proj)
+        except Exception as exc:  # broad: memory must not break writes
+            logger.debug("Memory reindex_file(%s) skipped: %s", path, exc)
     return f"Successfully wrote {len(content)} bytes to {path}"
 
 

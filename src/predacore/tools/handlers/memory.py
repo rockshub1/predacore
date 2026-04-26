@@ -113,6 +113,19 @@ async def handle_memory_store(args: dict[str, Any], ctx: ToolContext) -> str:
     if expires_at is None:
         expires_at = _ttl_to_expires_at(args.get("ttl_seconds"))
 
+    # L5 — auto-tag with current project_id unless caller passed explicit value.
+    # Sentinel "all" is invalid for store (a memory belongs to ONE project);
+    # treat it as auto-detect.
+    project_id_arg = str(args.get("project_id") or "").strip()
+    if project_id_arg and project_id_arg.lower() != "all":
+        store_project_id = project_id_arg
+    else:
+        try:
+            from predacore.memory.project_id import default_project
+            store_project_id = default_project()
+        except ImportError:
+            store_project_id = "default"
+
     # Unified memory store (primary)
     if ctx.unified_memory:
         memory_type_raw = str(args.get("memory_type") or "fact").strip().lower()
@@ -131,6 +144,7 @@ async def handle_memory_store(args: dict[str, Any], ctx: ToolContext) -> str:
                 memory_scope=memory_scope,
                 team_id=team_id or None,
                 agent_id=agent_id,
+                project_id=store_project_id,  # L5
                 # Explicit agent/user invocation of the memory_store tool —
                 # treat as user_stated with high confidence. Ranking weight
                 # is user_stated (0.90) per TRUST_MULTIPLIERS. Callers that
@@ -226,6 +240,22 @@ async def handle_memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
     except (ValueError, TypeError):
         top_k = 5
 
+    # L5 — auto-default project filter to current project unless caller
+    # passed an explicit value. Pass "all" to disable filter (cross-project
+    # recall). Pass a specific project name to query that project's
+    # memories. Default = "auto-detect from cwd/git".
+    project_arg = str(args.get("project_id") or "").strip()
+    if not project_arg:
+        try:
+            from predacore.memory.project_id import default_project
+            recall_project_id: str | None = default_project()
+        except ImportError:
+            recall_project_id = None
+    elif project_arg.lower() == "all":
+        recall_project_id = None  # explicit cross-project
+    else:
+        recall_project_id = project_arg
+
     # Unified memory store (primary)
     if ctx.unified_memory:
         try:
@@ -242,6 +272,7 @@ async def handle_memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
                     top_k=top_k,
                     scopes=[memory_scope],
                     team_id=team_id or None,
+                    project_id=recall_project_id,
                 )
                 if recalls:
                     out: list[str] = []
@@ -260,6 +291,7 @@ async def handle_memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
                 top_k=top_k,
                 scopes=[memory_scope],
                 team_id=team_id or None,
+                project_id=recall_project_id,
             )
             if recalls:
                 out_sem: list[str] = []
@@ -303,3 +335,232 @@ async def handle_memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
         elif any(query_lower in tag.lower() for tag in data.get("tags", [])):
             results.append(f"**{key}**: {data['content'][:300]}")
     return "\n\n".join(results) if results else f"[No memories found matching: {query}]"
+
+
+# ---------------------------------------------------------------------------
+# Phase W3/W4 — additional memory tool handlers
+# ---------------------------------------------------------------------------
+
+
+async def handle_memory_get(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Fetch a single memory row by ID. Returns the row's content + metadata
+    formatted as a readable string, or "not found" if the ID doesn't exist."""
+    mem_id = str(args.get("id") or "").strip()
+    if not mem_id:
+        raise missing_param("id", tool="memory_get")
+
+    if not ctx.unified_memory:
+        return "[memory subsystem not available]"
+
+    try:
+        mem = await ctx.unified_memory.get(mem_id)
+    except (RuntimeError, OSError, ValueError, ConnectionError) as exc:
+        logger.warning("memory_get failed for id=%s: %s", mem_id, exc)
+        return f"[memory_get error: {exc}]"
+
+    if mem is None:
+        return f"[no memory with id={mem_id}]"
+
+    # Pull canonical fields (defensive .get() since adapter shapes can vary).
+    tags = mem.get("tags") or []
+    if isinstance(tags, str):
+        try:
+            import json as _json
+            tags = _json.loads(tags)
+        except (ValueError, _json.JSONDecodeError):
+            tags = [tags]
+    tags_str = ", ".join(str(t) for t in tags) if tags else "(none)"
+
+    lines = [
+        f"**id:** {mem.get('id', mem_id)}",
+        f"**type:** {mem.get('memory_type', '?')}    "
+        f"**importance:** {mem.get('importance', '?')}    "
+        f"**trust:** {mem.get('trust_source', '?')}    "
+        f"**state:** {mem.get('verification_state', '?')}",
+    ]
+    src = mem.get("source_path")
+    if src:
+        lines.append(f"**source:** {src}    chunk_ordinal={mem.get('chunk_ordinal', 0)}")
+    if mem.get("created_at"):
+        lines.append(f"**created:** {mem['created_at']}")
+    lines.append(f"**tags:** {tags_str}")
+    lines.append("")
+    lines.append(str(mem.get("content", "")))
+    return "\n".join(lines)
+
+
+async def handle_memory_delete(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Delete a single memory row by ID. Destructive — no undo. The
+    ``requires_confirmation`` flag in the registry means the executor
+    should already have asked the user before calling this."""
+    mem_id = str(args.get("id") or "").strip()
+    if not mem_id:
+        raise missing_param("id", tool="memory_delete")
+
+    if not ctx.unified_memory:
+        return "[memory subsystem not available]"
+
+    # Capture a preview before we delete so we can report what was removed
+    # (helpful for audit + lets the agent describe the action to the user).
+    preview = ""
+    try:
+        mem = await ctx.unified_memory.get(mem_id)
+        if mem:
+            content = str(mem.get("content", ""))
+            preview = content[:80].replace("\n", " ")
+            if len(content) > 80:
+                preview += "..."
+    except (RuntimeError, OSError, ValueError, ConnectionError):
+        # Non-fatal — proceed with delete attempt
+        pass
+
+    try:
+        ok = await ctx.unified_memory.delete(mem_id)
+    except (RuntimeError, OSError, ValueError, ConnectionError) as exc:
+        logger.warning("memory_delete failed for id=%s: %s", mem_id, exc)
+        return f"[memory_delete error: {exc}]"
+
+    if not ok:
+        return f"[no memory deleted — id={mem_id} not found]"
+
+    if preview:
+        return f"Deleted memory {mem_id} (was: {preview!r})"
+    return f"Deleted memory {mem_id}"
+
+
+async def handle_memory_stats(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Return memory subsystem health as a formatted summary."""
+    if not ctx.unified_memory:
+        return "[memory subsystem not available]"
+
+    try:
+        stats = await ctx.unified_memory.get_stats()
+    except (RuntimeError, OSError, ValueError, ConnectionError) as exc:
+        logger.warning("memory_stats failed: %s", exc)
+        return f"[memory_stats error: {exc}]"
+
+    if not isinstance(stats, dict):
+        return f"[memory_stats unexpected response shape: {type(stats).__name__}]"
+
+    lines = ["**Memory Stats**", ""]
+
+    # Headline counts
+    total = stats.get("total_memories", stats.get("total", "?"))
+    lines.append(f"- **total memories:** {total}")
+
+    by_type = stats.get("by_type") or {}
+    if by_type:
+        type_pairs = ", ".join(f"{k}={v}" for k, v in sorted(by_type.items()))
+        lines.append(f"- **by type:** {type_pairs}")
+
+    # Schema / embedding versions
+    if "schema_version" in stats:
+        lines.append(
+            f"- **schema:** v{stats['schema_version']}    "
+            f"**embedding:** {stats.get('embedding_version', '?')}"
+        )
+
+    # Verification health
+    by_vstate = stats.get("by_verification_state") or {}
+    if by_vstate:
+        vstate_pairs = ", ".join(f"{k}={v}" for k, v in sorted(by_vstate.items()))
+        lines.append(f"- **verification states:** {vstate_pairs}")
+
+    # Safety
+    safety = stats.get("safety") or {}
+    if safety:
+        blocked = safety.get("secrets_blocked", 0)
+        ignored = safety.get("ignored_paths", 0)
+        if blocked or ignored:
+            lines.append(
+                f"- **safety:** {blocked} secrets blocked, "
+                f"{ignored} ignored paths"
+            )
+
+    # Healer (if surfaced)
+    healer = stats.get("healer") or stats.get("healer_status")
+    if isinstance(healer, dict):
+        paused = healer.get("paused", False)
+        last_snap = healer.get("last_snapshot_at") or "(never)"
+        lines.append(
+            f"- **healer:** {'PAUSED' if paused else 'running'}, "
+            f"last snapshot: {last_snap}"
+        )
+
+    return "\n".join(lines)
+
+
+async def handle_memory_explain(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Run recall_explain for a query and return a per-stage trace."""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise missing_param("query", tool="memory_explain")
+
+    if not ctx.unified_memory:
+        return "[memory subsystem not available]"
+
+    top_k_raw = args.get("top_k") or 10
+    try:
+        top_k = max(1, min(int(top_k_raw), 50))
+    except (ValueError, TypeError):
+        top_k = 10
+
+    try:
+        trace = await ctx.unified_memory.recall_explain(query=query, top_k=top_k)
+    except AttributeError:
+        return (
+            "[memory_explain unavailable — UnifiedMemoryStore.recall_explain not defined "
+            "in this build]"
+        )
+    except (RuntimeError, OSError, ValueError, ConnectionError) as exc:
+        logger.warning("memory_explain failed for query=%r: %s", query, exc)
+        return f"[memory_explain error: {exc}]"
+
+    if not isinstance(trace, dict):
+        return f"[memory_explain unexpected response shape: {type(trace).__name__}]"
+
+    lines = [
+        f"**Memory recall trace for:** {query!r}",
+        "",
+        f"**Results:** {trace.get('results_count', 0)} hit(s)",
+    ]
+
+    for i, hit in enumerate(trace.get("results", []), start=1):
+        preview = (hit.get("preview") or "").replace("\n", " ")
+        if len(preview) > 100:
+            preview = preview[:100] + "..."
+        lines.append(
+            f"  {i}. id={(hit.get('id') or '?')[:8]}... "
+            f"score={hit.get('score', 0):.3f} "
+            f"type={hit.get('memory_type', '?')} "
+            f"trust={hit.get('trust_source', '?')} | {preview}"
+        )
+
+    vstates = trace.get("verification_state_counts") or {}
+    if vstates:
+        lines.append("")
+        lines.append("**Verification state counts (whole DB):**")
+        for state, count in sorted(vstates.items()):
+            lines.append(f"  - {state}: {count}")
+
+    hidden = trace.get("filtered_by_invariants") or {}
+    if hidden:
+        total_hidden = hidden.get("total_hidden", 0)
+        if total_hidden:
+            lines.append("")
+            lines.append(
+                f"**Filtered by invariants (hidden from recall):** "
+                f"{total_hidden} row(s)"
+            )
+            for state, count in (hidden.get("by_state") or {}).items():
+                if count:
+                    lines.append(f"  - {state}: {count}")
+            lines.append("  _(call with show_stale=True to inspect)_")
+
+    if "embedding_version" in trace:
+        lines.append("")
+        lines.append(
+            f"_schema v{trace.get('schema_version', '?')} · "
+            f"embedding {trace.get('embedding_version', '?')}_"
+        )
+    return "\n".join(lines)
