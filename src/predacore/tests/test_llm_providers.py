@@ -6,6 +6,7 @@ Tests mock external APIs — no real LLM calls needed.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -59,91 +60,86 @@ class TestProviderConfig:
 
 
 class TestCircuitBreaker:
-    """Tests for the per-provider circuit breaker."""
+    """Tests for the per-provider circuit breaker (async)."""
 
-    def test_initial_state_closed(self):
+    async def test_initial_state_closed(self):
         cb = CircuitBreaker()
-        assert cb.is_open("openai") is False
+        assert await cb.is_open("openai") is False
 
-    def test_single_failure_stays_closed(self):
+    async def test_single_failure_stays_closed(self):
         cb = CircuitBreaker(failure_threshold=3)
-        cb.record_failure("openai", Exception("error"))
-        assert cb.is_open("openai") is False
+        await cb.record_failure("openai", Exception("error"))
+        assert await cb.is_open("openai") is False
 
-    def test_trips_after_threshold(self):
+    async def test_trips_after_threshold(self):
         cb = CircuitBreaker(failure_threshold=3, window_seconds=300)
         for i in range(3):
-            cb.record_failure("openai", Exception(f"error {i}"))
-        assert cb.is_open("openai") is True
+            await cb.record_failure("openai", Exception(f"error {i}"))
+        assert await cb.is_open("openai") is True
 
-    def test_different_providers_independent(self):
+    async def test_different_providers_independent(self):
         cb = CircuitBreaker(failure_threshold=2)
-        cb.record_failure("openai", Exception("err"))
-        cb.record_failure("openai", Exception("err"))
-        assert cb.is_open("openai") is True
-        assert cb.is_open("gemini") is False
+        await cb.record_failure("openai", Exception("err"))
+        await cb.record_failure("openai", Exception("err"))
+        assert await cb.is_open("openai") is True
+        assert await cb.is_open("gemini") is False
 
-    def test_cooldown_recovery(self):
+    async def test_cooldown_recovery(self):
         cb = CircuitBreaker(failure_threshold=1, cooldown_seconds=0.01)
-        cb.record_failure("openai", Exception("err"))
-        assert cb.is_open("openai") is True
-        time.sleep(0.02)
-        assert cb.is_open("openai") is False
+        await cb.record_failure("openai", Exception("err"))
+        assert await cb.is_open("openai") is True
+        await asyncio.sleep(0.02)
+        assert await cb.is_open("openai") is False
 
-    def test_success_clears_failures(self):
+    async def test_success_clears_failures(self):
         cb = CircuitBreaker(failure_threshold=3)
-        cb.record_failure("openai", Exception("err"))
-        cb.record_failure("openai", Exception("err"))
-        cb.record_success("openai")
-        cb.record_failure("openai", Exception("err"))
+        await cb.record_failure("openai", Exception("err"))
+        await cb.record_failure("openai", Exception("err"))
+        await cb.record_success("openai")
+        await cb.record_failure("openai", Exception("err"))
         # Only 1 failure after success — should not trip
-        assert cb.is_open("openai") is False
+        assert await cb.is_open("openai") is False
 
-    def test_reset_single(self):
+    async def test_reset_single(self):
         cb = CircuitBreaker(failure_threshold=1)
-        cb.record_failure("openai", Exception("err"))
-        assert cb.is_open("openai") is True
-        cb.reset("openai")
-        assert cb.is_open("openai") is False
+        await cb.record_failure("openai", Exception("err"))
+        assert await cb.is_open("openai") is True
+        await cb.reset("openai")
+        assert await cb.is_open("openai") is False
 
-    def test_reset_all(self):
+    async def test_reset_all(self):
         cb = CircuitBreaker(failure_threshold=1)
-        cb.record_failure("openai", Exception("err"))
-        cb.record_failure("gemini", Exception("err"))
-        assert cb.is_open("openai") is True
-        assert cb.is_open("gemini") is True
-        cb.reset_all()
-        assert cb.is_open("openai") is False
-        assert cb.is_open("gemini") is False
+        await cb.record_failure("openai", Exception("err"))
+        await cb.record_failure("gemini", Exception("err"))
+        assert await cb.is_open("openai") is True
+        assert await cb.is_open("gemini") is True
+        await cb.reset_all()
+        assert await cb.is_open("openai") is False
+        assert await cb.is_open("gemini") is False
 
-    def test_window_expiry(self):
+    async def test_window_expiry(self):
         cb = CircuitBreaker(failure_threshold=3, window_seconds=0.01)
-        cb.record_failure("openai", Exception("err"))
-        cb.record_failure("openai", Exception("err"))
-        time.sleep(0.02)
+        await cb.record_failure("openai", Exception("err"))
+        await cb.record_failure("openai", Exception("err"))
+        await asyncio.sleep(0.02)
         # Old failures expired — new one doesn't trip
-        cb.record_failure("openai", Exception("err"))
-        assert cb.is_open("openai") is False
+        await cb.record_failure("openai", Exception("err"))
+        assert await cb.is_open("openai") is False
 
-    def test_thread_safety(self):
-        """Circuit breaker should be thread-safe."""
-        import threading
-        cb = CircuitBreaker(failure_threshold=100)
-        errors = []
+    async def test_concurrent_record_failures_no_lost_writes(self):
+        """asyncio.Lock must serialize concurrent record_failure calls
+        so no failure-list append is lost under contention."""
+        cb = CircuitBreaker(failure_threshold=1000)
 
-        def record_failures():
-            try:
-                for _ in range(50):
-                    cb.record_failure("test", Exception("err"))
-            except Exception as e:
-                errors.append(e)
+        async def record_50():
+            for _ in range(50):
+                await cb.record_failure("test", Exception("err"))
 
-        threads = [threading.Thread(target=record_failures) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert not errors
+        # 4 concurrent tasks × 50 each = 200 total failures expected
+        await asyncio.gather(*[record_50() for _ in range(4)])
+        # is_open returns False (200 < 1000) but the side effect we care
+        # about is the failure list being intact.
+        assert len(cb._failures.get("test", [])) == 200
 
 
 # ── Text Tool Adapter ──────────────────────────────────────────────

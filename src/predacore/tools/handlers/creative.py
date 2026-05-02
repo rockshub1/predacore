@@ -30,19 +30,66 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_image_gen(args: dict[str, Any], ctx: ToolContext) -> str:
-    """Generate images via DALL-E 3 API."""
+    """Generate images via Gemini 2.5 Flash Image (free) or DALL-E 3 (paid).
+
+    Provider selection (T10d):
+      1. ``provider="gemini"`` arg, OR ``GEMINI_API_KEY`` set → Gemini Image
+         (model id ``gemini-2.5-flash-image-preview``, aka *nano-banana*).
+         Free tier covers ~10 image generations / minute.
+      2. ``provider="openai"`` arg, OR ``OPENAI_API_KEY`` set → DALL-E 3.
+         Paid (~$0.04-0.08 per image).
+
+    Default order: Gemini if available (free), DALL-E as fallback. Either
+    provider returns the same JSON shape so callers don't branch.
+    """
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         raise missing_param("prompt", tool="image_gen")
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    requested = str(args.get("provider") or "").strip().lower()
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    # Resolve provider: explicit arg wins; otherwise prefer Gemini (free) if its
+    # key is set, then DALL-E.
+    if requested == "gemini":
+        if not gemini_key:
+            raise ToolError(
+                "image_gen provider='gemini' requested but GEMINI_API_KEY is unset",
+                kind=ToolErrorKind.UNAVAILABLE,
+                tool_name="image_gen",
+                suggestion=(
+                    "Get a free key at https://aistudio.google.com/apikey "
+                    "and set GEMINI_API_KEY in ~/.predacore/.env"
+                ),
+            )
+        return await _generate_via_gemini(prompt, gemini_key, args)
+
+    if requested == "openai":
+        if not openai_key:
+            raise ToolError(
+                "image_gen provider='openai' requested but OPENAI_API_KEY is unset",
+                kind=ToolErrorKind.UNAVAILABLE,
+                tool_name="image_gen",
+            )
+        # Fall through to the DALL-E path below.
+    elif gemini_key:
+        # Default: prefer the free path.
+        return await _generate_via_gemini(prompt, gemini_key, args)
+    elif not openai_key:
         raise ToolError(
-            "Image generation requires OPENAI_API_KEY environment variable",
+            "Image generation requires either GEMINI_API_KEY (free, "
+            "preferred) or OPENAI_API_KEY (paid). Set one in ~/.predacore/.env.",
             kind=ToolErrorKind.UNAVAILABLE,
             tool_name="image_gen",
-            suggestion="Set OPENAI_API_KEY in your .env file",
+            suggestion=(
+                "Free option: https://aistudio.google.com/apikey → "
+                "set GEMINI_API_KEY"
+            ),
         )
+
+    # ── DALL-E 3 path (existing behavior) ─────────────────────────────
+    api_key = openai_key
 
     size = str(args.get("size") or "1024x1024")
     quality = str(args.get("quality") or "standard")
@@ -128,6 +175,95 @@ async def handle_image_gen(args: dict[str, Any], ctx: ToolContext) -> str:
                 tool_name="image_gen",
             ) from e
         raise
+
+
+async def _generate_via_gemini(
+    prompt: str, api_key: str, args: dict[str, Any],
+) -> str:
+    """Generate an image via Gemini 2.5 Flash Image (nano-banana).
+
+    Returns the same JSON shape as the DALL-E path so callers don't
+    branch. Saves the bytes to ``args["save_path"]`` if provided.
+
+    The Gemini Images API takes a text prompt and returns base64-encoded
+    image bytes inline (no separate URL fetch needed).
+    """
+    import base64
+    import httpx
+
+    save_path = str(args.get("save_path") or "").strip()
+    if save_path:
+        resolved = str(Path(save_path).expanduser().resolve())
+        for sp in SENSITIVE_WRITE_PATHS:
+            if resolved.startswith(sp):
+                raise blocked(
+                    f"cannot save to sensitive path: {resolved}",
+                    tool="image_gen",
+                )
+
+    model = "gemini-2.5-flash-image-preview"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{model}:generateContent?key={api_key}"
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt[:4000]}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — httpx + JSON errors
+        raise ToolError(
+            f"Gemini image_gen failed: {exc}",
+            kind=ToolErrorKind.EXECUTION,
+            tool_name="image_gen",
+            suggestion=(
+                "Falling back to DALL-E? Set OPENAI_API_KEY and call "
+                "with provider='openai'."
+            ),
+        ) from exc
+
+    # Walk the response: candidates[0].content.parts[*].inlineData.data
+    image_b64 = None
+    for cand in data.get("candidates", []) or []:
+        for part in cand.get("content", {}).get("parts", []) or []:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                image_b64 = inline["data"]
+                break
+        if image_b64:
+            break
+    if not image_b64:
+        raise ToolError(
+            "Gemini returned no image bytes (the prompt may have been "
+            "filtered by safety policy). Try rephrasing the prompt.",
+            kind=ToolErrorKind.EXECUTION,
+            tool_name="image_gen",
+        )
+
+    image_bytes = base64.b64decode(image_b64)
+    result: dict[str, Any] = {
+        "provider": "gemini",
+        "model": model,
+        "size_bytes": len(image_bytes),
+    }
+    if save_path:
+        save_resolved = Path(save_path).expanduser().resolve()
+        save_resolved.parent.mkdir(parents=True, exist_ok=True)
+        save_resolved.write_bytes(image_bytes)
+        result["saved_to"] = str(save_resolved)
+    else:
+        # Embed inline so the model can show / forward it without disk roundtrip.
+        result["image_b64"] = image_b64
+    return json.dumps(result, indent=2)
 
 
 # ---------------------------------------------------------------------------

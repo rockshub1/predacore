@@ -40,6 +40,108 @@ _SECRET_MAP: dict[str, tuple[str, str]] = {
     "whatsapp": ("WHATSAPP_TOKEN",     "whatsapp_token"),
 }
 
+
+# T10b — full per-channel secret manifest used by ``/channel info``.
+# Each entry is a list of (env_var, human_description). Empty list means
+# the channel needs no secrets (webchat = port only; imessage = local
+# Mac account — no token).
+CHANNEL_SECRETS: dict[str, list[tuple[str, str]]] = {
+    "telegram": [
+        ("TELEGRAM_BOT_TOKEN", "Bot token from @BotFather on Telegram"),
+    ],
+    "discord": [
+        ("DISCORD_BOT_TOKEN", "Bot token from Discord Developer Portal"),
+    ],
+    "whatsapp": [
+        ("WHATSAPP_TOKEN", "Cloud API access token (Meta Business)"),
+        ("WHATSAPP_PHONE_NUMBER_ID", "Phone number ID from Meta Business"),
+        ("WHATSAPP_APP_SECRET", "App secret for webhook signature checks"),
+    ],
+    "slack": [
+        ("SLACK_BOT_TOKEN", "Bot User OAuth Token (starts with xoxb-)"),
+        ("SLACK_APP_TOKEN", "App-Level Token (xapp-) for socket mode"),
+    ],
+    "signal": [
+        ("SIGNAL_API_URL", "signal-cli-rest-api server URL"),
+        ("SIGNAL_NUMBER", "Your registered Signal phone number"),
+    ],
+    "email": [
+        ("EMAIL_USERNAME", "Email address"),
+        ("EMAIL_PASSWORD", "App password (Gmail) or mailbox password"),
+    ],
+    "imessage": [],   # local Messages.app — no remote auth
+    "webchat": [],    # local web server — no auth required
+    "twilio": [
+        ("TWILIO_ACCOUNT_SID", "Account SID from Twilio console"),
+        ("TWILIO_AUTH_TOKEN", "Auth token from Twilio console"),
+        ("TWILIO_FROM_NUMBER", "Twilio phone number in E.164 format (+15551234567)"),
+    ],
+    "matrix": [
+        ("MATRIX_HOMESERVER", "Homeserver URL (e.g. https://matrix.org)"),
+        ("MATRIX_USER_ID", "Bot user id (@yourbot:matrix.org)"),
+        ("MATRIX_ACCESS_TOKEN", "Bot access token from /login endpoint"),
+    ],
+    "mastodon": [
+        ("MASTODON_API_BASE_URL", "Instance URL (e.g. https://mastodon.social)"),
+        ("MASTODON_ACCESS_TOKEN", "App access token (Settings → Development)"),
+    ],
+    "bluesky": [
+        ("BLUESKY_HANDLE", "Bot handle (e.g. yourbot.bsky.social)"),
+        ("BLUESKY_APP_PASSWORD", "App password (NOT your main password)"),
+    ],
+    # ── T11 ──────────────────────────────────────────────────────────
+    "mattermost": [
+        ("MATTERMOST_URL", "Server URL (e.g. https://chat.example.com)"),
+        ("MATTERMOST_ACCESS_TOKEN", "Bot account access token"),
+    ],
+    "rocketchat": [
+        ("ROCKETCHAT_URL", "Server URL (https://chat.example.com)"),
+        ("ROCKETCHAT_USERNAME", "Bot username"),
+        ("ROCKETCHAT_PASSWORD", "Bot password"),
+    ],
+    "vonage": [
+        ("VONAGE_APPLICATION_ID", "Vonage Application ID"),
+        ("VONAGE_PRIVATE_KEY_PATH", "Path to Vonage private.key (or use VONAGE_PRIVATE_KEY)"),
+        ("VONAGE_FROM_NUMBER", "Sender phone number / brand id"),
+    ],
+    "messagebird": [
+        ("MESSAGEBIRD_ACCESS_KEY", "MessageBird live or test access key"),
+        ("MESSAGEBIRD_FROM", "Sender phone number or alphanumeric brand"),
+    ],
+    "line": [
+        ("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token from LINE Developers"),
+        ("LINE_CHANNEL_SECRET", "Channel secret for webhook signature checks"),
+    ],
+    "viber": [
+        ("VIBER_AUTH_TOKEN", "Auth token from your Viber Public Account"),
+        ("VIBER_BOT_NAME", "Display name for the bot"),
+        ("VIBER_PUBLIC_URL", "Public webhook URL (HTTPS, used for set_webhook)"),
+    ],
+    "xmpp": [
+        ("XMPP_JID", "Bot JID (e.g. bot@example.com)"),
+        ("XMPP_PASSWORD", "Account password"),
+    ],
+    "irc": [
+        ("IRC_SERVER", "Server hostname (e.g. irc.libera.chat)"),
+        ("IRC_NICKNAME", "Bot nickname"),
+        ("IRC_CHANNELS", "Comma-separated channels (#one,#two)"),
+    ],
+    "google_chat": [
+        ("GOOGLE_CHAT_VERIFICATION_TOKEN", "Token from your Chat app's settings"),
+    ],
+    "threema": [
+        ("THREEMA_GATEWAY_ID", "Gateway ID (8 chars, starts with *)"),
+        ("THREEMA_GATEWAY_SECRET", "API secret"),
+    ],
+    "zalo": [
+        ("ZALO_OA_ACCESS_TOKEN", "Zalo Official Account access token"),
+    ],
+    "kakaotalk": [
+        ("KAKAO_CHANNEL_ACCESS_TOKEN", "Kakao Channel access token"),
+        ("KAKAO_CHANNEL_PUBLIC_ID", "Kakao Channel public id"),
+    ],
+}
+
 # Regex for safe package names — rejects shell-injection attempts in
 # channel_install. Matches PEP 503 + optional version specifier / extras.
 _PKG_NAME_RE = re.compile(
@@ -190,7 +292,11 @@ def _add_channel(
         ctx.config.channels.enabled = enabled
         actions.append(f"enabled {channel} in config.yaml")
 
-    actions.append("daemon restart required to pick up the new channel")
+    actions.append(
+        "channel will hot-attach within seconds (config watcher diffs "
+        "channels.enabled and live-registers the adapter — no daemon restart "
+        "required)"
+    )
     return {"status": "ok", "channel": channel, "actions": actions}
 
 
@@ -209,7 +315,7 @@ def _remove_channel(
             "actions": [
                 f"disabled {channel} in config.yaml",
                 "(token left in .env — use `set_token` with empty value to clear)",
-                "daemon restart required to stop the adapter",
+                "adapter will hot-detach within seconds via the config watcher",
             ],
         }
     return {
@@ -259,16 +365,8 @@ async def handle_channel_install(args: dict[str, Any], ctx: ToolContext) -> str:
             tool="channel_install",
         )
 
-    trust = getattr(ctx.config.security, "trust_level", "normal")
-    if trust == "paranoid":
-        raise ToolError(
-            "channel_install is disabled in paranoid trust mode. "
-            "Install with `pip install " + package + "` manually and restart the daemon.",
-            kind=ToolErrorKind.BLOCKED,
-            tool_name="channel_install",
-            suggestion="Lower trust to normal/yolo, or install manually.",
-        )
-
+    # channel_install is in WRITE_TOOLS — the dispatcher confirms it via the
+    # ask_everytime policy. No additional handler-side trust gate.
     upgrade = bool(args.get("upgrade", False))
 
     cmd = [sys.executable, "-m", "pip", "install", "--no-input"]
@@ -358,17 +456,8 @@ async def handle_secret_set(args: dict[str, Any], ctx: ToolContext) -> str:
             tool="secret_set",
         )
 
-    # Soft trust check — writing secrets is sensitive.
-    trust = getattr(ctx.config.security, "trust_level", "normal")
-    if trust == "paranoid":
-        raise ToolError(
-            f"secret_set is disabled in paranoid trust mode "
-            f"(would write {name} to ~/.predacore/.env).",
-            kind=ToolErrorKind.BLOCKED,
-            tool_name="secret_set",
-            suggestion="Add the secret manually, or lower trust to normal/yolo.",
-        )
-
+    # secret_set is in WRITE_TOOLS — the dispatcher confirms it via the
+    # ask_everytime policy. No additional handler-side trust gate.
     home = Path(getattr(ctx.config, "home_dir", Path.home() / ".predacore")).expanduser()
     _write_env_secret(home, name, value)
     os.environ[name] = value  # live — LLM/channel picks it up on next use

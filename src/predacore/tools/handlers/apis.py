@@ -235,19 +235,17 @@ async def handle_api_call(args: dict[str, Any], ctx: ToolContext) -> str:
         )
 
     timeout = float(args.get("timeout") or _DEFAULT_TIMEOUT_S)
-    trust = getattr(ctx.config.security, "trust_level", "normal")
-    if trust == "paranoid" and method != "GET":
-        raise ToolError(
-            f"api_call with method={method} is blocked in paranoid trust mode. "
-            "Only GET is allowed without confirmation.",
-            kind=ToolErrorKind.BLOCKED,
-            tool_name="api_call",
-        )
+    # Non-GET requests are confirmed via the dispatcher's ask_everytime policy
+    # (api_call is in WRITE_TOOLS). No extra handler-side block needed.
+
+    from predacore.auth.security import ssrf_safe_request
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.request(
-                method, url,
+        # follow_redirects=False: ssrf_safe_request follows redirects manually
+        # and re-validates each hop against private IPs / DNS rebinding.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            resp = await ssrf_safe_request(
+                client, method, url,
                 params=params,
                 headers=headers,
                 content=body if body is not None else None,

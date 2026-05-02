@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import threading
 import time
 import weakref
 from collections import deque
@@ -77,17 +79,13 @@ def _check_ethical_compliance(
     matched = [kw for kw in _FORBIDDEN_KEYWORDS if kw in args_repr]
     if not matched:
         return None
-    if trust_level == "paranoid":
-        return (
-            f"[Blocked by ethical compliance] Tool '{tool_name}' "
-            f"contains forbidden keywords: {', '.join(sorted(matched))}"
-        )
-    # trust_level == "normal" or anything else — warn only
-    logger.warning(
-        "Ethical compliance warning for tool '%s': matched keywords %s",
-        tool_name, matched,
+    # ask_everytime (or any non-yolo level) — block on forbidden keywords. The
+    # keyword guard is a hard safety net independent of the confirmation flow:
+    # forbidden patterns should never execute regardless of user approval.
+    return (
+        f"[Blocked by ethical compliance] Tool '{tool_name}' "
+        f"contains forbidden keywords: {', '.join(sorted(matched))}"
     )
-    return None
 
 
 # ── Constants ─────────────────────────────────────────────────────────
@@ -157,22 +155,34 @@ class AdaptiveTimeoutTracker:
         self._min_floor = min_floor
         self._min_samples = min_samples
         self._latencies: dict[str, deque[float]] = {}
+        # Guards both the dict and per-tool deques. Two concurrent record()
+        # calls for the same tool could otherwise race on init+append.
+        self._lock = threading.Lock()
 
     def record(self, tool_name: str, latency: float) -> None:
         """Record an observed latency for a tool."""
-        if tool_name not in self._latencies:
-            self._latencies[tool_name] = deque(maxlen=self._window_size)
-        self._latencies[tool_name].append(latency)
+        with self._lock:
+            if tool_name not in self._latencies:
+                self._latencies[tool_name] = deque(maxlen=self._window_size)
+            self._latencies[tool_name].append(latency)
 
     def get_timeout(self, tool_name: str, static_ceiling: float) -> float:
         """Compute adaptive timeout, capped by the static ceiling."""
-        samples = self._latencies.get(tool_name)
-        if not samples or len(samples) < self._min_samples:
-            return static_ceiling
+        with self._lock:
+            samples = self._latencies.get(tool_name)
+            if not samples or len(samples) < self._min_samples:
+                return static_ceiling
+            # Snapshot under the lock so the deque can't mutate underneath.
+            sorted_latencies = sorted(samples)
 
-        sorted_latencies = sorted(samples)
-        p95_idx = int(len(sorted_latencies) * 0.95)
-        p95 = sorted_latencies[min(p95_idx, len(sorted_latencies) - 1)]
+        # Nearest-rank percentile: rank = ceil(p/100 * n), 1-indexed.
+        # P95 of 20 samples = item 19 (1-indexed) = index 18. The previous
+        # `int(n * 0.95)` returned `n-1` for typical sizes — i.e. the max,
+        # not the 95th percentile. That made adaptive timeouts inflate to
+        # the slowest observed call, not the typical-bad case.
+        n = len(sorted_latencies)
+        p95_idx = max(0, math.ceil(0.95 * n) - 1)
+        p95 = sorted_latencies[p95_idx]
 
         adaptive = max(self._min_floor, p95 * self._multiplier)
         effective = min(static_ceiling, adaptive)
@@ -288,20 +298,24 @@ class ToolDispatcher:
     ) -> str:
         """Execute a tool call and return the result as a string.
 
-        Full pipeline:
+        Full pipeline (cache lookup happens AFTER trust gates so a tool that
+        requires confirmation can never serve a previously-cached result
+        without prompting; cache keys are scoped by `origin` so two callers
+        with identical args don't read each other's cached results):
+
         1. Alias normalization
         2. Rate-limit check
         3. Circuit breaker check
-        4. Cache check
-        5. Middleware before hooks
-        6. Confirmation check (trust policy)
-        7. Blocked / allowed list enforcement
-        8. Handler lookup + adaptive timeout
-        9. Middleware after hooks
-        10. ToolError handling
-        11. Latency recording
-        12. Metrics recording
-        13. Output sanitization
+        4. Middleware before hooks
+        5. Confirmation check (trust policy)
+        6. Blocked / allowed list enforcement
+        7. Ethical compliance keyword guard
+        8. Cache check (scoped by origin)
+        9. Handler lookup + adaptive timeout
+        10. Output sanitization (BEFORE cache write so secrets don't persist)
+        11. Cache write (sanitized value)
+        12. Middleware after hooks
+        13. Metrics + history recording
         """
         # 1. Alias normalization
         if tool_name in _TOOL_ALIAS_MAP:
@@ -350,19 +364,7 @@ class ToolDispatcher:
             await self._middleware.run_after(mw_ctx)
             return mw_ctx.result
 
-        # 4. Cache check
-        cached_result = self._result_cache.get(tool_name, arguments)
-        if cached_result is not None:
-            mw_ctx.status = ToolStatus.CACHED
-            mw_ctx.result = cached_result
-            self._execution_history.record(
-                tool_name, arguments, cached_result,
-                ToolStatus.CACHED, 0, origin,
-            )
-            await self._middleware.run_after(mw_ctx)
-            return cached_result
-
-        # 5. Middleware before hooks
+        # 4. Middleware before hooks
         await self._middleware.run_before(mw_ctx)
         if mw_ctx.skip_execution:
             mw_ctx.duration_ms = (time.time() - mw_ctx.timestamp) * 1000
@@ -372,7 +374,7 @@ class ToolDispatcher:
         # Use potentially sanitized args from middleware
         arguments = mw_ctx.args
 
-        # 6. Confirmation
+        # 5. Confirmation
         if self._trust.requires_confirmation(tool_name):
             prev = self._trust.check_previous_approval(tool_name, arguments)
             if prev is True:
@@ -390,7 +392,7 @@ class ToolDispatcher:
                 if not approved:
                     return f"[Tool '{tool_name}' was blocked by user]"
 
-        # 7. Blocked / allowed enforcement
+        # 6. Blocked / allowed enforcement
         block_reason = self._trust.is_blocked(
             tool_name,
             blocked_tools=blocked_tools,
@@ -402,8 +404,8 @@ class ToolDispatcher:
             await self._middleware.run_after(mw_ctx)
             return block_reason
 
-        # 7b. Ethical compliance check (keyword guard)
-        trust_level = getattr(self._trust, "trust_level", "normal")
+        # 7. Ethical compliance check (keyword guard)
+        trust_level = getattr(self._trust, "trust_level", "ask_everytime")
         ethical_block = _check_ethical_compliance(tool_name, arguments, trust_level)
         if ethical_block is not None:
             mw_ctx.status = "blocked"
@@ -411,7 +413,21 @@ class ToolDispatcher:
             await self._middleware.run_after(mw_ctx)
             return ethical_block
 
-        # 8. Handler lookup + execution
+        # 8. Cache check — happens AFTER trust gates and is scoped by origin
+        # so cached results never bypass confirmation and don't cross caller
+        # boundaries.
+        cached_result = self._result_cache.get(tool_name, arguments, origin=origin)
+        if cached_result is not None:
+            mw_ctx.status = ToolStatus.CACHED
+            mw_ctx.result = cached_result
+            self._execution_history.record(
+                tool_name, arguments, cached_result,
+                ToolStatus.CACHED, 0, origin,
+            )
+            await self._middleware.run_after(mw_ctx)
+            return cached_result
+
+        # 9. Handler lookup + execution
         _outer_timeout = float(
             os.getenv("PREDACORE_TOOL_TIMEOUT_SECONDS", str(self._timeout))
         )
@@ -489,12 +505,20 @@ class ToolDispatcher:
                 self._adaptive.record(tool_name, elapsed)
             self._circuit_breaker.record_success(tool_name)
 
+            # Sanitize result FIRST so the cache stores the redacted version
+            # — secrets in raw output don't persist to cache, and downstream
+            # consumers (history, middleware, return value) all see the same
+            # sanitized text.
+            if isinstance(result, str):
+                result = _sanitize_output(result)
+                result = _redact(result)
+
             # Invalidate cache on writes BEFORE caching (don't cache write results)
             if tool_name in WRITE_TOOLS:
                 self._result_cache.invalidate_on_write(tool_name, arguments)
             elif isinstance(result, str):
-                # Only cache read-only tool results
-                self._result_cache.put(tool_name, arguments, result)
+                # Only cache read-only tool results — sanitized, scoped by origin
+                self._result_cache.put(tool_name, arguments, result, origin=origin)
 
             # Prometheus metrics
             if _TOOL_REQ:
@@ -502,7 +526,7 @@ class ToolDispatcher:
             if _TOOL_LAT:
                 _TOOL_LAT.labels(tool_id=tool_name).observe(elapsed)
 
-            # Execution history
+            # Execution history (sanitized result, same as what's cached/returned)
             elapsed_ms = elapsed * 1000
             self._execution_history.record(
                 tool_name, arguments,
@@ -510,12 +534,7 @@ class ToolDispatcher:
                 ToolStatus.OK, elapsed_ms, origin,
             )
 
-            # Sanitize
-            if isinstance(result, str):
-                result = _sanitize_output(result)
-                result = _redact(result)
-
-            # 9. Middleware after hooks (success)
+            # 10. Middleware after hooks (success)
             mw_ctx.status = ToolStatus.OK
             mw_ctx.duration_ms = elapsed_ms
             mw_ctx.result = result if isinstance(result, str) else str(result)

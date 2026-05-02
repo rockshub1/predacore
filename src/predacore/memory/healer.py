@@ -34,7 +34,15 @@ Checks (cadence → action):
                              snapshot.
 
 Safety brakes:
-  - MAX_AUTO_REPAIRS_PER_HOUR: 1000. Exceeded → healer pauses + logs.
+  - Repair rate cap = max(MAX_AUTO_REPAIRS_PER_HOUR=1000, total_rows // 5).
+    Exceeded → healer pauses + logs. Floor of 1000 keeps small DBs identical
+    to the original behavior; the row-count scaling (~20% of total / hour)
+    keeps the brake meaningful on large bulk-indexed DBs without false-paging
+    after benign mass events (e.g. a BGE upgrade flagging ~5K rows for
+    reembed).
+  - Audit label-flips (verification_state changes) are NOT counted toward
+    the brake — they don't destroy data. Only orphan purges, reembeds, and
+    undo restores count.
   - Destructive actions (delete, restore) go through `_record_undo()`
     so a later undo is possible within UNDO_RETENTION_DAYS.
   - healthy_pct regression > 5% after any check → immediate pause.
@@ -297,25 +305,32 @@ class Healer:
             # Check safety brake AFTER each check — prevents a single
             # check from burning through the whole budget.
             if self._too_many_repairs():
-                self._pause("auto-repair rate exceeded MAX_AUTO_REPAIRS_PER_HOUR")
+                cap = self._current_repair_cap()
+                self._pause(f"auto-repair rate exceeded {cap}/hour")
                 return
 
     # ── Safety brakes ─────────────────────────────────────────────
 
     def _pause(self, reason: str) -> None:
-        if not self.stats.paused:
-            logger.error("Healer PAUSED: %s", reason)
-        self.stats.paused = True
-        self.stats.pause_reason = reason
+        # Lock-protected: pause() returning while a _tick() is mid-flight
+        # could otherwise let one full check cycle of repairs run after
+        # the operator has asked for the brake.
+        with self._repair_lock:
+            if not self.stats.paused:
+                logger.error("Healer PAUSED: %s", reason)
+            self.stats.paused = True
+            self.stats.pause_reason = reason
 
     def resume(self) -> None:
-        if self.stats.paused:
-            logger.warning("Healer resumed (was: %s)", self.stats.pause_reason)
-        self.stats.paused = False
-        self.stats.pause_reason = None
+        with self._repair_lock:
+            if self.stats.paused:
+                logger.warning("Healer resumed (was: %s)", self.stats.pause_reason)
+            self.stats.paused = False
+            self.stats.pause_reason = None
 
     def _is_paused(self) -> bool:
-        return self.stats.paused
+        with self._repair_lock:
+            return self.stats.paused
 
     def _record_repair(self, count: int = 1) -> None:
         now = time.time()
@@ -326,9 +341,29 @@ class Healer:
             self._repair_events = [e for e in self._repair_events if e[0] >= cutoff]
             self.stats.auto_repairs_last_hour = sum(c for _, c in self._repair_events)
 
+    def _current_repair_cap(self) -> int:
+        """Brake cap, scaled by DB row count.
+
+        Floor of MAX_AUTO_REPAIRS_PER_HOUR (1000) so small DBs behave
+        identically. Above ~5K rows the cap grows to 20% of total — keeps
+        the brake meaningful (no large DB can be silently rewritten faster
+        than 20%/hour) while letting bulk-indexed projects absorb mass
+        repairs after a model upgrade without false-paging the operator.
+        """
+        try:
+            conn = self._store._conn
+            if conn is None:
+                return MAX_AUTO_REPAIRS_PER_HOUR
+            row = conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+            total = int(row[0]) if row else 0
+        except sqlite3.Error:
+            return MAX_AUTO_REPAIRS_PER_HOUR
+        return max(MAX_AUTO_REPAIRS_PER_HOUR, total // 5)
+
     def _too_many_repairs(self) -> bool:
+        cap = self._current_repair_cap()
         with self._repair_lock:
-            return self.stats.auto_repairs_last_hour > MAX_AUTO_REPAIRS_PER_HOUR
+            return self.stats.auto_repairs_last_hour > cap
 
     # ── Individual checks ────────────────────────────────────────
 
@@ -407,13 +442,13 @@ class Healer:
                 updates,
             )
             conn.commit()
-            # Only count state changes as "repairs" — re-confirming an
-            # existing 'ok' doesn't count toward the repair rate limiter.
-            state_changes = sum(
-                1 for s, _, _ in updates if s != "ok"
-            )
-            if state_changes:
-                self._record_repair(state_changes)
+            # NOTE: audit label-flips intentionally do NOT count toward the
+            # repair rate brake. Audits only label rows; they don't destroy
+            # data or change content. The brake exists to halt runaway
+            # destructive ops (orphan purge, mass reembed, undo restore) —
+            # counting audit flips here would trip the brake on benign
+            # events like a BGE upgrade flagging 5K bulk-indexed rows as
+            # version_skew, which then prevents reembed from ever running.
 
         # Regression check
         self._check_healthy_regression()

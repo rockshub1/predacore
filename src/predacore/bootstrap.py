@@ -172,6 +172,95 @@ def _check_bge_model() -> _StepResult:
     )
 
 
+def _check_tinyclick_model() -> _StepResult:
+    """Pre-warm Samsung/TinyClick (~540 MB) for browser canvas-app vision.
+
+    Behavior is gated by the ``browser.local_vision`` config knob (T4c):
+      - ``"always"`` — always pre-warm (download to HF cache now)
+      - ``"auto"``   — skip pre-warm; download triggers on first canvas-app
+                       detection. Bootstrap reports "deferred (auto)" so the
+                       user sees the option exists.
+      - ``"off"``    — never download. Bootstrap reports "skipped".
+
+    Default mode is ``"auto"`` so first-time bootstrap stays small (BGE only).
+    Users who want zero-latency-on-first-canvas-page set ``"always"`` to
+    download the ~540 MB at bootstrap time instead.
+    """
+    mode = _resolve_local_vision_mode()
+    if mode == "off":
+        return _StepResult(
+            name="TinyClick (browser vision)",
+            ok=True,
+            detail="skipped — local_vision=off",
+        )
+    if mode == "auto":
+        return _StepResult(
+            name="TinyClick (browser vision)",
+            ok=True,
+            detail="deferred — will download on first canvas-app page (~540 MB)",
+            hint="set browser.local_vision='always' to pre-warm now",
+        )
+    # mode == "always" — pre-warm now
+    try:
+        from .operators import vision_model_loader as vml
+    except ImportError:
+        return _StepResult(
+            name="TinyClick (browser vision)",
+            ok=False,
+            severity="warn",
+            detail="vision_model_loader unavailable",
+        )
+    if vml.is_model_present():
+        return _StepResult(
+            name="TinyClick (browser vision)",
+            ok=True,
+            detail="cached + ready (already downloaded)",
+        )
+    try:
+        t0 = time.time()
+        vml.download_model(progress_cb=lambda msg: None)
+        elapsed = time.time() - t0
+    except RuntimeError as exc:
+        return _StepResult(
+            name="TinyClick (browser vision)",
+            ok=False,
+            severity="warn",
+            detail=f"download failed: {exc}",
+            hint="pip install huggingface_hub  (the downloader dep)",
+        )
+    return _StepResult(
+        name="TinyClick (browser vision)",
+        ok=True,
+        detail=f"cached + ready ({elapsed:.0f}s, ~540 MB)",
+    )
+
+
+def _resolve_local_vision_mode() -> str:
+    """Read ``browser.local_vision`` from config; fall back to env var.
+
+    Order of precedence:
+      1. ``PREDACORE_BROWSER_LOCAL_VISION`` env var (always wins, useful
+         for one-off bootstrap commands)
+      2. ``config.browser.local_vision`` from ``~/.predacore/config.yaml``
+      3. Default ``"auto"``
+    """
+    import os
+    env = os.environ.get("PREDACORE_BROWSER_LOCAL_VISION", "").strip().lower()
+    if env in ("auto", "always", "off"):
+        return env
+    try:
+        from .config import load_config
+        cfg = load_config()
+        browser_cfg = getattr(cfg, "browser", None)
+        if browser_cfg is not None:
+            mode = getattr(browser_cfg, "local_vision", "")
+            if isinstance(mode, str) and mode.lower() in ("auto", "always", "off"):
+                return mode.lower()
+    except Exception:  # noqa: BLE001 — config may not exist yet on first bootstrap
+        pass
+    return "auto"
+
+
 def _check_playwright_chromium() -> _StepResult:
     """Install Playwright's Chromium binary if Playwright is importable."""
     try:
@@ -440,6 +529,7 @@ def run_bootstrap(
     steps: list[tuple[str, Callable[[], _StepResult]]] = [
         ("Rust kernel",        _check_rust_kernel),
         ("BGE model",          _check_bge_model),
+        ("TinyClick model",    _check_tinyclick_model),
         ("Playwright",         _check_playwright_chromium),
         ("spaCy",              _check_spacy_model),
         ("Docker",             _check_docker),

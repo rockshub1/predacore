@@ -203,13 +203,12 @@ class ToolContext:
 
 
 def _lazy_memory_types():
-    """Return (MemoryType, ImportanceLevel) — imported lazily."""
-    try:
-        from predacore._vendor.common.memory_service import ImportanceLevel, MemoryType
-        return MemoryType, ImportanceLevel
-    except Exception:
-        pass
-    # Local fallback enums when external memory_service is unavailable
+    """Return (MemoryType, ImportanceLevel) — local enums.
+
+    The legacy `_vendor.common.memory_service` was deleted; the new memory
+    architecture (predacore_core_crate + predacore.memory) doesn't need these
+    enum types in its public API, so handlers carry their own definitions.
+    """
     from enum import Enum, IntEnum
 
     class MemoryType(str, Enum):

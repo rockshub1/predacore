@@ -241,6 +241,89 @@ def _summarize_openclaw_markdown(markdown_body: str, limit_chars: int = 2400) ->
 
 
 # ---------------------------------------------------------------------------
+# Workspace + first-touch context (T5d)
+# ---------------------------------------------------------------------------
+
+
+def _workspace_context_block(config: PredaCoreConfig) -> str:
+    """Tell the model where it is and what state the memory index is in.
+
+    Three pieces of context the LLM can't otherwise know:
+      1. **Active project_id** — auto-detected from the daemon's cwd. Lets
+         the model qualify recall calls and avoid leaking memory across
+         projects in suggestions.
+      2. **Bulk-index status** — has this project been bulk-indexed? If not,
+         semantic recall only sees files that have been edited (auto-trigger
+         path). The model should suggest ``memory_bulk_index`` before
+         answering codebase-wide questions.
+      3. **Active channels** — so the model phrases its first-touch prompt
+         in a tone that fits the medium (CLI confirmation vs. spoken
+         summary vs. chat message).
+
+    Returns an empty string if project detection fails — never blocks prompt
+    assembly. Filesystem-only (cheap stat), so safe to call per-prompt.
+    """
+    try:
+        from .memory.project_id import default_project
+        from .memory.workspace import has_been_bulk_indexed
+    except ImportError:
+        return ""
+
+    cwd = os.getcwd()
+    try:
+        project_id = default_project(cwd, refresh=True) or ""
+    except Exception:  # noqa: BLE001 — project detection must never break prompt build
+        return ""
+    if not project_id or project_id == "all":
+        return ""
+
+    try:
+        indexed = has_been_bulk_indexed(project_id, home_dir=config.home_dir)
+    except Exception:  # noqa: BLE001
+        indexed = False
+
+    enabled = list(config.channels.enabled or []) or ["cli"]
+    channels_line = ", ".join(enabled)
+
+    if indexed:
+        return (
+            "\n---\n\n"
+            "## \U0001F4C1 Active Workspace\n\n"
+            f"- **Project**: `{project_id}`\n"
+            f"- **CWD**: `{cwd}`\n"
+            f"- **Memory**: bulk-indexed (semantic recall covers the whole tree)\n"
+            f"- **Channels**: {channels_line}\n\n"
+            "For codebase questions, prefer `memory_recall` or "
+            "`git_semantic_search` over reading files one-by-one. Edits/writes "
+            "auto-reindex (touch hook), so the index stays current."
+        )
+
+    return (
+        "\n---\n\n"
+        "## \U0001F4C1 Active Workspace — First Touch\n\n"
+        f"- **Project**: `{project_id}`\n"
+        f"- **CWD**: `{cwd}`\n"
+        "- **Memory**: NOT yet bulk-indexed for this project\n"
+        f"- **Channels**: {channels_line}\n\n"
+        "If the user asks anything that needs codebase-wide understanding, "
+        "do this first:\n"
+        "  1. `memory_scan_directory` to size the work (file count + estimate)\n"
+        "  2. Confirm with the user, then `memory_bulk_index` to embed everything\n\n"
+        "Match the confirmation tone to whichever channel the user is on — for "
+        "each one in **Channels** above, use that platform's native conventions: "
+        "terminals get a one-line confirmation; chat apps get a short message in "
+        "the platform's native formatting (mrkdwn, markdown, HTML, or plain text); "
+        "email gets a short subject + 2-line body; the speak/voice_note tools "
+        "produce a spoken summary with no markdown. Always include the file count "
+        "and ETA, and always confirm before indexing. New channels added to "
+        "PredaCore inherit the same rule: identify the channel, match its native "
+        "style.\n\n"
+        "After bulk completes, the marker file suppresses future first-touch "
+        "prompts. Use `memory_bulk_abort` if the user changes their mind mid-run."
+    )
+
+
+# ---------------------------------------------------------------------------
 # System prompt builder
 # ---------------------------------------------------------------------------
 
@@ -255,7 +338,7 @@ def _get_system_prompt(config: PredaCoreConfig) -> str:
     appends the runtime context (trust, provider, channels, etc.) below.
     """
     trust = config.security.trust_level
-    policy = TRUST_POLICIES.get(trust, TRUST_POLICIES["normal"])
+    policy = TRUST_POLICIES.get(trust, TRUST_POLICIES["ask_everytime"])
 
     sections: list[str] = []
 
@@ -336,6 +419,13 @@ answer directly from this Runtime Context section — it's already the authorita
   the source of truth for how to use that tool correctly.
 """
     sections.append(runtime)
+
+    # T5d — workspace + first-touch awareness. Cheap (one stat per call);
+    # appended last so it ranks below identity but above journal/runtime
+    # context that the model treats as authoritative.
+    workspace_block = _workspace_context_block(config)
+    if workspace_block:
+        sections.append(workspace_block)
 
     prompt = "\n".join(sections)
     logger.info("System prompt assembled: %d chars", len(prompt))

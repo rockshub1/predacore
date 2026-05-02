@@ -229,6 +229,11 @@ class SlackAdapter(ChannelAdapter):
         if self._message_handler is None:
             return
 
+        # T9 — Slack allows ~1 edit/sec/msg via chat.update. Buffer streams
+        # tokens into a single message; on flush we leave the final content
+        # in place so threading / metadata is preserved.
+        buffer = self._make_stream_buffer(channel, thread_ts)
+
         outgoing = await self._message_handler(
             IncomingMessage(
                 channel=self.channel_name,
@@ -240,7 +245,46 @@ class SlackAdapter(ChannelAdapter):
                     "slack_thread_ts": thread_ts,
                     "is_dm": is_dm,
                 },
-            )
+            ),
+            stream_fn=buffer.feed,
         )
         if outgoing is not None:
-            await self.send(outgoing)
+            handle = await buffer.flush(outgoing.text)
+            if handle is None:
+                await self.send(outgoing)
+
+    def _make_stream_buffer(
+        self, channel: str, thread_ts: str | None,
+    ) -> "StreamingMessageBuffer":
+        """Per-event Slack streaming buffer.
+
+        Uses chat.postMessage for the placeholder and chat.update for
+        edits. Slack's per-message limit is 4000 chars (text field) —
+        we cap at 3500 to leave room for the cursor + multibyte runes.
+        """
+        from .streaming import StreamingMessageBuffer
+
+        async def _send_initial(text: str):
+            if self._web_client is None:
+                return None
+            kwargs = {"channel": channel, "text": text, "mrkdwn": True}
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            resp = await self._web_client.chat_postMessage(**kwargs)
+            # Slack returns a `ts` (timestamp) that uniquely identifies the
+            # message in the channel — that's what chat.update needs.
+            return resp.get("ts") if hasattr(resp, "get") else resp["ts"]
+
+        async def _edit(ts: str, text: str):
+            if self._web_client is None or ts is None:
+                return
+            await self._web_client.chat_update(
+                channel=channel, ts=ts, text=text,
+            )
+
+        return StreamingMessageBuffer(
+            send_initial=_send_initial,
+            edit=_edit,
+            edit_min_interval_seconds=1.0,
+            max_chars=3500,
+        )

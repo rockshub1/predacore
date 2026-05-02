@@ -54,6 +54,12 @@ MIN_REPUTATION_SCORE = 30.0
 # Quarantine reports needed to auto-recall from all instances
 QUARANTINE_THRESHOLD = 2
 
+# Per-(instance, skill) report rate limit. Without this, an attacker can
+# spin up N instances and have each one spam success reports for their own
+# malicious skill, gaming the reputation formula upward. With it, even a
+# 100-instance sybil farm produces at most one vote per skill per window.
+REPORT_RATE_LIMIT_SECONDS: float = 3600.0  # 1 hour per (instance, skill)
+
 
 # ---------------------------------------------------------------------------
 # Sync status
@@ -245,7 +251,22 @@ class Flame:
                 )
                 continue
 
-            # SCAN POINT 3: Receiver-side scan
+            # SCAN POINT 3: Signature first, then static analysis.
+            # Without verifying the signature here, a peer could tamper with
+            # a published genome (e.g. swap read_file → run_command with an
+            # exfil target) and the receiver would only catch what its own
+            # scanner flags. The signature lock ensures the recipe matches
+            # what the creator signed.
+            if not genome.verify_signature():
+                logger.warning(
+                    "Rejected incoming skill '%s' — invalid signature "
+                    "(tampered in transit, or signing-secret mismatch)",
+                    genome.name,
+                )
+                self._report_quarantine(genome.id)
+                quarantined += 1
+                continue
+
             report = self._scanner.scan(genome)
 
             if report.verdict == ScanVerdict.REJECTED:
@@ -297,10 +318,40 @@ class Flame:
 
     # -- Reputation system --------------------------------------------------
 
+    def _can_report_now(self, genome_id: str) -> bool:
+        """Rate-limit: at most one report per (instance, skill) per window.
+
+        A sybil-farm attacker spawning many instances still only gets one
+        report per skill per window per instance, capping the rate at which
+        malicious reputation can be inflated.
+        """
+        rep = self._reputation.get(genome_id, {})
+        reports = rep.get("reports", [])
+        now = time.time()
+        for r in reversed(reports):
+            if r.get("instance_id") != self._instance_id:
+                continue
+            if now - float(r.get("timestamp", 0)) < REPORT_RATE_LIMIT_SECONDS:
+                logger.debug(
+                    "Skipping reputation report for %s — instance %s rate-limited",
+                    genome_id, self._instance_id,
+                )
+                return False
+            break
+        return True
+
     def report_success(self, genome_id: str) -> None:
         """Report a successful skill execution to the Flame."""
         if genome_id not in self._reputation:
             self._reputation[genome_id] = {"reports": [], "quarantine_votes": []}
+
+        if not self._can_report_now(genome_id):
+            # Local trust still updates — only the network reputation
+            # report is rate-limited. Local execution truth is fine.
+            if genome_id in self._local_skills:
+                self._local_skills[genome_id].trust.record_success()
+                self._save_local_skill(self._local_skills[genome_id])
+            return
 
         self._reputation[genome_id]["reports"].append({
             "instance_id": self._instance_id,
@@ -320,6 +371,12 @@ class Flame:
         """Report a failed skill execution to the Flame."""
         if genome_id not in self._reputation:
             self._reputation[genome_id] = {"reports": [], "quarantine_votes": []}
+
+        if not self._can_report_now(genome_id):
+            if genome_id in self._local_skills:
+                self._local_skills[genome_id].trust.record_failure()
+                self._save_local_skill(self._local_skills[genome_id])
+            return
 
         self._reputation[genome_id]["reports"].append({
             "instance_id": self._instance_id,

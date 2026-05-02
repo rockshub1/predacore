@@ -209,7 +209,7 @@ class TrustPolicyEvaluator:
 
     def __init__(
         self,
-        trust_level: str = "normal",
+        trust_level: str = "ask_everytime",
         permission_mode: str = "auto",
         remember_approvals: bool = True,
         home_dir: str = "",
@@ -218,7 +218,7 @@ class TrustPolicyEvaluator:
         self._trust_level = trust_level
         self._permission_mode = permission_mode
         self._policy: dict[str, Any] = TRUST_POLICIES.get(
-            trust_level, TRUST_POLICIES["normal"]
+            trust_level, TRUST_POLICIES["ask_everytime"]
         )
         self._approval_history: ApprovalHistory | None = None
         if remember_approvals and home_dir:
@@ -246,12 +246,20 @@ class TrustPolicyEvaluator:
         if self._permission_mode == "ask":
             return True  # Always ask
 
-        # Default: use trust policy (only reached if permission_mode == "auto")
-        if "*" in self._policy.get("auto_approve_tools", []):
+        # Trust policy lookup. Explicit per-tool entries win over wildcards so
+        # ask_everytime can auto-approve known read-only tools while still
+        # confirming everything else (including unknown / custom tools).
+        auto_approve = self._policy.get("auto_approve_tools", [])
+        require_confirm = self._policy.get("require_confirmation", [])
+        if tool_name in auto_approve:
             return False
-        if "*" in self._policy.get("require_confirmation", []):
+        if tool_name in require_confirm:
             return True
-        return tool_name in self._policy.get("require_confirmation", [])
+        if "*" in auto_approve:
+            return False
+        if "*" in require_confirm:
+            return True
+        return False
 
     def is_blocked(
         self,

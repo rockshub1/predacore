@@ -9,7 +9,7 @@ Loads config from (in priority order):
 Usage:
     from predacore.config import load_config
     cfg = load_config()
-    print(cfg.trust_level)  # "normal"
+    print(cfg.trust_level)  # "ask_everytime"
 """
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ class ChannelConfig:
 class SecurityConfig:
     """Security and ethical governance settings."""
 
-    trust_level: str = "normal"  # yolo | normal | paranoid
+    trust_level: str = "ask_everytime"  # yolo | ask_everytime
     permission_mode: str = "auto"  # auto | ask | deny — tool approval mode
     approval_timeout: int = 30  # seconds to wait for user approval
     remember_approvals: bool = True  # persist approval decisions
@@ -182,7 +182,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "enterprise": {
         "channels": {"enabled": ["webchat"]},
         "security": {
-            "trust_level": "normal",
+            "trust_level": "ask_everytime",
             **_MAXED_RESOURCES_SECURITY,
         },
         "launch": {
@@ -671,6 +671,24 @@ def _dict_to_config(data: dict[str, Any]) -> PredaCoreConfig:
     )
 
 
+_VALID_TRUST_LEVELS = frozenset({"yolo", "ask_everytime"})
+
+
+def _normalize_trust_level(level: str) -> str:
+    """Map legacy 3-level trust names to the current 2-level model.
+
+    Pre-PR-1.5 the trust ladder was yolo / normal / paranoid. The new model
+    keeps yolo (auto-approve all) and collapses normal + paranoid into a
+    single ask_everytime level (confirm every mutating tool, auto-approve
+    reads). Anything unrecognised falls through to the safe default.
+    """
+    if level == "yolo":
+        return "yolo"
+    if level in {"ask_everytime", "normal", "paranoid"}:
+        return "ask_everytime"
+    return "ask_everytime"
+
+
 def load_config(
     config_path: str | None = None, profile_override: str | None = None
 ) -> PredaCoreConfig:
@@ -701,6 +719,11 @@ def load_config(
 
     # 5) Convert to config object
     cfg = _dict_to_config(merged)
+
+    # 5b) Normalize legacy trust levels (pre-PR-1.5: yolo | normal | paranoid).
+    #     Old configs and env vars with "normal"/"paranoid" map to ask_everytime
+    #     so existing setups keep working without manual edits.
+    cfg.security.trust_level = _normalize_trust_level(cfg.security.trust_level)
 
     # 6) Ensure directories exist
     for dir_path in [
@@ -753,15 +776,15 @@ def save_default_config(
     Args:
         path: Destination config path (defaults to DEFAULT_CONFIG_FILE).
         provider: LLM provider name.
-        trust_level: yolo | normal. If None, derived from profile
-            (enterprise→normal, beast→yolo).
+        trust_level: yolo | ask_everytime. If None, derived from profile
+            (enterprise→ask_everytime, beast→yolo).
         model: Optional explicit model name (empty = auto-detect).
         channels: List of channel names to enable. Defaults to ["webchat"].
         profile: Launch profile — enterprise | beast (default: enterprise).
     """
     # Derive trust_level from profile if not explicitly set.
     if trust_level is None:
-        trust_level = "yolo" if profile == "beast" else "normal"
+        trust_level = "yolo" if profile == "beast" else "ask_everytime"
     target = Path(path) if path else DEFAULT_CONFIG_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -812,7 +835,7 @@ channels:
 {_channels_block}
 
 security:
-  trust_level: {trust_level}   # yolo | normal
+  trust_level: {trust_level}   # yolo | ask_everytime
   # Every other security setting inherits from the launch profile preset.
 
 daemon:

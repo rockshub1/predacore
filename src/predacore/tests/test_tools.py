@@ -98,8 +98,8 @@ class TestToolNameEnum:
     """Tests for ToolName enum — all members, str semantics, frozensets."""
 
     def test_total_member_count(self):
-        """ToolName should have exactly 55 members."""
-        assert len(ToolName) == 55
+        """ToolName should have a minimum baseline of members (catches accidental deletions)."""
+        assert len(ToolName) >= 55
 
     @pytest.mark.parametrize(
         "member,value",
@@ -199,15 +199,71 @@ class TestToolStatusEnum:
 class TestWriteAndReadOnlySets:
     """Tests for WRITE_TOOLS and READ_ONLY_TOOLS frozensets."""
 
-    def test_write_tools_contents(self):
+    def test_write_tools_core_filesystem_and_exec(self):
+        """Original four — filesystem + shell + code execution."""
         assert ToolName.WRITE_FILE in WRITE_TOOLS
         assert ToolName.RUN_COMMAND in WRITE_TOOLS
         assert ToolName.PYTHON_EXEC in WRITE_TOOLS
         assert ToolName.EXECUTE_CODE in WRITE_TOOLS
-        assert len(WRITE_TOOLS) == 4
 
-    def test_read_only_tools_count(self):
-        assert len(READ_ONLY_TOOLS) == 16
+    def test_write_tools_persistent_state(self):
+        """Tools that mutate SQLite / .env / identity files."""
+        for tool in [
+            ToolName.MEMORY_STORE,
+            ToolName.MEMORY_DELETE,
+            ToolName.SECRET_SET,
+            ToolName.IDENTITY_UPDATE,
+            ToolName.JOURNAL_APPEND,
+            ToolName.CRON_TASK,
+        ]:
+            assert tool in WRITE_TOOLS, f"{tool} mutates state but not in WRITE_TOOLS"
+
+    def test_write_tools_registry_mutations(self):
+        """Tools that mutate channel / MCP / API / skill registries."""
+        for tool in [
+            ToolName.CHANNEL_CONFIGURE,
+            ToolName.CHANNEL_INSTALL,
+            ToolName.MARKETPLACE_INSTALL,
+            ToolName.MCP_ADD,
+            ToolName.MCP_REMOVE,
+            ToolName.MCP_RESTART,
+            ToolName.API_ADD,
+            ToolName.API_REMOVE,
+            ToolName.SKILL_EVOLVE,
+            ToolName.SKILL_ENDORSE,
+        ]:
+            assert tool in WRITE_TOOLS, f"{tool} mutates a registry but not in WRITE_TOOLS"
+
+    def test_write_tools_transitive(self):
+        """Tools that call arbitrary downstream tools — conservatively included."""
+        for tool in [
+            ToolName.MULTI_AGENT,
+            ToolName.TOOL_PIPELINE,
+            ToolName.MARKETPLACE_INVOKE,
+            ToolName.API_CALL,
+            ToolName.OPENCLAW_DELEGATE,
+        ]:
+            assert tool in WRITE_TOOLS, f"{tool} is transitive and must invalidate cache conservatively"
+
+    def test_write_tools_excludes_clearly_read_only(self):
+        """Read-only tools must NOT be in WRITE_TOOLS — would needlessly invalidate cache."""
+        for tool in [
+            ToolName.READ_FILE,
+            ToolName.LIST_DIRECTORY,
+            ToolName.MEMORY_RECALL,
+            ToolName.MEMORY_GET,
+            ToolName.IDENTITY_READ,
+            ToolName.SECRET_LIST,
+            ToolName.MCP_LIST,
+            ToolName.API_LIST,
+            ToolName.GIT_CONTEXT,
+            ToolName.STRATEGIC_PLAN,
+        ]:
+            assert tool not in WRITE_TOOLS, f"{tool} is read-only but flagged as write"
+
+    def test_read_only_tools_minimum_count(self):
+        """Minimum baseline (catches accidental deletions; lets new tools land)."""
+        assert len(READ_ONLY_TOOLS) >= 16
 
     def test_read_only_does_not_intersect_write(self):
         """Read-only and write tools should be disjoint."""
@@ -407,26 +463,29 @@ class TestBuiltinToolsRaw:
 
 
 class TestTrustPolicies:
-    """Tests for TRUST_POLICIES dict — yolo / normal / paranoid."""
+    """Tests for TRUST_POLICIES dict — yolo / ask_everytime."""
 
-    def test_three_levels_exist(self):
-        assert "yolo" in TRUST_POLICIES
-        assert "normal" in TRUST_POLICIES
-        assert "paranoid" in TRUST_POLICIES
+    def test_two_levels_exist(self):
+        assert set(TRUST_POLICIES.keys()) == {"yolo", "ask_everytime"}
 
     def test_yolo_auto_approves_all(self):
         assert "*" in TRUST_POLICIES["yolo"]["auto_approve_tools"]
         assert TRUST_POLICIES["yolo"]["require_confirmation"] == []
 
-    def test_normal_requires_confirmation_for_writes(self):
-        confirm_list = TRUST_POLICIES["normal"]["require_confirmation"]
-        assert "write_file" in confirm_list
-        assert "run_command" in confirm_list
-        assert "python_exec" in confirm_list
+    def test_ask_everytime_auto_approves_only_read_only_tools(self):
+        auto = TRUST_POLICIES["ask_everytime"]["auto_approve_tools"]
+        # Read-only tools are explicitly auto-approved
+        assert "read_file" in auto
+        assert "list_directory" in auto
+        assert "memory_recall" in auto
+        # Write tools are NOT auto-approved (will fall through to require_confirmation)
+        assert "write_file" not in auto
+        assert "run_command" not in auto
+        assert "memory_store" not in auto
 
-    def test_paranoid_confirms_everything(self):
-        assert "*" in TRUST_POLICIES["paranoid"]["require_confirmation"]
-        assert TRUST_POLICIES["paranoid"]["auto_approve_tools"] == []
+    def test_ask_everytime_wildcard_confirmation(self):
+        """ask_everytime confirms everything not in auto_approve via wildcard."""
+        assert "*" in TRUST_POLICIES["ask_everytime"]["require_confirmation"]
 
     def test_each_policy_has_required_keys(self):
         required = {"description", "require_confirmation", "auto_approve_tools"}
@@ -468,11 +527,36 @@ class TestToolCircuitBreaker:
         time.sleep(0.02)
         assert cb.state("tool_a") == CircuitState.HALF_OPEN
 
-    def test_half_open_to_closed_on_success(self):
+    def test_half_open_to_closed_on_threshold_successes(self):
+        """Default success_threshold=3 — three clean probes needed to close."""
         cb = ToolCircuitBreaker(failure_threshold=1, cooldown_seconds=0.01)
         cb.record_failure("tool_a")
         time.sleep(0.02)
         assert cb.state("tool_a") == CircuitState.HALF_OPEN
+        cb.record_success("tool_a")
+        assert cb.state("tool_a") == CircuitState.HALF_OPEN, "1 success isn't enough — flap-prevention"
+        cb.record_success("tool_a")
+        assert cb.state("tool_a") == CircuitState.HALF_OPEN, "2 successes isn't enough either"
+        cb.record_success("tool_a")
+        assert cb.state("tool_a") == CircuitState.CLOSED, "3 successes closes the breaker"
+
+    def test_half_open_one_success_then_failure_reopens(self):
+        """A lucky single success doesn't close — the circuit reopens on next failure."""
+        cb = ToolCircuitBreaker(failure_threshold=1, cooldown_seconds=0.01)
+        cb.record_failure("tool_a")
+        time.sleep(0.02)
+        assert cb.state("tool_a") == CircuitState.HALF_OPEN
+        cb.record_success("tool_a")  # 1 of 3 probes
+        cb.record_failure("tool_a")  # probe failed → reopens
+        assert cb.state("tool_a") == CircuitState.OPEN
+
+    def test_custom_success_threshold(self):
+        """success_threshold is configurable."""
+        cb = ToolCircuitBreaker(
+            failure_threshold=1, cooldown_seconds=0.01, success_threshold=1,
+        )
+        cb.record_failure("tool_a")
+        time.sleep(0.02)
         cb.record_success("tool_a")
         assert cb.state("tool_a") == CircuitState.CLOSED
 
@@ -589,6 +673,31 @@ class TestToolResultCache:
         count = cache.invalidate("read_file")
         assert count == 1
         assert cache.get("web_search", {"query": "test"}) == "results"
+
+    def test_origin_scoping_isolates_callers(self):
+        """Same tool + args from different origins must NOT share cache entries."""
+        cache = ToolResultCache(max_entries=10)
+        cache.put("read_file", {"path": "/a"}, "alice-data", origin="user:alice")
+        cache.put("read_file", {"path": "/a"}, "bob-data", origin="user:bob")
+        # Each origin sees only its own value
+        assert cache.get("read_file", {"path": "/a"}, origin="user:alice") == "alice-data"
+        assert cache.get("read_file", {"path": "/a"}, origin="user:bob") == "bob-data"
+        # A third origin sees nothing
+        assert cache.get("read_file", {"path": "/a"}, origin="user:charlie") is None
+
+    def test_origin_default_empty_isolates_from_named_origins(self):
+        """Calls without an explicit origin don't leak into named-origin caches."""
+        cache = ToolResultCache(max_entries=10)
+        cache.put("read_file", {"path": "/a"}, "default-data")  # origin=""
+        cache.put("read_file", {"path": "/a"}, "alice-data", origin="user:alice")
+        assert cache.get("read_file", {"path": "/a"}) == "default-data"
+        assert cache.get("read_file", {"path": "/a"}, origin="user:alice") == "alice-data"
+
+    def test_origin_same_args_same_origin_hits(self):
+        """Sanity: same origin + same args = cache hit."""
+        cache = ToolResultCache(max_entries=10)
+        cache.put("web_search", {"q": "rust"}, "result-1", origin="agent:planner")
+        assert cache.get("web_search", {"q": "rust"}, origin="agent:planner") == "result-1"
 
     def test_invalidate_on_write_file(self):
         cache = ToolResultCache(max_entries=10)
@@ -759,6 +868,48 @@ class TestAdaptiveTimeoutTracker:
         tracker = AdaptiveTimeoutTracker()
         assert tracker.get_timeout("unknown", 45.0) == 45.0
 
+    def test_p95_is_not_max(self):
+        """Regression: previously `int(n * 0.95)` returned `n-1` (the max),
+        making adaptive timeouts inflate to the slowest observed call.
+        With nearest-rank percentile, P95 of 1..20 is 19, not 20.
+        """
+        tracker = AdaptiveTimeoutTracker(
+            window_size=20, min_samples=3, multiplier=1.0, min_floor=0.0,
+        )
+        for v in range(1, 21):  # samples 1.0, 2.0, ..., 20.0
+            tracker.record("tool", float(v))
+        # P95 of [1..20] (nearest-rank) = item 19 = 19.0; multiplier=1.0
+        # So adaptive = 19.0; with ceiling=100.0, effective = 19.0.
+        # If the bug were still here, we'd get 20.0 (the max).
+        timeout = tracker.get_timeout("tool", 100.0)
+        assert timeout == pytest.approx(19.0)
+
+    def test_p95_single_sample_is_that_sample(self):
+        """Edge case: only one sample (after min_samples lowered) — P95 = it."""
+        tracker = AdaptiveTimeoutTracker(
+            window_size=20, min_samples=1, multiplier=1.0, min_floor=0.0,
+        )
+        tracker.record("tool", 7.0)
+        assert tracker.get_timeout("tool", 100.0) == pytest.approx(7.0)
+
+    def test_concurrent_record_no_race(self):
+        """With the new lock, concurrent record() calls don't lose samples."""
+        import threading
+        tracker = AdaptiveTimeoutTracker(window_size=200)
+
+        def record_50():
+            for i in range(50):
+                tracker.record("tool", float(i))
+
+        threads = [threading.Thread(target=record_50) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # 4 × 50 = 200 records; window_size caps at 200.
+        # The deque is bounded, so all 200 fit without truncation.
+        assert len(tracker._latencies["tool"]) == 200
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 7. TrustPolicyEvaluator
@@ -773,17 +924,16 @@ class TestTrustPolicyEvaluator:
         assert not ev.requires_confirmation("run_command")
         assert not ev.requires_confirmation("write_file")
 
-    def test_normal_requires_confirmation_for_writes(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+    def test_ask_everytime_requires_confirmation_for_writes(self):
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         assert ev.requires_confirmation("write_file")
         assert ev.requires_confirmation("run_command")
         assert not ev.requires_confirmation("read_file")
 
-    def test_paranoid_confirms_everything(self):
-        ev = TrustPolicyEvaluator(trust_level="paranoid")
-        assert ev.requires_confirmation("read_file")
-        assert ev.requires_confirmation("run_command")
-        assert ev.requires_confirmation("web_search")
+    def test_ask_everytime_confirms_unknown_tools(self):
+        """Unknown tools fall through to wildcard require_confirmation — safe default."""
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
+        assert ev.requires_confirmation("custom_unknown_tool")
 
     def test_permission_mode_ask(self):
         ev = TrustPolicyEvaluator(trust_level="yolo", permission_mode="ask")
@@ -796,46 +946,46 @@ class TestTrustPolicyEvaluator:
         assert ev.requires_confirmation("run_command")
 
     def test_is_blocked_by_blocked_tools(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         result = ev.is_blocked("web_search", blocked_tools=["web_search"])
         assert result is not None
         assert "blocked" in result.lower()
 
     def test_is_blocked_by_allowed_list(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         result = ev.is_blocked("web_search", allowed_tools=["read_file"])
         assert result is not None
         assert "not in the allowed" in result
 
     def test_not_blocked_when_in_allowed_list(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         result = ev.is_blocked("read_file", allowed_tools=["read_file"])
         assert result is None
 
     def test_assess_risk_low(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         ctx = ev.assess_risk("read_file", {"path": "/tmp/safe.txt"})
         assert isinstance(ctx, ApprovalContext)
         assert ctx.risk_level == "low"
         assert ctx.reversible is True
 
     def test_assess_risk_critical_pattern(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         ctx = ev.assess_risk("run_command", {"command": "sudo rm -rf /"})
         assert ctx.risk_level == "critical"
         assert ctx.reversible is False
 
     def test_trust_level_property(self):
-        ev = TrustPolicyEvaluator(trust_level="paranoid")
-        assert ev.trust_level == "paranoid"
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
+        assert ev.trust_level == "ask_everytime"
 
     def test_describe_impact(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         desc = ev._describe_impact("run_command", {"command": "ls"})
         assert "shell command" in desc.lower()
 
     def test_describe_impact_fallback(self):
-        ev = TrustPolicyEvaluator(trust_level="normal")
+        ev = TrustPolicyEvaluator(trust_level="ask_everytime")
         desc = ev._describe_impact("custom_tool", {})
         assert "custom_tool" in desc
 
@@ -1291,24 +1441,25 @@ class TestEthicalCompliance:
         )
         assert result is None
 
-    def test_paranoid_blocks_forbidden(self):
+    def test_ask_everytime_blocks_forbidden(self):
         result = _check_ethical_compliance(
-            "run_command", {"command": "drop_table users"}, "paranoid"
+            "run_command", {"command": "drop_table users"}, "ask_everytime"
         )
         assert result is not None
         assert "Blocked" in result
         assert "drop_table" in result
 
-    def test_normal_warns_but_allows(self):
+    def test_unknown_trust_level_blocks(self):
+        """Unknown levels (e.g. typos) are treated as non-yolo and block forbidden keywords."""
         result = _check_ethical_compliance(
-            "run_command", {"command": "drop_table users"}, "normal"
+            "run_command", {"command": "drop_table users"}, "unknown"
         )
-        # Normal mode only warns (returns None)
-        assert result is None
+        assert result is not None
+        assert "Blocked" in result
 
     def test_no_match_allows(self):
         result = _check_ethical_compliance(
-            "run_command", {"command": "ls -la"}, "paranoid"
+            "run_command", {"command": "ls -la"}, "ask_everytime"
         )
         assert result is None
 
@@ -1797,3 +1948,520 @@ class TestRiskMap:
 
     def test_unknown_tool_defaults_none(self):
         assert _RISK_MAP.get("nonexistent") is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR 6: Strict memory-scope validation (input boundary)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestNormalizeScopeStrict:
+    """Strict scope validation rejects typos at the request boundary.
+
+    Pre-PR-6 behavior: ``normalize_memory_scope("teaam")`` silently
+    returned ``"global"``, so an agent intending team-scoped storage
+    would write into the global bucket — cross-team leakage.
+    """
+
+    def test_valid_scopes_pass_through(self):
+        from predacore.tools.handlers.memory import _normalize_scope_strict
+        for scope in ["global", "agent", "team", "scratch"]:
+            assert _normalize_scope_strict(scope, tool="memory_store") == scope
+
+    def test_case_normalized(self):
+        from predacore.tools.handlers.memory import _normalize_scope_strict
+        assert _normalize_scope_strict("TEAM", tool="memory_store") == "team"
+        assert _normalize_scope_strict("  Global  ", tool="memory_store") == "global"
+
+    def test_empty_defaults_to_global(self):
+        from predacore.tools.handlers.memory import _normalize_scope_strict
+        assert _normalize_scope_strict("", tool="memory_store") == "global"
+        assert _normalize_scope_strict(None, tool="memory_store") == "global"
+
+    def test_typo_rejected(self):
+        """The exact bug from the audit — 'teaam' must not silently downgrade."""
+        from predacore.tools.handlers._context import ToolError, ToolErrorKind
+        from predacore.tools.handlers.memory import _normalize_scope_strict
+        with pytest.raises(ToolError) as exc_info:
+            _normalize_scope_strict("teaam", tool="memory_store")
+        assert exc_info.value.kind == ToolErrorKind.INVALID_PARAM
+        assert "Unknown memory scope" in str(exc_info.value)
+
+    def test_unknown_scope_rejected(self):
+        from predacore.tools.handlers._context import ToolError
+        from predacore.tools.handlers.memory import _normalize_scope_strict
+        with pytest.raises(ToolError):
+            _normalize_scope_strict("public", tool="memory_recall")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR 8: Trust-tiered resource caps
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestTrustTieredCaps:
+    """yolo gets the wide caps; ask_everytime gets the safer ones.
+
+    Reverses the earlier "remove all limits" sweep that gave every agent
+    yolo-tier resource ceilings regardless of trust level — a runaway
+    python_exec could OOM the daemon, a desktop_control could camp on the
+    Accessibility framework for 5 minutes, etc.
+    """
+
+    def test_desktop_timeout_yolo_higher_than_ask(self):
+        from predacore.tools.handlers.desktop import _DESKTOP_TIMEOUT_BY_TRUST
+        assert _DESKTOP_TIMEOUT_BY_TRUST["yolo"] > _DESKTOP_TIMEOUT_BY_TRUST["ask_everytime"]
+
+    def test_desktop_timeout_ask_everytime_capped(self):
+        """ask_everytime cap should be at most a couple of minutes."""
+        from predacore.tools.handlers.desktop import _DESKTOP_TIMEOUT_BY_TRUST
+        assert _DESKTOP_TIMEOUT_BY_TRUST["ask_everytime"] <= 120.0, (
+            "ask_everytime desktop_control timeout > 2 minutes — "
+            "users will hit it as a stall, not a safety brake"
+        )
+
+    def test_desktop_timeout_default_falls_back_to_safe(self):
+        """Unknown trust level → falls back to ask_everytime cap, not yolo."""
+        from predacore.tools.handlers.desktop import (
+            _DESKTOP_TIMEOUT_BY_TRUST,
+            _DESKTOP_TIMEOUT_DEFAULT,
+        )
+        assert _DESKTOP_TIMEOUT_DEFAULT == _DESKTOP_TIMEOUT_BY_TRUST["ask_everytime"]
+        assert _DESKTOP_TIMEOUT_DEFAULT < _DESKTOP_TIMEOUT_BY_TRUST["yolo"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR T5a: Bulk index wiring
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestBulkIndexWiring:
+    """The bulk-index tool pair must be classified, registered, and routed correctly."""
+
+    def test_bulk_index_in_write_tools(self):
+        """memory_bulk_index mutates state — must invalidate cache."""
+        assert ToolName.MEMORY_BULK_INDEX in WRITE_TOOLS
+
+    def test_scan_directory_in_read_only(self):
+        """memory_scan_directory is dry-run; safe to auto-approve."""
+        assert ToolName.MEMORY_SCAN_DIRECTORY in READ_ONLY_TOOLS
+
+    def test_bulk_and_scan_disjoint_classification(self):
+        assert ToolName.MEMORY_BULK_INDEX not in READ_ONLY_TOOLS
+        assert ToolName.MEMORY_SCAN_DIRECTORY not in WRITE_TOOLS
+
+    def test_handler_map_routes_both_tools(self):
+        from predacore.tools.handlers import HANDLER_MAP
+        assert ToolName.MEMORY_BULK_INDEX in HANDLER_MAP
+        assert ToolName.MEMORY_SCAN_DIRECTORY in HANDLER_MAP
+
+    def test_registry_has_both_tools(self):
+        from predacore.tools.registry import build_full_registry
+        reg = build_full_registry()
+        assert reg.has("memory_bulk_index")
+        assert reg.has("memory_scan_directory")
+
+    def test_bulk_index_requires_confirmation(self):
+        """Multi-minute mutating op should not auto-execute under ask_everytime."""
+        from predacore.tools.registry import TRUST_POLICIES
+        auto_approve = TRUST_POLICIES["ask_everytime"]["auto_approve_tools"]
+        assert "memory_bulk_index" not in auto_approve, (
+            "bulk index is a long mutating operation — must require confirmation"
+        )
+
+    def test_scan_directory_auto_approved(self):
+        """Dry-run scan is safe; agents should call it freely."""
+        from predacore.tools.registry import TRUST_POLICIES
+        auto_approve = TRUST_POLICIES["ask_everytime"]["auto_approve_tools"]
+        assert "memory_scan_directory" in auto_approve
+
+
+class TestBulkIndexEngine:
+    """UnifiedMemoryStore.bulk_index_directory + scan_directory shape tests.
+
+    These don't require BGE — they verify the walker, ignore-filter, and
+    return-shape contracts. Heavyweight 'does it actually index?' tests
+    are covered by the production benchmark.
+    """
+
+    def test_default_ignore_includes_tests_and_docs(self):
+        """The built-in ignore list must skip the discussion-heavy dirs we
+        validated in PR T5 — tests/, docs/, evals/, defaults/."""
+        from predacore.memory.store import UnifiedMemoryStore
+        defaults = set(UnifiedMemoryStore._BULK_DEFAULT_IGNORE)
+        for required in ("tests/", "docs/", "evals/", "defaults/"):
+            assert required in defaults, f"{required} missing from default ignore list"
+
+    def test_indexable_suffixes_cover_common_languages(self):
+        from predacore.memory.store import UnifiedMemoryStore
+        suffixes = UnifiedMemoryStore._BULK_INDEXABLE_SUFFIXES
+        for required in (".py", ".rs", ".md", ".js", ".ts", ".go"):
+            assert required in suffixes
+
+    @pytest.mark.asyncio
+    async def test_scan_directory_returns_zero_for_empty(self, tmp_path):
+        """Scanning an empty dir returns zero indexable files."""
+        from predacore.memory.store import UnifiedMemoryStore
+        store = UnifiedMemoryStore.__new__(UnifiedMemoryStore)
+        result = await store.scan_directory(tmp_path)
+        assert result["indexable_files"] == 0
+        assert result["estimated_minutes_cold"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_scan_directory_counts_indexable_only(self, tmp_path):
+        """Mix of indexable + non-indexable files: only indexable counted."""
+        (tmp_path / "code.py").write_text("def f(): return 1")
+        (tmp_path / "doc.md").write_text("# README")
+        (tmp_path / "binary.png").write_bytes(b"\x89PNG\r\n")
+        (tmp_path / "ignored.log").write_text("logs")
+        from predacore.memory.store import UnifiedMemoryStore
+        store = UnifiedMemoryStore.__new__(UnifiedMemoryStore)
+        result = await store.scan_directory(tmp_path)
+        assert result["indexable_files"] == 2
+        assert ".py" in result["by_suffix"]
+        assert ".md" in result["by_suffix"]
+        assert ".png" not in result["by_suffix"]
+        assert ".log" not in result["by_suffix"]
+
+    @pytest.mark.asyncio
+    async def test_scan_directory_respects_default_ignore(self, tmp_path):
+        """tests/ is in default ignore — files inside are not counted."""
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass")
+        (tmp_path / "main.py").write_text("def main(): pass")
+        from predacore.memory.store import UnifiedMemoryStore
+        store = UnifiedMemoryStore.__new__(UnifiedMemoryStore)
+        result = await store.scan_directory(tmp_path)
+        assert result["indexable_files"] == 1, (
+            "files under tests/ should be excluded by default ignore"
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_directory_extra_ignore_patterns(self, tmp_path):
+        """Caller-supplied patterns layer on top of defaults."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "a.py").write_text("a = 1")
+        (tmp_path / "src" / "b.py").write_text("b = 2")
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "deploy.py").write_text("# deploy")
+        from predacore.memory.store import UnifiedMemoryStore
+        store = UnifiedMemoryStore.__new__(UnifiedMemoryStore)
+        baseline = await store.scan_directory(tmp_path)
+        with_filter = await store.scan_directory(
+            tmp_path, ignore_patterns=["scripts/"],
+        )
+        assert baseline["indexable_files"] == 3
+        assert with_filter["indexable_files"] == 2
+
+    @pytest.mark.asyncio
+    async def test_scan_directory_nonexistent_path(self, tmp_path):
+        from predacore.memory.store import UnifiedMemoryStore
+        store = UnifiedMemoryStore.__new__(UnifiedMemoryStore)
+        result = await store.scan_directory(tmp_path / "does-not-exist")
+        assert result.get("error") == "not_a_directory"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR T5b: Workspace tracker + abort + status + first-touch markers
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestAbortToken:
+    """AbortToken is the cooperative-cancel primitive for bulk-index."""
+
+    def test_default_not_aborted(self):
+        from predacore.memory.workspace import AbortToken
+        t = AbortToken()
+        assert not t.is_aborted
+        assert t.reason == ""
+
+    def test_request_abort_sets_flag_and_reason(self):
+        from predacore.memory.workspace import AbortToken
+        t = AbortToken()
+        t.request_abort("user said stop")
+        assert t.is_aborted
+        assert t.reason == "user said stop"
+
+    def test_reset_clears_state(self):
+        from predacore.memory.workspace import AbortToken
+        t = AbortToken()
+        t.request_abort("test")
+        t.reset()
+        assert not t.is_aborted
+        assert t.reason == ""
+
+    def test_thread_safe_reads(self):
+        """Reading is_aborted from a thread that DIDN'T set it must work."""
+        from predacore.memory.workspace import AbortToken
+        t = AbortToken()
+        results = []
+
+        def reader():
+            results.append(t.is_aborted)
+
+        t.request_abort("from main")
+        for _ in range(4):
+            th = threading.Thread(target=reader)
+            th.start()
+            th.join()
+        assert all(results)
+
+
+class TestMemoryIndexStatus:
+    """MemoryIndexStatus is the read-side of bulk-index progress."""
+
+    def test_default_idle(self):
+        from predacore.memory.workspace import MemoryIndexStatus
+        s = MemoryIndexStatus()
+        assert s.state == "idle"
+        assert s.progress_pct == 0.0
+        assert s.elapsed_sec is None
+
+    def test_begin_progress_finish_lifecycle(self):
+        from predacore.memory.workspace import MemoryIndexStatus
+        s = MemoryIndexStatus()
+        s.begin(project_id="p", root="/tmp/p", files_total=10)
+        assert s.state == "indexing"
+        s.update(indexed_delta=3, chunks_delta=42)
+        s.update(skipped_delta=2)
+        assert s.files_indexed == 3
+        assert s.files_skipped == 2
+        assert s.chunks_added == 42
+        # Progress = (indexed + skipped) / total
+        assert s.progress_pct == 50.0
+        s.finish(success=True)
+        assert s.state == "ready"
+
+    def test_begin_resets_counters(self):
+        """A second begin() must zero counters from the previous run."""
+        from predacore.memory.workspace import MemoryIndexStatus
+        s = MemoryIndexStatus()
+        s.begin(project_id="p1", root="/x", files_total=5)
+        s.update(indexed_delta=5)
+        s.finish(success=True)
+        s.begin(project_id="p2", root="/y", files_total=3)
+        assert s.files_indexed == 0
+        assert s.project_id == "p2"
+
+    def test_mark_aborted_state(self):
+        from predacore.memory.workspace import MemoryIndexStatus
+        s = MemoryIndexStatus()
+        s.begin(project_id="p", root="/p", files_total=10)
+        s.mark_aborted("user requested")
+        assert s.state == "aborted"
+        assert s.last_error and "user requested" in s.last_error
+
+    def test_to_dict_shape(self):
+        from predacore.memory.workspace import MemoryIndexStatus
+        s = MemoryIndexStatus()
+        s.begin(project_id="p", root="/r", files_total=4)
+        d = s.to_dict()
+        for required in (
+            "state", "project_id", "files_total", "files_indexed",
+            "progress_pct", "elapsed_sec",
+        ):
+            assert required in d
+
+
+class TestWorkspaceTracker:
+    """WorkspaceTracker fires listeners on project_id change."""
+
+    def test_listener_fires_on_change(self, tmp_path, monkeypatch):
+        from predacore.memory.project_id import clear_cache
+        from predacore.memory.workspace import WorkspaceTracker
+        tracker = WorkspaceTracker()
+        events = []
+        tracker.on_change(lambda old, new: events.append((old, new)))
+
+        # First call: tracker had None current; it'll fire on first detection
+        clear_cache()
+        # Use PREDACORE_MEMORY_PROJECT for deterministic project resolution
+        monkeypatch.setenv("PREDACORE_MEMORY_PROJECT", "alpha")
+        new = tracker.check_change()
+        assert new == "alpha"
+        assert events == [(None, "alpha")]
+
+        # No change → no event
+        events.clear()
+        tracker.check_change()
+        assert events == []
+
+        # Project flip
+        monkeypatch.setenv("PREDACORE_MEMORY_PROJECT", "beta")
+        new = tracker.check_change()
+        assert new == "beta"
+        assert events == [("alpha", "beta")]
+
+
+class TestFirstTouchMarker:
+    """has_been_bulk_indexed / mark_bulk_indexed / mark_bulk_unindexed."""
+
+    def test_unmarked_project_returns_false(self, tmp_path):
+        from predacore.memory.workspace import has_been_bulk_indexed
+        assert not has_been_bulk_indexed("proj-x", home_dir=str(tmp_path))
+
+    def test_mark_then_check(self, tmp_path):
+        from predacore.memory.workspace import has_been_bulk_indexed, mark_bulk_indexed
+        mark_bulk_indexed(
+            "proj-x", files_indexed=42, chunks_added=300,
+            home_dir=str(tmp_path),
+        )
+        assert has_been_bulk_indexed("proj-x", home_dir=str(tmp_path))
+
+    def test_unmark_clears(self, tmp_path):
+        from predacore.memory.workspace import (
+            has_been_bulk_indexed, mark_bulk_indexed, mark_bulk_unindexed,
+        )
+        mark_bulk_indexed("p", files_indexed=1, chunks_added=1, home_dir=str(tmp_path))
+        assert has_been_bulk_indexed("p", home_dir=str(tmp_path))
+        mark_bulk_unindexed("p", home_dir=str(tmp_path))
+        assert not has_been_bulk_indexed("p", home_dir=str(tmp_path))
+
+    def test_all_sentinel_never_marked(self, tmp_path):
+        """``project_id="all"`` is the cross-project sentinel; never marker-able."""
+        from predacore.memory.workspace import has_been_bulk_indexed, mark_bulk_indexed
+        mark_bulk_indexed("all", files_indexed=1, chunks_added=1, home_dir=str(tmp_path))
+        assert not has_been_bulk_indexed("all", home_dir=str(tmp_path))
+
+
+class TestNewBulkTools:
+    """memory_bulk_abort + memory_index_status wiring."""
+
+    def test_abort_in_handler_map(self):
+        from predacore.tools.handlers import HANDLER_MAP
+        assert ToolName.MEMORY_BULK_ABORT in HANDLER_MAP
+
+    def test_status_in_handler_map(self):
+        from predacore.tools.handlers import HANDLER_MAP
+        assert ToolName.MEMORY_INDEX_STATUS in HANDLER_MAP
+
+    def test_status_auto_approved(self):
+        from predacore.tools.registry import TRUST_POLICIES
+        auto = TRUST_POLICIES["ask_everytime"]["auto_approve_tools"]
+        assert "memory_index_status" in auto
+
+    def test_abort_NOT_auto_approved(self):
+        """Killing an indexing run is non-trivial; user should see the prompt."""
+        from predacore.tools.registry import TRUST_POLICIES
+        auto = TRUST_POLICIES["ask_everytime"]["auto_approve_tools"]
+        assert "memory_bulk_abort" not in auto
+
+    @pytest.mark.asyncio
+    async def test_abort_handler_no_op_when_idle(self, tmp_path):
+        """If no bulk is running, abort returns no_op (don't crash)."""
+        import json as _json
+
+        from predacore.memory.workspace import get_global_status
+        from predacore.tools.handlers.memory import handle_memory_bulk_abort
+
+        # Reset status to idle so the test is deterministic
+        get_global_status().state = "idle"
+
+        class _Ctx:
+            pass
+
+        result = await handle_memory_bulk_abort({}, _Ctx())
+        parsed = _json.loads(result)
+        assert parsed["status"] == "no_op"
+
+    @pytest.mark.asyncio
+    async def test_status_handler_returns_dict(self, tmp_path):
+        import json as _json
+
+        from predacore.tools.handlers.memory import handle_memory_index_status
+
+        class _Ctx:
+            pass
+
+        result = await handle_memory_index_status({}, _Ctx())
+        parsed = _json.loads(result)
+        assert "state" in parsed
+        assert "files_indexed" in parsed
+        assert "progress_pct" in parsed
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR 9.5: Skill evolution + Flame sync feature flags
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSkillEvolutionFeatureFlags:
+    """Crystallization + Flame sync are off by default. Power users opt in."""
+
+    def test_evolution_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("PREDACORE_SKILL_EVOLUTION_ENABLED", raising=False)
+        from predacore.tools.handlers.collective_intelligence import (
+            _skill_evolution_enabled,
+        )
+        assert _skill_evolution_enabled() is False
+
+    def test_evolution_enabled_via_env(self, monkeypatch):
+        monkeypatch.setenv("PREDACORE_SKILL_EVOLUTION_ENABLED", "1")
+        from predacore.tools.handlers.collective_intelligence import (
+            _skill_evolution_enabled,
+        )
+        assert _skill_evolution_enabled() is True
+
+    def test_sync_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("PREDACORE_FLAME_SYNC_ENABLED", raising=False)
+        from predacore.tools.handlers.collective_intelligence import (
+            _flame_sync_enabled,
+        )
+        assert _flame_sync_enabled() is False
+
+    def test_sync_enabled_via_env(self, monkeypatch):
+        monkeypatch.setenv("PREDACORE_FLAME_SYNC_ENABLED", "yes")
+        from predacore.tools.handlers.collective_intelligence import (
+            _flame_sync_enabled,
+        )
+        assert _flame_sync_enabled() is True
+
+    def test_evolve_handler_returns_disabled_message(self, monkeypatch):
+        """skill_evolve must NOT touch the crystallizer when disabled."""
+        import asyncio
+        monkeypatch.delenv("PREDACORE_SKILL_EVOLUTION_ENABLED", raising=False)
+        from predacore.tools.handlers.collective_intelligence import handle_skill_evolve
+
+        # ToolContext with no crystallizer attached — proves we don't
+        # reach the lazy init at all when disabled.
+        class _StubCtx:
+            pass
+        result = asyncio.run(handle_skill_evolve({"action": "detect"}, _StubCtx()))
+        import json
+        parsed = json.loads(result)
+        assert parsed["status"] == "disabled"
+        assert "PREDACORE_SKILL_EVOLUTION_ENABLED" in parsed["message"]
+
+    def test_sync_handler_returns_disabled_message(self, monkeypatch):
+        """collective_intelligence_sync no-ops cleanly when sync flag is off."""
+        import asyncio
+        monkeypatch.delenv("PREDACORE_FLAME_SYNC_ENABLED", raising=False)
+        from predacore.tools.handlers.collective_intelligence import (
+            handle_collective_intelligence_sync,
+        )
+
+        class _StubCtx:
+            pass
+        result = asyncio.run(handle_collective_intelligence_sync({}, _StubCtx()))
+        import json
+        parsed = json.loads(result)
+        assert parsed["status"] == "disabled"
+        assert "PREDACORE_FLAME_SYNC_ENABLED" in parsed["message"]
+
+    def test_status_handler_reports_flags_when_disabled(self, monkeypatch):
+        """Status tool always works — it's how users discover the gates."""
+        import asyncio
+        monkeypatch.delenv("PREDACORE_SKILL_EVOLUTION_ENABLED", raising=False)
+        monkeypatch.delenv("PREDACORE_FLAME_SYNC_ENABLED", raising=False)
+        from predacore.tools.handlers.collective_intelligence import (
+            handle_collective_intelligence_status,
+        )
+
+        class _StubCtx:
+            pass
+        result = asyncio.run(handle_collective_intelligence_status({}, _StubCtx()))
+        import json
+        parsed = json.loads(result)
+        assert parsed["feature_flags"]["skill_evolution_enabled"] is False
+        assert parsed["feature_flags"]["flame_sync_enabled"] is False
+        assert parsed["status"] == "disabled"

@@ -199,7 +199,13 @@ class Gateway:
         logger.info("Gateway initialized")
 
     def register_channel(self, adapter: ChannelAdapter) -> None:
-        """Register a channel adapter with the gateway."""
+        """Register a channel adapter with the gateway.
+
+        Wires the message handler and (if the adapter supports it) injects
+        the gateway reference. Idempotent on duplicate names — re-registering
+        the same name overwrites the existing adapter; callers that want
+        replacement semantics should ``unregister_channel`` first.
+        """
         adapter.set_message_handler(self.handle_message)
         # Inject gateway reference for adapters that need it (e.g., webchat dashboard)
         if hasattr(adapter, "set_gateway"):
@@ -207,6 +213,53 @@ class Gateway:
         self._channels[adapter.channel_name] = adapter
         self.health_monitor.register(adapter.channel_name)
         logger.info("Registered channel: %s", adapter.channel_name)
+
+    async def unregister_channel(self, name: str) -> bool:
+        """Stop the adapter and remove it from the gateway. Idempotent.
+
+        Returns True if a channel was actually removed, False if no channel
+        was registered under that name. Used by the live channel hot-attach
+        path (T8) — when ``channel_configure`` flips a channel from enabled
+        to disabled, the daemon calls this to detach the adapter without
+        restarting the process.
+        """
+        adapter = self._channels.pop(name, None)
+        if adapter is None:
+            return False
+        try:
+            await adapter.stop()
+            self.health_monitor.mark_stopped(name)
+        except (OSError, RuntimeError) as exc:
+            # Mark stopped anyway — the adapter is detached either way.
+            self.health_monitor.mark_stopped(name)
+            logger.warning("Channel %s stop raised during detach: %s", name, exc)
+        # Drop from health monitor's registry so its row doesn't leak.
+        try:
+            self.health_monitor.unregister(name)
+        except AttributeError:
+            pass  # older health monitor without unregister()
+        logger.info("Unregistered channel: %s", name)
+        return True
+
+    async def start_channel(self, name: str) -> bool:
+        """Start a single registered channel adapter. Used by hot-attach.
+
+        Distinct from :meth:`start` (which starts ALL channels at gateway
+        boot). The hot-attach path calls ``register_channel`` then this so
+        the new adapter goes live without touching the others.
+        """
+        adapter = self._channels.get(name)
+        if adapter is None:
+            return False
+        try:
+            await adapter.start()
+            self.health_monitor.mark_started(name)
+            logger.info("Channel started (hot-attach): %s", name)
+            return True
+        except (OSError, ConnectionError, RuntimeError) as exc:
+            self.health_monitor.mark_disconnected(name, str(exc))
+            logger.error("Channel %s failed hot-attach start: %s", name, exc)
+            return False
 
     async def start(self) -> None:
         """Start the gateway and all registered channels."""
@@ -339,6 +392,169 @@ class Gateway:
                 text=f"Failed to switch to {target}: {e}",
                 session_id="",
             )
+
+    def _handle_channel_command(
+        self, text: str, user_id: str, channel: str
+    ) -> OutgoingMessage | None:
+        """Handle ``/channel ...`` — list/inspect/scaffold channel adapters.
+
+        Subcommands (all read-only or local; no token-in-chat):
+          ``/channel`` or ``/channel list``
+              Show enabled / available / installable channels with the
+              secret status of each.
+          ``/channel info <name>``
+              Describe a channel: required env vars, current state.
+          ``/channel scaffold <name>``
+              Generate a starter adapter under ~/.predacore/channels/.
+              Same effect as the ``predacore channel scaffold`` CLI.
+
+        Setting secrets and enabling are intentionally NOT done here —
+        users should use the ``secret_set`` tool or write env vars
+        directly. That keeps tokens out of chat history (which is logged
+        on most platforms).
+        """
+        stripped = text.strip()
+        lower = stripped.lower()
+        if not (lower == "/channel" or lower.startswith("/channel ")):
+            return None
+
+        parts = stripped.split()
+        action = parts[1].lower() if len(parts) >= 2 else "list"
+        arg = parts[2] if len(parts) >= 3 else ""
+
+        from .channels.registry import get_registry
+        from .tools.handlers.channels import CHANNEL_SECRETS
+
+        home_dir = getattr(self.config, "home_dir", None) or "~/.predacore"
+        registry = get_registry(home_dir)
+        registry.scan(refresh=True)
+        available = set(registry.available())
+        enabled = set(getattr(self.config.channels, "enabled", []) or [])
+
+        if action == "list":
+            lines = ["**Channels**\n"]
+            lines.append("**Enabled** (live):")
+            if enabled:
+                for name in sorted(enabled):
+                    secrets_state = self._channel_secrets_state(name, CHANNEL_SECRETS)
+                    lines.append(f"  • `{name}` {secrets_state}")
+            else:
+                lines.append("  (none — enable one with `secret_set` + config edit)")
+            lines.append("")
+            lines.append("**Available but not enabled:**")
+            extra = sorted(available - enabled)
+            if extra:
+                for name in extra:
+                    needed = CHANNEL_SECRETS.get(name, [])
+                    if needed:
+                        lines.append(f"  • `{name}` — needs {len(needed)} secret(s)")
+                    else:
+                        lines.append(f"  • `{name}` — no secrets required")
+            else:
+                lines.append("  (none — install more with `channel_install <package>`)")
+            lines.append("")
+            lines.append(
+                "Use `/channel info <name>` for setup details, or "
+                "`/channel scaffold <name>` to write a starter adapter."
+            )
+            return OutgoingMessage(
+                channel=channel, user_id=user_id,
+                text="\n".join(lines), session_id="",
+            )
+
+        if action == "info":
+            if not arg:
+                return OutgoingMessage(
+                    channel=channel, user_id=user_id,
+                    text="Usage: `/channel info <name>`",
+                    session_id="",
+                )
+            name = arg.lower()
+            secrets = CHANNEL_SECRETS.get(name)
+            lines = [f"**Channel: `{name}`**"]
+            if name in available:
+                lines.append("✓ Adapter discovered (built-in / installed / local).")
+            else:
+                lines.append(
+                    f"✗ Adapter NOT discovered. Install via `channel_install "
+                    f"predacore-{name}` or scaffold one with `/channel scaffold {name}`."
+                )
+            lines.append(f"State: **{'enabled' if name in enabled else 'disabled'}**")
+            if secrets is None:
+                lines.append("Secret manifest unknown — see channel docs.")
+            elif not secrets:
+                lines.append("No secrets required.")
+            else:
+                lines.append("\nRequired secrets:")
+                import os as _os
+                for env_var, desc in secrets:
+                    have = "✓ set" if _os.environ.get(env_var) else "✗ missing"
+                    lines.append(f"  • `{env_var}` — {desc}  [{have}]")
+                lines.append(
+                    "\nSet via the `secret_set` tool, or directly: "
+                    "`echo 'KEY=value' >> ~/.predacore/.env`"
+                )
+            return OutgoingMessage(
+                channel=channel, user_id=user_id,
+                text="\n".join(lines), session_id="",
+            )
+
+        if action == "scaffold":
+            if not arg:
+                return OutgoingMessage(
+                    channel=channel, user_id=user_id,
+                    text="Usage: `/channel scaffold <name>` (lowercase snake_case)",
+                    session_id="",
+                )
+            from pathlib import Path
+            from .channels.scaffold import generate_scaffold
+            try:
+                target = generate_scaffold(
+                    arg.lower(),
+                    plugin_dir=Path(home_dir).expanduser() / "channels",
+                )
+            except (FileExistsError, ValueError) as exc:
+                return OutgoingMessage(
+                    channel=channel, user_id=user_id,
+                    text=f"❌ {exc}", session_id="",
+                )
+            return OutgoingMessage(
+                channel=channel, user_id=user_id,
+                text=(
+                    f"✅ Wrote `{target}`\n\n"
+                    f"Fill in the 3 TODO blocks, set the token "
+                    f"(`{arg.upper()}_TOKEN`), then add `{arg}` to "
+                    f"`channels.enabled` in config.yaml. The daemon "
+                    f"hot-attaches it within seconds."
+                ),
+                session_id="",
+            )
+
+        return OutgoingMessage(
+            channel=channel, user_id=user_id,
+            text=(
+                f"Unknown action: `{action}`\n\n"
+                "Try: `/channel list`, `/channel info <name>`, "
+                "or `/channel scaffold <name>`"
+            ),
+            session_id="",
+        )
+
+    @staticmethod
+    def _channel_secrets_state(
+        name: str, manifest: dict[str, list[tuple[str, str]]],
+    ) -> str:
+        """Compact ✓/✗ summary of which env vars exist for a channel."""
+        import os as _os
+        secrets = manifest.get(name)
+        if secrets is None:
+            return "(secrets unknown)"
+        if not secrets:
+            return "(no secrets needed)"
+        missing = [env for env, _ in secrets if not _os.environ.get(env)]
+        if not missing:
+            return f"(all {len(secrets)} secret(s) set)"
+        return f"(missing: {', '.join(missing)})"
 
     def _handle_session_command(
         self, text: str, user_id: str, channel: str
@@ -572,6 +788,14 @@ class Gateway:
         if model_result is not None:
             self._stats["messages_sent"] += 1
             return model_result
+
+        # Handle /channel command — list/inspect/scaffold channel adapters
+        channel_result = self._handle_channel_command(
+            incoming.text, incoming.user_id, incoming.channel
+        )
+        if channel_result is not None:
+            self._stats["messages_sent"] += 1
+            return channel_result
 
         # Handle session management commands before processing
         cmd_result = self._handle_session_command(

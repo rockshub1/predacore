@@ -149,6 +149,11 @@ class DiscordAdapter(ChannelAdapter):
 
         logger.info("Discord DM from %s: %s", message.author.name, content[:100])
 
+        # T9 — Discord allows ~5 edits per 5s on a single message; 1.0s gives
+        # us a comfortable margin. Buffer is per-message and handles the
+        # placeholder + edit cycle.
+        buffer = self._make_stream_buffer(message.channel)
+
         # Show typing indicator
         async with message.channel.typing():
             if self._message_handler:
@@ -161,10 +166,40 @@ class DiscordAdapter(ChannelAdapter):
                             "username": str(message.author),
                             "channel_id": message.channel.id,
                         },
-                    )
+                    ),
+                    stream_fn=buffer.feed,
                 )
 
                 if outgoing:
-                    chunks = _chunk_message(outgoing.text)
-                    for chunk in chunks:
-                        await message.channel.send(chunk)
+                    handle = await buffer.flush(outgoing.text)
+                    if handle is None:
+                        # No streaming happened — fall back to chunked send.
+                        chunks = _chunk_message(outgoing.text)
+                        for chunk in chunks:
+                            await message.channel.send(chunk)
+
+    def _make_stream_buffer(self, channel) -> "StreamingMessageBuffer":
+        """Per-message buffer wired to this Discord channel.
+
+        Discord messages cap at 2000 chars; we set max_chars below that
+        so the cursor + safety margin stay inside the limit. If the final
+        text exceeds 2000 chars, we still flush the FIRST 2000 here and
+        the caller should handle the spillover via _chunk_message — but
+        in practice the gateway already truncates.
+        """
+        from .streaming import StreamingMessageBuffer
+
+        async def _send_initial(text: str):
+            return await channel.send(text)
+
+        async def _edit(msg, text: str):
+            if msg is None:
+                return
+            await msg.edit(content=text)
+
+        return StreamingMessageBuffer(
+            send_initial=_send_initial,
+            edit=_edit,
+            edit_min_interval_seconds=1.0,
+            max_chars=1900,  # Discord 2000-char cap minus headroom
+        )

@@ -1370,6 +1370,112 @@ class TestSSRFProtection:
                 validate_url_ssrf("http://nonexistent.invalid/")
 
 
+class TestSSRFAsyncAndRedirects:
+    """Async SSRF + per-hop redirect validation (PR 5)."""
+
+    async def test_validate_url_ssrf_async_passes_for_public(self):
+        from predacore.auth.security import validate_url_ssrf_async
+        with patch("predacore.auth.security.socket.getaddrinfo") as mock_dns:
+            mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+            assert await validate_url_ssrf_async("https://example.com/") is True
+
+    async def test_validate_url_ssrf_async_blocks_loopback(self):
+        from predacore.auth.security import validate_url_ssrf_async
+        with patch("predacore.auth.security.socket.getaddrinfo") as mock_dns:
+            mock_dns.return_value = [(2, 1, 6, "", ("127.0.0.1", 0))]
+            with pytest.raises(ValueError, match="loopback"):
+                await validate_url_ssrf_async("http://localhost/admin")
+
+    async def test_ssrf_safe_request_blocks_redirect_to_loopback(self):
+        """Public URL → redirect → 127.0.0.1 must be blocked at the redirect hop."""
+        import httpx
+        from predacore.auth.security import ssrf_safe_request
+
+        # Mock httpx transport: first hop returns 302 → http://127.0.0.1/admin
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "trusted.com":
+                return httpx.Response(
+                    302, headers={"Location": "http://127.0.0.1/admin"}
+                )
+            # If we ever reach the loopback target, the test fails — the
+            # SSRF guard should have blocked the redirect first.
+            return httpx.Response(200, text="LEAKED")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            # Mock DNS: trusted.com → public IP, localhost → 127.0.0.1
+            def dns(host, *args, **kwargs):
+                if "trusted" in host:
+                    return [(2, 1, 6, "", ("93.184.216.34", 0))]
+                return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+            with patch("predacore.auth.security.socket.getaddrinfo", side_effect=dns):
+                with pytest.raises(ValueError, match="loopback"):
+                    await ssrf_safe_request(client, "GET", "https://trusted.com/redir")
+
+    async def test_ssrf_safe_request_follows_safe_redirect(self):
+        """Two public hosts in a redirect chain — second hop should succeed."""
+        import httpx
+        from predacore.auth.security import ssrf_safe_request
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "site-a.com":
+                return httpx.Response(
+                    302, headers={"Location": "https://site-b.com/final"}
+                )
+            return httpx.Response(200, text="OK_FROM_B")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("predacore.auth.security.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+                resp = await ssrf_safe_request(client, "GET", "https://site-a.com/start")
+                assert resp.status_code == 200
+                assert resp.text == "OK_FROM_B"
+
+    async def test_ssrf_safe_request_redirect_loop_capped(self):
+        """A long redirect chain must terminate with a clear error, not hang."""
+        import httpx
+        from predacore.auth.security import ssrf_safe_request
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Always redirect to next hop — infinite chain
+            return httpx.Response(
+                302, headers={"Location": f"https://hop-{request.url.path}.com/next"}
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("predacore.auth.security.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+                with pytest.raises(ValueError, match="Too many redirects"):
+                    await ssrf_safe_request(
+                        client, "GET", "https://start.com/", max_redirects=3,
+                    )
+
+    async def test_ssrf_safe_request_303_demotes_to_get(self):
+        """RFC 7231 §6.4.4: 303 See Other always uses GET on the next hop."""
+        import httpx
+        from predacore.auth.security import ssrf_safe_request
+
+        observed_methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed_methods.append(request.method)
+            if request.url.host == "site-a.com":
+                return httpx.Response(
+                    303, headers={"Location": "https://site-b.com/result"}
+                )
+            return httpx.Response(200, text="OK")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("predacore.auth.security.socket.getaddrinfo") as mock_dns:
+                mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 0))]
+                await ssrf_safe_request(
+                    client, "POST", "https://site-a.com/submit", json={"x": 1},
+                )
+        assert observed_methods == ["POST", "GET"], (
+            f"303 should demote POST→GET on next hop, got {observed_methods}"
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 10. JWT middleware — token validation, brute-force protection
 # ═══════════════════════════════════════════════════════════════════════
@@ -1705,3 +1811,102 @@ class TestSandboxPoolCleanup:
             await pool.acquire("s2")
             await pool.stop_cleanup_loop()
         assert len(pool._sandboxes) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Gateway hot-attach / hot-detach (T8)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class _StubAdapter(ChannelAdapter):
+    """Minimal in-memory adapter for hot-attach tests. Tracks lifecycle."""
+
+    channel_name = "stub"
+    channel_capabilities = ()  # type: ignore[assignment]
+
+    def __init__(self, name: str = "stub"):
+        super().__init__()
+        # Override class attr per-instance so multiple stubs coexist.
+        self.channel_name = name  # type: ignore[misc]
+        self.started = False
+        self.stopped = False
+        self.start_should_raise = False
+        self.stop_should_raise = False
+
+    async def start(self):
+        if self.start_should_raise:
+            raise RuntimeError("start exploded")
+        self.started = True
+
+    async def stop(self):
+        if self.stop_should_raise:
+            raise RuntimeError("stop exploded")
+        self.stopped = True
+
+    async def send(self, _msg):
+        return None
+
+
+class TestGatewayHotAttach:
+    """T8 — register/start_channel/unregister_channel happy + sad paths."""
+
+    def _make_gateway(self):
+        from predacore.gateway import Gateway
+        cfg = _make_mock_config(channels_dict={})
+        # Process_fn isn't exercised by these tests — a no-op AsyncMock works.
+        gw = Gateway(config=cfg, process_fn=AsyncMock(return_value="ok"))
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_register_then_start_channel_runs_start(self):
+        gw = self._make_gateway()
+        adapter = _StubAdapter("alpha")
+        gw.register_channel(adapter)
+        assert "alpha" in gw._channels
+        ok = await gw.start_channel("alpha")
+        assert ok is True
+        assert adapter.started is True
+
+    @pytest.mark.asyncio
+    async def test_unregister_channel_stops_and_removes(self):
+        gw = self._make_gateway()
+        adapter = _StubAdapter("beta")
+        gw.register_channel(adapter)
+        await gw.start_channel("beta")
+        removed = await gw.unregister_channel("beta")
+        assert removed is True
+        assert "beta" not in gw._channels
+        assert adapter.stopped is True
+        # health monitor row dropped
+        assert "beta" not in gw.health_monitor._channels
+
+    @pytest.mark.asyncio
+    async def test_unregister_unknown_channel_returns_false(self):
+        gw = self._make_gateway()
+        assert await gw.unregister_channel("ghost") is False
+
+    @pytest.mark.asyncio
+    async def test_start_channel_failure_marks_disconnected(self):
+        gw = self._make_gateway()
+        adapter = _StubAdapter("gamma")
+        adapter.start_should_raise = True
+        gw.register_channel(adapter)
+        ok = await gw.start_channel("gamma")
+        assert ok is False
+        # adapter still registered (start failure doesn't auto-detach), but
+        # marked disconnected on the health monitor
+        record = gw.health_monitor._channels.get("gamma")
+        assert record is not None
+        assert record.status == "disconnected"
+
+    @pytest.mark.asyncio
+    async def test_unregister_swallows_stop_errors(self):
+        """A flaky adapter.stop() must not block detachment."""
+        gw = self._make_gateway()
+        adapter = _StubAdapter("delta")
+        adapter.stop_should_raise = True
+        gw.register_channel(adapter)
+        # Stop raises but unregister still removes it
+        removed = await gw.unregister_channel("delta")
+        assert removed is True
+        assert "delta" not in gw._channels

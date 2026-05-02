@@ -539,6 +539,8 @@ class PredaCoreDaemon:
                 old_model = self.config.llm.model
                 old_provider = self.config.llm.provider
                 old_api_base = self.config.llm.base_url
+                old_channels = set(self.config.channels.enabled or [])
+                new_channels = set(new_cfg.channels.enabled or [])
 
                 # Update system prompt
                 self._core._system_prompt = _get_system_prompt(new_cfg)
@@ -593,9 +595,72 @@ class PredaCoreDaemon:
                 self._core.config = new_cfg
                 if self._gateway is not None:
                     self._gateway.config = new_cfg
+
+                # T8 — live channel hot-attach/detach. Diff the enabled set
+                # before and after; schedule add/remove on the running loop.
+                # Sync function called from a config watcher thread, so we
+                # bridge into asyncio via run_coroutine_threadsafe instead
+                # of awaiting inline.
+                added = new_channels - old_channels - {"cli"}
+                removed = old_channels - new_channels - {"cli"}
+                if (added or removed) and self._gateway is not None:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                self._apply_channel_diff(added, removed),
+                                loop,
+                            )
+                        else:
+                            # Fallback: synchronous apply (only happens if the
+                            # loop has stopped, which means daemon is shutting
+                            # down anyway).
+                            asyncio.run(self._apply_channel_diff(added, removed))
+                    except RuntimeError as exc:
+                        logger.warning("Could not schedule channel diff: %s", exc)
+
                 logger.info("Config hot-reload applied successfully")
             except (OSError, ValueError, KeyError, RuntimeError) as e:
                 logger.error("Config hot-reload failed: %s", e)
+
+    async def _apply_channel_diff(
+        self, added: set[str], removed: set[str],
+    ) -> None:
+        """Hot-attach newly-enabled channels and detach disabled ones.
+
+        Called from :meth:`_on_config_change` whenever ``channels.enabled``
+        changes. Each operation is independent — one adapter failing to
+        attach must not block the others.
+        """
+        if self._gateway is None:
+            return
+        if removed:
+            for name in sorted(removed):
+                try:
+                    await self._gateway.unregister_channel(name)
+                except Exception as exc:  # noqa: BLE001 — never let one channel break the diff
+                    logger.error("Hot-detach %s failed: %s", name, exc)
+        if added:
+            from ..channels.registry import get_registry
+            registry = get_registry(self.config.home_dir)
+            registry.scan(refresh=True)
+            available = registry.available()
+            for name in sorted(added):
+                if name not in available:
+                    logger.warning(
+                        "Hot-attach %s skipped: not in registry. "
+                        "Run channel_install or drop an adapter in "
+                        "~/.predacore/channels/.", name,
+                    )
+                    continue
+                adapter = registry.create(name, self.config)
+                if adapter is None:
+                    continue
+                try:
+                    self._gateway.register_channel(adapter)
+                    await self._gateway.start_channel(name)
+                except (ImportError, RuntimeError, OSError, ValueError) as exc:
+                    logger.error("Hot-attach %s failed: %s", name, exc)
 
     async def _cleanup(self, timeout: float = 15.0) -> None:
         """Graceful shutdown — stop everything and clean up.

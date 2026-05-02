@@ -752,6 +752,169 @@ BUILTIN_TOOLS_RAW = [
         False,
         10,
     ),
+    (
+        {
+            "name": "memory_scan_directory",
+            "description": (
+                "Cheap dry-run counter — what bulk_index_directory WOULD walk "
+                "without actually indexing anything. Returns indexable file "
+                "count, ignored count, breakdown by file suffix, and "
+                "estimated time to bulk-index (cold + warm).\n"
+                "\n"
+                "USE THIS BEFORE memory_bulk_index when you don't know the size "
+                "of an unfamiliar directory — gives you the count and time "
+                "estimate so you can decide between full bulk, scoped bulk "
+                "(just one subpath), or skipping bulk entirely.\n"
+                "\n"
+                "Read-only — no DB rows change. Walk is fast (just os.walk + "
+                "filter, no file reads or embeddings)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to scan",
+                    },
+                    "ignore": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional extra ignore patterns (gitignore syntax) "
+                            "merged with built-in defaults and any "
+                            ".memoryignore / .gitignore in the directory."
+                        ),
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+        "memory",
+        "free",
+        True,
+        False,
+        10,
+    ),
+    (
+        {
+            "name": "memory_bulk_index",
+            "description": (
+                "Walk a directory and reindex every file that survives a "
+                "gitignore-style filter. Built on the same primitive as "
+                "auto-reindex-on-write_file (same chunker, same secret scanner, "
+                "same idempotent purge) — bulk is just 'walker + filter + loop'.\n"
+                "\n"
+                "WHEN TO CALL:\n"
+                "• User asks you to deeply analyze, refactor, or work on a "
+                "project you don't have indexed (e.g. 'help me refactor the "
+                "auth layer in /path/to/repo'). One bulk pays for itself in "
+                "every subsequent recall during the session.\n"
+                "• User explicitly says 'index this folder' / 'learn this codebase'.\n"
+                "• First time predacore is invoked in a fresh project where "
+                "the user plans to stay.\n"
+                "\n"
+                "WHEN NOT TO CALL:\n"
+                "• User just glanced at one file (touch-index handles edits).\n"
+                "• Brief project visit — touch covers what you actually open.\n"
+                "• Directory >5000 files — call memory_scan_directory first, "
+                "then call this with `path` set to a focused subpath "
+                "(e.g. just `src/auth/`).\n"
+                "\n"
+                "Idempotent — files whose mtime matches the indexed version "
+                "are skipped (cheap on warm runs)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to walk + index",
+                    },
+                    "ignore": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional extra ignore patterns (gitignore syntax) "
+                            "merged with built-in defaults and any "
+                            ".memoryignore / .gitignore in the directory."
+                        ),
+                    },
+                    "skip_unchanged": {
+                        "type": "boolean",
+                        "description": (
+                            "If True (default), skip files whose mtime matches "
+                            "the most recent indexed chunk's source_mtime. Set "
+                            "False to force a full re-index (rare; useful after "
+                            "a model upgrade)."
+                        ),
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+        "memory",
+        "expensive",
+        False,   # not parallelizable — single SQLite writer
+        True,    # requires_confirmation=True (multi-minute mutating op)
+        3600,    # generous timeout
+    ),
+    (
+        {
+            "name": "memory_bulk_abort",
+            "description": (
+                "Request a graceful abort of an in-flight bulk index. The "
+                "walker polls between files; the active call returns at the "
+                "next file boundary with aborted=True. Files already indexed "
+                "remain in the DB.\n"
+                "\n"
+                "USE THIS WHEN:\n"
+                "• User says 'stop indexing' / 'cancel' mid-run\n"
+                "• You realize you scoped wrong (a 50K-file repo when only "
+                "src/auth was needed)\n"
+                "• Any non-fatal reason to halt cleanly\n"
+                "\n"
+                "If no bulk is currently running, returns status=no_op."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional reason for the audit trail",
+                    },
+                },
+            },
+        },
+        "memory",
+        "free",
+        True,    # parallelizable (just sets a flag)
+        False,   # no confirmation; aborting is always safe
+        10,
+    ),
+    (
+        {
+            "name": "memory_index_status",
+            "description": (
+                "Return the current bulk-index status: state (idle/indexing/"
+                "ready/failed/aborted), progress (files_indexed / files_total / "
+                "progress_pct), elapsed time, and any errors.\n"
+                "\n"
+                "READ-ONLY. Use when:\n"
+                "• User asks 'is it still indexing?' mid-run\n"
+                "• You need to decide whether to abort or wait\n"
+                "• Diagnostics — what state is the index in right now?"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        "memory",
+        "free",
+        True,
+        False,
+        10,
+    ),
     # ── Agent & Planning ──
     (
         {
@@ -1380,8 +1543,11 @@ BUILTIN_TOOLS_RAW = [
         {
             "name": "image_gen",
             "description": (
-                "Generate images from text descriptions using DALL-E 3 or Stable Diffusion. "
-                "Returns the image path. Requires OPENAI_API_KEY for DALL-E."
+                "Generate images from a text prompt. Provider auto-selects: "
+                "Gemini 2.5 Flash Image (free tier — preferred when "
+                "GEMINI_API_KEY is set) or DALL-E 3 (paid — used when only "
+                "OPENAI_API_KEY is set). Pass provider='gemini' or "
+                "'openai' to force one explicitly."
             ),
             "parameters": {
                 "type": "object",
@@ -1390,17 +1556,21 @@ BUILTIN_TOOLS_RAW = [
                         "type": "string",
                         "description": "Image description / generation prompt",
                     },
+                    "provider": {
+                        "type": "string",
+                        "description": "Force provider: 'gemini' (free) or 'openai' (paid). Omit to auto-pick.",
+                    },
                     "size": {
                         "type": "string",
-                        "description": "Image size: 1024x1024, 1792x1024, 1024x1792 (default: 1024x1024)",
+                        "description": "DALL-E only: 1024x1024, 1792x1024, 1024x1792 (default: 1024x1024)",
                     },
                     "quality": {
                         "type": "string",
-                        "description": "Quality: standard or hd (default: standard)",
+                        "description": "DALL-E only: standard or hd (default: standard)",
                     },
                     "style": {
                         "type": "string",
-                        "description": "Style: vivid or natural (default: vivid)",
+                        "description": "DALL-E only: vivid or natural (default: vivid)",
                     },
                     "save_path": {
                         "type": "string",
@@ -2373,6 +2543,17 @@ MARKETPLACE_TOOLS_RAW = [
 
 
 # ── Trust Level Policies ─────────────────────────────────────────────
+#
+# Two trust levels:
+#   - yolo:           auto-approve everything (no prompts, no keyword guard)
+#   - ask_everytime:  ask for confirmation on every mutating tool; auto-approve
+#                     read-only ones; keyword guard blocks dangerous patterns
+#
+# `auto_approve_tools` is the explicit READ_ONLY_TOOLS list. `require_confirmation`
+# is "*" — meaning "everything not explicitly auto-approved", which captures all
+# write tools AND any unknown tool (safe-by-default for new/custom tools).
+
+from .enums import READ_ONLY_TOOLS
 
 TRUST_POLICIES = {
     "yolo": {
@@ -2382,58 +2563,14 @@ TRUST_POLICIES = {
         "dangerous_tool_check": False,
         "max_auto_exec_cost": 1e18,  # Effectively unlimited, but JSON-serializable
     },
-    "normal": {
-        "description": "Balanced — confirms destructive actions, auto-approves reads",
-        "require_confirmation": [
-            "write_file",
-            "run_command",
-            "python_exec",
-            "execute_code",
-            "desktop_control",
-            "screen_vision",
-            "android_control",
-            # ── Extensibility surface — these mutate config, install code,
-            # or invoke external APIs. All must prompt in normal mode so
-            # docs/AUTONOMY.md's "mutating tools are confirmed" claim holds.
-            "channel_install",
-            "channel_configure",
-            "mcp_add",
-            "mcp_remove",
-            "mcp_restart",
-            "secret_set",
-            "api_add",
-            "api_call",
-            "api_remove",
-        ],
-        "auto_approve_tools": [
-            "read_file",
-            "list_directory",
-            "web_search",
-            "web_scrape",
-            "memory_store",
-            "memory_recall",
-            "memory_get",       # read-only — fetch one row by id
-            "memory_stats",     # read-only — health snapshot
-            "memory_explain",   # read-only — recall trace for debugging
-            # NOTE: memory_delete intentionally NOT auto-approved — it
-            # mutates state irreversibly; requires_confirmation=True at
-            # the schema level forces the executor to ask the user.
-            "deep_search",
-            "semantic_search",
-            "pdf_reader",
-            "diagram",
-            "tool_stats",
-            "tool_pipeline",
-        ],
+    "ask_everytime": {
+        "description": "Ask before every mutating action — read-only tools auto-approved",
+        "require_confirmation": ["*"],  # Everything not in auto_approve falls here
+        "auto_approve_tools": sorted(
+            t.value if hasattr(t, "value") else str(t) for t in READ_ONLY_TOOLS
+        ),
         "dangerous_tool_check": True,
         "max_auto_exec_cost": 0.10,
-    },
-    "paranoid": {
-        "description": "Maximum safety — confirms every action before execution",
-        "require_confirmation": ["*"],
-        "auto_approve_tools": [],
-        "dangerous_tool_check": True,
-        "max_auto_exec_cost": 0.0,
     },
 }
 

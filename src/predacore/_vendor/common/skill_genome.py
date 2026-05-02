@@ -29,12 +29,41 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Secret used for HMAC signing — load from env or fall back to a machine-local key
-_SIGNING_SECRET = os.getenv("PREDACORE_SKILL_SIGNING_SECRET", "").encode("utf-8") or (
-    hashlib.sha256(
+# Secret used for HMAC signing skill genomes.
+#
+# Production deploys MUST set PREDACORE_SKILL_SIGNING_SECRET to a stable
+# value shared across the fleet — otherwise genomes signed in dev/CI fail
+# to verify in prod (containers vs host vs CI all derive different USER +
+# HOME values, so any machine-local fallback would silently invalidate
+# signatures across environments).
+#
+# We retain the machine-derived fallback for single-developer setups so
+# `python -c "from predacore._vendor.common.skill_genome import ..."` works
+# out of the box, but we LOG LOUDLY when it kicks in, and we REFUSE to
+# start with the fallback when PREDACORE_ENV=production.
+
+def _resolve_signing_secret() -> bytes:
+    explicit = os.getenv("PREDACORE_SKILL_SIGNING_SECRET", "").encode("utf-8")
+    if explicit:
+        return explicit
+    env = os.getenv("PREDACORE_ENV", "").strip().lower()
+    if env in ("production", "prod"):
+        raise RuntimeError(
+            "PREDACORE_SKILL_SIGNING_SECRET is required in production. "
+            "Set it to a stable value shared across all instances; without "
+            "it, skill signatures will not verify across containers/CI."
+        )
+    logger.warning(
+        "PREDACORE_SKILL_SIGNING_SECRET not set — falling back to a "
+        "machine-derived key (USER + HOME). Skills signed on this machine "
+        "will NOT verify on others. Set the env var for fleet-wide signing."
+    )
+    return hashlib.sha256(
         (os.getenv("USER", "") + "-" + str(pathlib.Path.home())).encode()
     ).digest()
-)
+
+
+_SIGNING_SECRET = _resolve_signing_secret()
 
 
 # ---------------------------------------------------------------------------

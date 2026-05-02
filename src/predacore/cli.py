@@ -908,7 +908,7 @@ def _print_daemon_missing_panel(port: int) -> None:
 def _print_chat_banner(config, port: int) -> None:
     """Compact session panel — daemon URL, provider, model, trust level."""
     trust_style_map = {
-        "yolo": "#FCA5A5", "normal": "#7DD3FC", "paranoid": "#86EFAC",
+        "yolo": "#FCA5A5", "ask_everytime": "#7DD3FC",
     }
     trust_style = trust_style_map.get(config.security.trust_level, "glass.text")
 
@@ -1384,9 +1384,9 @@ async def _run_setup() -> None:
     ).strip() or "1"
     profile_map = {"1": "enterprise", "2": "beast"}
     profile = profile_map.get(mode_choice, "enterprise")
-    # Trust level derives from profile — enterprise→normal, beast→yolo.
+    # Trust level derives from profile — enterprise→ask_everytime, beast→yolo.
     # Users can edit ~/.predacore/config.yaml to override if they need the other axis.
-    trust_level = "yolo" if profile == "beast" else "normal"
+    trust_level = "yolo" if profile == "beast" else "ask_everytime"
 
     # ── Step 4: Channels ──
     console.print()
@@ -1551,7 +1551,7 @@ async def _run_setup() -> None:
         (provider_display, "bold #7DD3FC"),
         (f"  ({provider})", "glass.text.dim"),
     ))
-    trust_style = {"yolo": "glass.rose", "normal": "glass.cyan", "paranoid": "glass.mint"}.get(trust_level, "glass.text")
+    trust_style = {"yolo": "glass.rose", "ask_everytime": "glass.cyan"}.get(trust_level, "glass.text")
     summary_table.add_row("Trust", Text(trust_level, style=f"bold {trust_style}"))
     summary_table.add_row("Channels", Text(", ".join(selected_channels), style="glass.violet"))
     summary_table.add_row("Config", Text(str(config_path), style="glass.text.dim"))
@@ -1943,6 +1943,22 @@ Commands:
         help="Launch profile override (enterprise | beast)",
     )
 
+    # Channel — scaffold + list helpers (T10a)
+    channel_parser = subparsers.add_parser(
+        "channel", help="List, scaffold, or inspect channel adapters",
+    )
+    channel_sub = channel_parser.add_subparsers(dest="channel_action")
+    channel_sub.add_parser("list", help="List discovered channel adapters")
+    scaffold_p = channel_sub.add_parser(
+        "scaffold",
+        help="Generate a starter adapter in ~/.predacore/channels/<name>.py",
+    )
+    scaffold_p.add_argument("name", help="channel_name (lowercase snake_case)")
+    scaffold_p.add_argument(
+        "--overwrite", action="store_true",
+        help="Overwrite the file if it already exists",
+    )
+
     args = parser.parse_args()
 
     # Load project/user environment before command execution.
@@ -1998,6 +2014,8 @@ Commands:
                 threshold=getattr(args, "threshold", 0.7),
             )
         )
+    elif args.command == "channel":
+        _run_channel_command(args)
     else:
         # No subcommand → the "just install and go" path.
         # bootstrap (if never run) → setup (if no config) → daemon → chat.
@@ -2176,6 +2194,63 @@ def _run_bootstrap(force: bool = False) -> None:
         width=84,
     )))
     console.print()
+
+
+def _run_channel_command(args) -> None:
+    """Dispatcher for ``predacore channel <action> ...`` subcommands.
+
+    Two actions today:
+      * ``list`` — print discovered channel adapters and their source
+        (built-in / entry-point / local). Fast — no daemon needed.
+      * ``scaffold <name>`` — write a starter adapter into
+        ``~/.predacore/channels/<name>.py``. The user fills in three
+        TODO blocks and the daemon's hot-attach (T8) picks it up.
+    """
+    from .channels.registry import get_registry
+    from .channels.scaffold import generate_scaffold
+    from .config import DEFAULT_HOME
+
+    action = getattr(args, "channel_action", None) or "list"
+
+    if action == "list":
+        registry = get_registry(DEFAULT_HOME)
+        registry.scan(refresh=True)
+        rows = registry.describe()
+        if not rows:
+            print("No channel adapters discovered.")
+            print(
+                "Add one with: predacore channel scaffold <name>  "
+                "or pip install predacore-<name>",
+            )
+            return
+        print(f"{'NAME':<14}  {'SOURCE':<32}  CLASS")
+        for row in rows:
+            print(f"{row['name']:<14}  {row['source']:<32}  {row['class']}")
+        return
+
+    if action == "scaffold":
+        name = args.name
+        try:
+            target = generate_scaffold(
+                name,
+                plugin_dir=Path(DEFAULT_HOME).expanduser() / "channels",
+                overwrite=args.overwrite,
+            )
+        except (FileExistsError, ValueError) as exc:
+            print(f"❌ {exc}")
+            print("Re-run with --overwrite to replace, or pick a different name.")
+            return
+        print(f"✅ Wrote {target}")
+        print()
+        print("Next steps:")
+        print(f"  1. Fill in the 3 TODO blocks in {target.name}")
+        print(f"  2. Set the token: export {name.upper()}_TOKEN=...")
+        print(f"  3. Enable it: add '{name}' to channels.enabled in config.yaml")
+        print("  → daemon hot-attaches the new channel within seconds (no restart)")
+        return
+
+    print(f"Unknown action: {action!r}")
+    print("Try: predacore channel list  or  predacore channel scaffold <name>")
 
 
 def _run_doctor(
@@ -2367,16 +2442,10 @@ def _run_doctor(
     # ── Memory ──
     console.print("\n[bold]Memory & Storage[/bold]")
     try:
-        from src.predacore.memory import UnifiedMemoryStore  # type: ignore
+        from src.predacore.memory import UnifiedMemoryStore  # type: ignore  # noqa: F401
         ok("UnifiedMemoryStore available")
     except ImportError:
-        try:
-            from predacore._vendor.common.memory_service import (
-                MemoryService,  # type: ignore
-            )
-            ok("MemoryService (legacy) available")
-        except ImportError:
-            warn("Memory system not importable")
+        warn("Memory system not importable")
 
     # ── Plugins ──
     console.print("\n[bold]Plugins[/bold]")

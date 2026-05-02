@@ -209,8 +209,13 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
                         )
+                        # Trust-tiered cron timeout. yolo keeps the 1h ceiling
+                        # for long-running batch jobs; ask_everytime caps at 5m
+                        # so a runaway `sleep 99999` can't camp on a worker.
+                        _trust = getattr(ctx.config.security, "trust_level", "ask_everytime")
+                        _cron_timeout = 3600 if _trust == "yolo" else 300
                         stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=3600  # raised 300 → 3600 per "remove all limits"
+                            proc.communicate(), timeout=_cron_timeout
                         )
                         task["last_output"] = (stdout or b"").decode(errors="replace")[:200_000]
                         task["last_error"] = (
@@ -218,7 +223,7 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
                             if proc.returncode != 0 else None
                         )
                     except asyncio.TimeoutError:
-                        task["last_error"] = "[Command timed out after 3600s]"
+                        task["last_error"] = f"[Command timed out after {_cron_timeout}s (trust={_trust})]"
                         if proc is not None:
                             try:
                                 proc.kill()

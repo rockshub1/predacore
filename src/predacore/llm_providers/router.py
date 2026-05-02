@@ -249,7 +249,7 @@ class LLMInterface:
         max_retries = self.config.llm.max_retries
 
         for provider_name in self._provider_chain:
-            if self._circuit_breaker.is_open(provider_name):
+            if await self._circuit_breaker.is_open(provider_name):
                 # If auto_fallback is off and this is the primary, tell user
                 if not self.auto_fallback and provider_name == self._provider_name:
                     return self._rate_limit_response(provider_name)
@@ -317,11 +317,11 @@ class LLMInterface:
                         # Exhausted retries for this provider
                         if not self.auto_fallback:
                             # Don't silently fall back — tell the user
-                            self._circuit_breaker.record_failure(provider_name, e)
+                            await self._circuit_breaker.record_failure(provider_name, e)
                             return self._rate_limit_response(provider_name)
 
                     # Not retryable or exhausted (with auto_fallback on)
-                    self._circuit_breaker.record_failure(provider_name, e)
+                    await self._circuit_breaker.record_failure(provider_name, e)
                     errors.append(f"{provider_name}: {e}")
 
                     # If auto_fallback is off, stop after primary provider fails

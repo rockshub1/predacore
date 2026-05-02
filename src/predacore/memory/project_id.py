@@ -39,11 +39,16 @@ _GIT_TIMEOUT_SECONDS = 1.5
 ALL_PROJECTS = "all"
 
 
-def default_project(cwd: str | Path | None = None) -> str:
+def default_project(
+    cwd: str | Path | None = None, *, refresh: bool = False,
+) -> str:
     """Resolve the current project_id with the standard precedence.
 
     Args:
         cwd: Working directory to resolve from. None → process cwd.
+        refresh: When True, bypass the per-cwd TTL cache. Useful for
+            ``WorkspaceTracker.check_change()`` which needs to detect
+            cwd-change-driven project shifts faster than the cache TTL.
 
     Returns:
         Project identifier (always a non-empty string).
@@ -54,11 +59,12 @@ def default_project(cwd: str | Path | None = None) -> str:
 
     target_path = Path(cwd) if cwd else None
     cache_key = str(target_path.resolve()) if target_path else "_cwd_"
-    cached = _PROJECT_CACHE.get(cache_key)
-    if cached is not None:
-        deadline, value = cached
-        if time.monotonic() < deadline:
-            return value
+    if not refresh:
+        cached = _PROJECT_CACHE.get(cache_key)
+        if cached is not None:
+            deadline, value = cached
+            if time.monotonic() < deadline:
+                return value
 
     project = _resolve_uncached(target_path)
     _PROJECT_CACHE[cache_key] = (

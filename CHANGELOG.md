@@ -2,6 +2,58 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.4.0] - 2026-05-02
+
+**Big release.** Channel surface tripled (8 → 24), browser control rewritten to be CDP-only with selector caching for sub-100ms repeats, memory subsystem gets bulk-index + tier-0 git-blob verifiers, full channel scaffold UX, free image generation via Gemini, streaming responses on telegram/discord/slack. 12 PRs (T1–T11) merged into one release.
+
+### Memory subsystem (T5a–T5d, T6, T7)
+- **Bulk indexer**: ``bulk_index_directory(root)`` walks a project tree, applies ``.memoryignore``, embeds every chunk into the unified store. New tools: ``memory_bulk_index``, ``memory_bulk_abort``, ``memory_index_status``, ``memory_scan_directory``.
+- **Workspace tracker**: detects project changes, writes a first-touch marker so the daemon knows when a project is bulk-indexed.
+- **Channel-aware system prompt**: ``_workspace_context_block`` injects "active project + bulk-indexed yes/no + enabled channels" into every system prompt. Adaptive — picks up new channels automatically.
+- **Healer rate brake**: scaled by row count (``max(1000, total_rows // 5)``); audit label-flips no longer count toward the brake (was tripping after BGE upgrades on bulk-indexed DBs).
+- **Tier-0 git-blob verifier**: re-hash the file's bytes git-style; if it matches the stored ``source_blob_sha``, every chunk of that file is verified in one hash op (mtime-keyed cache).
+- **Tier-1.5 AST-symbol verifier**: for ``chunk_kind in {function, class, method}`` chunks, verify the named symbol still exists in the source — survives body edits / refactors that substring matching would reject.
+- **Recall**: 0.967 R@5, 1.000 R@10/R@20 on the production benchmark (164 files, 1711 chunks of real PredaCore source). Defaults: top_k 5 → 10, semantic budget 1200 → 1800 tokens.
+
+### Throughput (T5c)
+- Real batched embedding in Rust kernel (predacore_core 1.2.0): rayon-parallel tokenization, batched forward pass (``EMBED_BATCH_SIZE = 32``), per-row L2 normalize. Replaces the v1 fake-batch (per-text forward inside a loop).
+- Per-file SQLite transaction batching: ``_bulk_store_code_chunks`` purges stale + inserts all new chunks in ONE commit instead of N. Vector-index updates moved outside the DB lock.
+
+### Channels — 8 → 24 (T8, T9, T10, T11)
+- **Hot-attach** (T8): ``channel_configure add`` no longer requires daemon restart. Config-watcher diffs ``channels.enabled`` and live-registers/deregisters adapters.
+- **Streaming** (T9): telegram, discord, slack now stream LLM tokens into a single edited message (~1s rate-limit aware). Watch the assistant type. Signal deferred — its REST API doesn't expose ``editTimestamp`` yet.
+- **Channel scaffold + /channel UX** (T10): ``predacore channel scaffold <name>`` writes a starter adapter; ``/channel list / info / scaffold`` works inside any chat. Per-channel secret manifest covers all 24.
+- **+4 adapters** (T10c): Twilio (SMS), Matrix (matrix-nio), Mastodon (Fediverse DM), Bluesky DM (atproto).
+- **+12 adapters** (T11, research-validated against current SDKs): Mattermost, Rocket.Chat, Vonage SMS, MessageBird SMS, Line, Viber, slixmpp (XMPP), pydle (IRC), Google Chat, Threema Gateway, Zalo OA, KakaoTalk. MS Teams + Skype skipped (``botbuilder-python`` is end-of-life per Microsoft); Wire skipped (bot API still in beta).
+- **Total channel count**: cli, telegram, discord, whatsapp, webchat, slack, signal, imessage, email, twilio, matrix, mastodon, bluesky, mattermost, rocketchat, vonage, messagebird, line, viber, xmpp, irc, google_chat, threema, zalo, kakaotalk = 24 built-in adapters.
+
+### Browser control (T4)
+- **Safari bridge removed** — Chrome / Chromium-derivatives only. Single backend = single well-tested path. ``connect(browser="safari")`` warns and falls back to Chrome (graceful degradation, not a hard break).
+- **Persistent profile** at ``~/.predacore/chrome-profile`` so logins survive across daemon launches without disturbing the user's main Chrome.
+- **Selector cache** (T4b): ``(domain, intent_hash) → xpath`` mapping in a dedicated SQLite table inside the memory DB. Cache hit + CDP verify = ~50ms click. Faster than human reaction time. Cache miss falls through to natural-language resolver, then writes back on success.
+- **Vision plumbing** (T4c): CanvasDetector (cheap JS heuristic), OptInGate (auto/always/off), VisionProvider Protocol, downloader for Samsung/TinyClick (MIT, 0.27B params, ~540MB) — picked over OmniParser (AGPL on icon_detect would force PredaCore to relicense). Inference path lives in ``predacore_core_crate/src/omniparser.rs`` skeleton; final ``ort``-based binding pending follow-up.
+
+### Free image generation (T10d)
+- ``image_gen`` tool now auto-routes: Gemini 2.5 Flash Image (nano-banana, **free tier**) when ``GEMINI_API_KEY`` is set, falls back to DALL-E 3 (paid) when only ``OPENAI_API_KEY`` is set. Pass ``provider="gemini"`` or ``"openai"`` to force one.
+
+### Vendor cleanup (T1, T2, T2.5, T3)
+- SSRF DNS auto-mock conftest — fixes long-standing test flake on real-network paths.
+- Collapsed ``_vendor/common/llm.py`` into ``predacore.llm_providers`` — removed the legacy LLM client wrapper, planner_mcts and daf/scheduler now use the canonical ``LLMInterface``.
+- Removed Knowledge Nexus call sites from planner.py — KN was retired but planner.py still imported its protos.
+- Routed ``services/code_index.py`` directly to Rust BGE — dropped Python embedder fallback.
+
+### Tests
+- 2063 deterministic tests passing (full sweep, no real-network / no AX-permission paths).
+- New tests this release: 11 selector cache + 9 vision plumbing + 9 model loader + 5 healer brake + 5 T7 verifier + 6 streaming + 10 channel scaffold + 4 image_gen routing + 5 hot-attach + 5 workspace block = **69 new tests**.
+
+### Migration notes
+- **No breaking API changes**. Safari users transparently land on Chrome.
+- **New channels need new tokens**: see ``CHANNEL_SECRETS`` in ``tools/handlers/channels.py`` or run ``/channel info <name>`` for the env vars each new adapter wants.
+- **First bootstrap after upgrade**: a new ``TinyClick model`` step appears (defaults to "deferred — will download on first canvas-app page"). Set ``browser.local_vision="always"`` in config if you want eager pre-warm.
+
+### Companion package
+- ``predacore_core`` bumped to **1.2.0** (additive — batched embed, T5c). Auto-published via ``.github/workflows/build-wheels.yml`` on the ``v1.4.0`` tag.
+
 ## [1.3.0] - 2026-04-26
 
 **Operational memory guide moved to code — eliminates the workspace migration gap.**

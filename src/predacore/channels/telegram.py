@@ -31,6 +31,7 @@ import time
 
 from ..config import PredaCoreConfig
 from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
+from .streaming import StreamingMessageBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +457,11 @@ class TelegramAdapter(ChannelAdapter):
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(self._keep_typing(update.message.chat, stop_typing))
 
+        # T9 — streaming buffer. Sends a placeholder, edits as tokens arrive,
+        # falls back gracefully if streaming fails (e.g. group chat permission
+        # quirks). The buffer is per-message; don't share across requests.
+        buffer = self._make_stream_buffer(update.message.chat_id)
+
         try:
             if self._message_handler:
                 outgoing = await self._message_handler(
@@ -472,11 +478,17 @@ class TelegramAdapter(ChannelAdapter):
                             "is_mentioned": is_mentioned,
                             "is_reply_to_bot": is_reply_to_bot,
                         },
-                    )
+                    ),
+                    stream_fn=buffer.feed,
                 )
 
                 if outgoing:
-                    await self.send(outgoing)
+                    handle = await buffer.flush(outgoing.text)
+                    # If the buffer never started streaming (initial send
+                    # failed, or no chunks arrived), fall back to the normal
+                    # send path so the user still gets a reply.
+                    if handle is None:
+                        await self.send(outgoing)
         finally:
             stop_typing.set()
             typing_task.cancel()
@@ -484,6 +496,44 @@ class TelegramAdapter(ChannelAdapter):
                 await typing_task
             except asyncio.CancelledError:
                 pass
+
+    def _make_stream_buffer(self, chat_id: int) -> StreamingMessageBuffer:
+        """Build a per-request StreamingMessageBuffer wired to this chat.
+
+        Telegram allows ~1 edit/sec/message — set the throttle accordingly.
+        Edits use plain text (no parse_mode) during streaming so partial
+        markdown doesn't trip the parser; the final flush re-applies markup
+        through the normal ``send`` path if needed.
+        """
+        async def _send_initial(text: str):
+            if not self._app or not self._app.bot:
+                return None
+            # No parse_mode — partial markdown mid-stream often breaks.
+            msg = await self._app.bot.send_message(chat_id=chat_id, text=text)
+            return msg.message_id
+
+        async def _edit(message_id: int, text: str):
+            if not self._app or not self._app.bot or message_id is None:
+                return
+            try:
+                await self._app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                )
+            except Exception as exc:  # noqa: BLE001 — telegram raises a wide bag
+                # "Message is not modified" is benign — token batch produced
+                # the same display text after truncation. Don't log noise.
+                if "not modified" in str(exc).lower():
+                    return
+                raise
+
+        return StreamingMessageBuffer(
+            send_initial=_send_initial,
+            edit=_edit,
+            edit_min_interval_seconds=1.0,
+            max_chars=TG_MAX_LENGTH - 100,  # leave headroom for cursor + safety
+        )
 
     @staticmethod
     def _is_bot_mentioned(update, context) -> bool:

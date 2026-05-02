@@ -55,6 +55,38 @@ class SubsystemBundle:
     available: list[str] = field(default_factory=list)
 
 
+class _LazyMCTSPlanner:
+    """Defers MCTS planner import+construction until first attribute access.
+
+    Importing `predacore._vendor.core_strategic_engine.planner_mcts` pulls
+    spaCy → thinc → PyTorch (~2GB) into the process — too expensive to do
+    eagerly at boot. This proxy keeps `bundle.mcts_planner` truthy so
+    `available` reporting and feature gates work, but the heavy import only
+    happens on the first real call (e.g. when the `strategic_plan` tool runs).
+    """
+
+    __slots__ = ("_real",)
+
+    def __init__(self) -> None:
+        self._real: Any = None
+
+    def _resolve(self) -> Any:
+        if self._real is None:
+            from predacore._vendor.core_strategic_engine.planner_mcts import (
+                ABMCTSPlanner,
+            )
+            self._real = ABMCTSPlanner(kn_stub=None, egm_stub=None)
+            logger.info("MCTS strategic planner loaded on first use")
+        return self._real
+
+    def __getattr__(self, name: str) -> Any:
+        # Called only for attributes not in __slots__ — i.e. real planner API.
+        return getattr(self._resolve(), name)
+
+    def __bool__(self) -> bool:  # truthy without forcing import
+        return True
+
+
 class SubsystemFactory:
     """Single place to initialize all PredaCore subsystems from config.
 
@@ -89,7 +121,6 @@ class SubsystemFactory:
         # Order doesn't matter — each is independent
         cls._init_desktop(bundle, config)
         cls._init_unified_memory(bundle, config, _home)
-        cls._init_legacy_memory(bundle, config)
         cls._init_mcts(bundle)
         cls._init_voice(bundle)
         cls._init_llm_collab(bundle, config, skip_cli_providers)
@@ -222,67 +253,29 @@ class SubsystemFactory:
                 logger.warning("Unified memory init failed (non-fatal): %s", exc)
 
     @staticmethod
-    def _init_legacy_memory(bundle: SubsystemBundle, config: Any) -> None:
-        try:
-            try:
-                from predacore.services.embedding import get_default_embedding_client
-            except ImportError:
-                from src.predacore.services.embedding import (
-                    get_default_embedding_client,  # type: ignore
-                )
-            try:
-                from predacore._vendor.common.memory_service import MemoryService
-            except ImportError:
-                from predacore._vendor.common.memory_service import (
-                    MemoryService,  # type: ignore
-                )
-
-            bundle.memory_service = MemoryService(
-                data_path=config.memory.persistence_dir,
-                embedding_client=get_default_embedding_client(),
-            )
-            logger.info(
-                "Legacy memory service enabled (dir=%s)",
-                config.memory.persistence_dir,
-            )
-        except (ImportError, OSError, ValueError, RuntimeError, AttributeError, sqlite3.OperationalError) as exc:
-            if "database is locked" in str(exc).lower():
-                logger.info("Legacy memory busy (db lock) — session memory only.")
-            else:
-                logger.warning("Legacy memory init failed: %s", exc)
-
-    @staticmethod
     def _init_mcts(bundle: SubsystemBundle) -> None:
-        # The MCTS planner transitively pulls spaCy → thinc → PyTorch (~2GB)
-        # via _vendor/core_strategic_engine/planner.py's top-level `import spacy`.
-        # It's only used by the rarely-invoked `strategic_plan` tool, so we
-        # skip the eager init unless explicitly enabled. Set
-        # PREDACORE_ENABLE_MCTS_PLANNER=1 to bring it back.
-        enabled = str(
-            os.getenv("PREDACORE_ENABLE_MCTS_PLANNER", "")
+        # MCTS strategic planner is enabled by default but **lazy-loaded**: the
+        # actual import + instantiation only happens on first call to the
+        # `strategic_plan` tool. The planner transitively pulls
+        # spaCy → thinc → PyTorch (~2GB) via _vendor/core_strategic_engine/
+        # planner.py's top-level `import spacy`, so eager init would cost ~10s
+        # on every process start (and break test collection).
+        #
+        # Opt out entirely with PREDACORE_DISABLE_MCTS_PLANNER=1 (smaller
+        # install, planner unavailable).
+        disabled = str(
+            os.getenv("PREDACORE_DISABLE_MCTS_PLANNER", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        if not enabled:
-            logger.debug(
-                "MCTS planner skipped (PREDACORE_ENABLE_MCTS_PLANNER unset). "
-                "Set to 1 to enable; the tool will error until then."
+        if disabled:
+            logger.info(
+                "MCTS planner disabled (PREDACORE_DISABLE_MCTS_PLANNER set). "
+                "The strategic_plan tool will error until re-enabled."
             )
             return
 
-        try:
-            try:
-                from predacore._vendor.core_strategic_engine.planner_mcts import (
-                    ABMCTSPlanner,
-                )
-            except ImportError:
-                from predacore._vendor.core_strategic_engine.planner_mcts import (
-                    ABMCTSPlanner,  # type: ignore
-                )
-
-            bundle.mcts_planner = ABMCTSPlanner(kn_stub=None, egm_stub=None)
-            bundle.available.append("mcts_planner")
-            logger.info("MCTS strategic planner enabled")
-        except (ImportError, OSError, RuntimeError) as exc:
-            logger.warning("MCTS planner init failed (non-fatal): %s", exc)
+        bundle.mcts_planner = _LazyMCTSPlanner()
+        bundle.available.append("mcts_planner")
+        logger.info("MCTS strategic planner registered (lazy-load on first use)")
 
     @staticmethod
     def _init_voice(bundle: SubsystemBundle) -> None:
