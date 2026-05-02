@@ -2,6 +2,40 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.4.2] - 2026-05-02
+
+**Patch — adds the ``predacore upgrade`` CLI command + tightens the
+``predacore_core`` dep floor so pipx upgrades pull the right Rust kernel.**
+
+### Added
+- **``predacore upgrade``** — new CLI subcommand that runs
+  ``pip install -U predacore predacore_core`` against the current Python
+  environment (``sys.executable``). One command refreshes both packages.
+  Solves the pipx ergonomics issue where ``pipx upgrade predacore`` only
+  bumps the top-level package and leaves the Rust kernel stale because
+  the floor still satisfies. Flags: ``--pre`` (allow pre-releases),
+  ``--dry-run`` (print the pip command without executing).
+
+### Changed
+- **Dep floor**: ``predacore_core>=1.1.1`` → ``predacore_core>=1.2.0`` in
+  ``pyproject.toml``. Now ``pipx upgrade predacore`` (and any
+  ``pip install -U predacore``) also picks up the new Rust kernel
+  automatically — the old floor satisfied 1.1.1 so transitive resolution
+  skipped the upgrade. We now genuinely depend on ``predacore_core 1.2.0``
+  (T5c batched embed throughput) so the floor reflects that.
+
+### Tests
+- 4 new tests in ``test_cli_upgrade.py``: dry-run skips subprocess,
+  real run calls pip with the right shape, ``--pre`` injects the flag,
+  pip failures exit with the proper return code.
+
+### Migration impact
+- **Existing pipx users**: ``predacore upgrade`` (or ``pipx upgrade
+  predacore``) now correctly pulls the latest of both packages.
+- **Anyone with ``predacore_core 1.1.1`` pinned** in their constraint
+  file will need to relax the pin or upgrade to 1.2.0 — but 1.2.0 is
+  fully backward-compatible (additive throughput improvement only).
+
 ## [1.4.1] - 2026-05-02
 
 **Patch — fixes the version-skew that left v1.4.0's ``predacore_core``

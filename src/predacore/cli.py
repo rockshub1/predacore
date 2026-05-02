@@ -1876,6 +1876,24 @@ Commands:
     restart_parser = subparsers.add_parser("restart", help="Restart the PredaCore daemon")
     restart_parser.add_argument("--config", "-c", help="Path to config file")
 
+    # Upgrade command — pulls latest predacore + predacore_core into THIS
+    # Python environment. Solves the pipx-upgrade quirk where transitive
+    # deps (predacore_core) don't get re-resolved when the floor still
+    # satisfies. Single user-facing command beats remembering the
+    # ``pipx runpip predacore install -U predacore_core`` workaround.
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help="Upgrade predacore + predacore_core to the latest PyPI versions",
+    )
+    upgrade_parser.add_argument(
+        "--pre", action="store_true",
+        help="Allow pre-release versions (alpha, beta, rc)",
+    )
+    upgrade_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the pip command that would run, but don't execute it",
+    )
+
     # Install command
     install_parser = subparsers.add_parser(
         "install", help="Install as macOS launchd service"
@@ -1987,6 +2005,11 @@ Commands:
         _run_stop(config_path=getattr(args, "config", None))
     elif args.command == "restart":
         _run_restart(config_path=getattr(args, "config", None))
+    elif args.command == "upgrade":
+        _run_upgrade(
+            allow_pre=getattr(args, "pre", False),
+            dry_run=getattr(args, "dry_run", False),
+        )
     elif args.command == "install":
         _run_install(config_path=getattr(args, "config", None))
     elif args.command == "logs":
@@ -2586,6 +2609,38 @@ def _run_stop(config_path: str | None = None) -> None:
                 f"   [muted]PID {current_pid} is still running. "
                 "Stop it manually and remove ~/.predacore/predacore.pid if needed.[/muted]"
             )
+
+
+def _run_upgrade(*, allow_pre: bool = False, dry_run: bool = False) -> None:
+    """Upgrade ``predacore`` + ``predacore_core`` in this Python environment.
+
+    Why this exists (T11.6 follow-up): ``pipx upgrade predacore`` only
+    bumps the top-level package; transitive deps that still satisfy the
+    version constraint don't get re-resolved. Users on pipx ended up with
+    a fresh ``predacore`` Python but a stale ``predacore_core`` Rust
+    kernel. This subcommand calls ``pip install -U`` against
+    ``sys.executable`` so both packages refresh in one go — works inside
+    any pipx venv, regular venv, or system Python.
+    """
+    cmd = [
+        sys.executable, "-m", "pip", "install", "-U", "--no-cache-dir",
+        "predacore", "predacore_core",
+    ]
+    if allow_pre:
+        cmd.insert(cmd.index("install") + 1, "--pre")
+
+    print("→", " ".join(cmd))
+    if dry_run:
+        print("(dry-run — not executing)")
+        return
+
+    try:
+        _subprocess.check_call(cmd)
+    except _subprocess.CalledProcessError as exc:
+        print(f"❌ Upgrade failed (pip exit {exc.returncode}).")
+        print("   Inspect the pip output above for the cause.")
+        sys.exit(exc.returncode)
+    print("✓ Upgraded. Run `predacore --version` to verify.")
 
 
 def _run_restart(config_path: str | None = None) -> None:
