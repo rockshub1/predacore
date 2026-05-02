@@ -2,6 +2,72 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.4.1] - 2026-05-02
+
+**Patch — fixes the version-skew that left v1.4.0's ``predacore_core``
+stuck at 1.1.1 on PyPI even though ``Cargo.toml`` said 1.2.0.**
+
+### Fixed
+- ``src/predacore_core_crate/pyproject.toml`` was missed in the v1.4.0
+  version bump — it still had ``[project] version = "1.1.1"`` while
+  ``Cargo.toml`` correctly said 1.2.0. **Maturin uses pyproject.toml's
+  version for the wheel filename**, so v1.4.0's CI built and published
+  ``predacore_core-1.1.1.tar.gz`` (a republish of the existing 1.1.1)
+  instead of 1.2.0. Bumped pyproject.toml to 1.2.0; this v1.4.1 tag
+  triggers a fresh build that finally lands the real T5c batched-embed
+  ``predacore_core 1.2.0`` on PyPI.
+- Added a ``verify-versions`` CI job in ``.github/workflows/build-wheels.yml``
+  that fails the workflow with a clear error if ``Cargo.toml`` and
+  ``pyproject.toml`` disagree on the version. All four wheel-build jobs
+  and the publish job now ``needs: verify-versions``, so a future skew
+  is caught BEFORE any wheel is built. (Cargo.lock is gitignored so it
+  doesn't matter — the only sources of truth are these two files.)
+
+### Added (T11.5 — benchmark depth)
+- **Verifier-tier instrumentation** in ``_verify_chunk_against_source``:
+  bumps a contextvar-scoped counter on each tier (blob_sha / substring /
+  AST-symbol / line-anchor / failed). The benchmark arms a counter per
+  pass and prints the breakdown so we can see which tier is firing.
+- **Production query set: 30 → 62** queries. Added 32 v1.4.0-specific
+  queries covering: browser (selector cache, vision plumbing, canvas
+  detector), memory (T7 verifiers, healer rate brake, batched store),
+  channels (streaming buffer, scaffold, /channel UX, Twilio/Matrix/
+  Mastodon/Bluesky/Mattermost/Line/IRC/Google Chat adapters), tools
+  (image_gen routing), and core (workspace context block, bootstrap).
+- **Benchmark category coverage**: now 12 categories (was 11) with the
+  new ``browser`` bucket.
+
+### Benchmark results on v1.4.0 codebase
+
+|                | 30-query (v1.4.0)  | 62-query (T11.5)   |
+| -------------- | ------------------ | ------------------ |
+| R@5            | 0.9667             | **0.9839**         |
+| R@10           | 0.9667             | **0.9839**         |
+| R@20           | 1.0000             | 1.0000             |
+| Indexing       | 577s / 1841 chunks | 618s / 1844 chunks |
+
+Verifier tier breakdown (clean corpus, 1860 chunks verified):
+
+| Tier                                  | Count | Share  |
+| ------------------------------------- | ----- | ------ |
+| ``tier_0_blob_sha`` (T7, file unchanged) | 1858  | 99.9%  |
+| ``tier_2_line_anchor``                | 2     | 0.1%   |
+| (others)                              | 0     | 0%     |
+
+Tier-0 firing 99.9% on a freshly bulk-indexed corpus is exactly the T7
+contract: when nothing has changed on disk, every chunk verifies via a
+single hash op (mtime-keyed cache). The 2 tier-2 fall-throughs are rows
+where ``source_blob_sha`` wasn't populated by the chunker — investigate
+in T11.6 but not release-blocking.
+
+### Migration impact
+- **Users with v1.4.0 already installed**: ``pip install -U predacore_core``
+  to pick up 1.2.0 (T5c batched embedding). predacore Python is unchanged
+  apart from the ``__version__`` bump and the benchmark instrumentation.
+- The ``predacore_core>=1.1.1`` requirement in pyproject.toml is unchanged,
+  so v1.4.0 users on the old 1.1.1 wheel keep working — they just don't
+  get the T5c speedup until they upgrade.
+
 ## [1.4.0] - 2026-05-02
 
 **Big release.** Channel surface tripled (8 → 24), browser control rewritten to be CDP-only with selector caching for sub-100ms repeats, memory subsystem gets bulk-index + tier-0 git-blob verifiers, full channel scaffold UX, free image generation via Gemini, streaming responses on telegram/discord/slack. 12 PRs (T1–T11) merged into one release.

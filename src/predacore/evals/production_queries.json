@@ -181,6 +181,198 @@
       "category": "core",
       "query": "How does the gateway route incoming messages through identity, lane queue, and the core agent loop?",
       "expected_source_paths": ["gateway.py", "core.py"]
+    },
+    {
+      "id": "q31",
+      "category": "browser",
+      "query": "Where is the selector cache that maps domain plus intent hash to xpath for sub-100ms repeat clicks?",
+      "expected_source_paths": ["operators/selector_cache.py"]
+    },
+    {
+      "id": "q32",
+      "category": "browser",
+      "query": "How does BrowserBridge auto-launch Chrome with a persistent profile when CDP isn't available?",
+      "expected_source_paths": ["operators/browser_bridge.py"]
+    },
+    {
+      "id": "q33",
+      "category": "browser",
+      "query": "Which JS function reads the page tree filtered to interactive elements with shadow DOM traversal?",
+      "expected_source_paths": ["operators/browser_bridge.py"]
+    },
+    {
+      "id": "q34",
+      "category": "browser",
+      "query": "Where is the canvas detector that decides if a page needs vision fallback instead of CDP DOM?",
+      "expected_source_paths": ["operators/vision.py"]
+    },
+    {
+      "id": "q35",
+      "category": "browser",
+      "query": "Which class governs the auto/always/off opt-in flow for downloading the local vision model?",
+      "expected_source_paths": ["operators/vision.py"]
+    },
+    {
+      "id": "q36",
+      "category": "browser",
+      "query": "How is the TinyClick model downloader configured to use the same HuggingFace cache as BGE?",
+      "expected_source_paths": ["operators/vision_model_loader.py"]
+    },
+    {
+      "id": "q37",
+      "category": "memory",
+      "query": "How does bulk_index_directory walk a project tree and respect .memoryignore patterns?",
+      "expected_source_paths": ["memory/store.py"]
+    },
+    {
+      "id": "q38",
+      "category": "memory",
+      "query": "Where is the AbortToken used to cancel long-running bulk-index operations cooperatively?",
+      "expected_source_paths": ["memory/workspace.py"]
+    },
+    {
+      "id": "q39",
+      "category": "memory",
+      "query": "How does the WorkspaceTracker detect project changes and fire on_change callbacks?",
+      "expected_source_paths": ["memory/workspace.py"]
+    },
+    {
+      "id": "q40",
+      "category": "memory",
+      "query": "What is the first-touch marker file format that records bulk-indexed projects?",
+      "expected_source_paths": ["memory/workspace.py"]
+    },
+    {
+      "id": "q41",
+      "category": "memory",
+      "query": "How does the tier-0 git-blob verifier short-circuit chunk verification when the file hasn't changed?",
+      "expected_source_paths": ["memory/store.py"]
+    },
+    {
+      "id": "q42",
+      "category": "memory",
+      "query": "Which regex extracts a function or class symbol name from an anchor line for tier-1.5 AST verification?",
+      "expected_source_paths": ["memory/store.py"]
+    },
+    {
+      "id": "q43",
+      "category": "memory",
+      "query": "How is the healer rate brake scaled by total row count to avoid tripping after BGE upgrades?",
+      "expected_source_paths": ["memory/healer.py"]
+    },
+    {
+      "id": "q44",
+      "category": "memory",
+      "query": "How does the batched code-chunk store insert all of a file's chunks in a single SQLite transaction?",
+      "expected_source_paths": ["memory/store.py"]
+    },
+    {
+      "id": "q45",
+      "category": "channels",
+      "query": "How does the streaming message buffer debounce edits to respect telegram's 1 edit per second limit?",
+      "expected_source_paths": ["channels/streaming.py"]
+    },
+    {
+      "id": "q46",
+      "category": "channels",
+      "query": "How does telegram wire its per-message streaming buffer so users see tokens land in real time?",
+      "expected_source_paths": ["channels/telegram.py"]
+    },
+    {
+      "id": "q47",
+      "category": "channels",
+      "query": "Where is the channel scaffold generator that writes a starter adapter into the user's plugin dir?",
+      "expected_source_paths": ["channels/scaffold.py"]
+    },
+    {
+      "id": "q48",
+      "category": "channels",
+      "query": "Which gateway method handles the /channel slash command's list, info, and scaffold actions?",
+      "expected_source_paths": ["gateway.py"]
+    },
+    {
+      "id": "q49",
+      "category": "channels",
+      "query": "How does the daemon hot-attach a newly enabled channel without a process restart?",
+      "expected_source_paths": ["services/daemon.py"]
+    },
+    {
+      "id": "q50",
+      "category": "channels",
+      "query": "Where is the per-channel secret manifest that drives /channel info's required env vars list?",
+      "expected_source_paths": ["tools/handlers/channels.py"]
+    },
+    {
+      "id": "q51",
+      "category": "channels",
+      "query": "How does the Twilio adapter verify webhook signatures using the auth token?",
+      "expected_source_paths": ["channels/twilio.py"]
+    },
+    {
+      "id": "q52",
+      "category": "channels",
+      "query": "How does the Matrix adapter use m.replace events to edit messages during streaming?",
+      "expected_source_paths": ["channels/matrix.py"]
+    },
+    {
+      "id": "q53",
+      "category": "channels",
+      "query": "How does the Mastodon adapter poll mention notifications and reply with direct visibility statuses?",
+      "expected_source_paths": ["channels/mastodon.py"]
+    },
+    {
+      "id": "q54",
+      "category": "channels",
+      "query": "How does the Bluesky adapter discover unread DMs by polling list_convos via the chat proxy?",
+      "expected_source_paths": ["channels/bluesky.py"]
+    },
+    {
+      "id": "q55",
+      "category": "channels",
+      "query": "How does the Mattermost adapter bridge its websocket event callback into the asyncio loop?",
+      "expected_source_paths": ["channels/mattermost.py"]
+    },
+    {
+      "id": "q56",
+      "category": "channels",
+      "query": "How is the Line adapter's webhook signature verified using WebhookParser from line-bot-sdk v3?",
+      "expected_source_paths": ["channels/line.py"]
+    },
+    {
+      "id": "q57",
+      "category": "channels",
+      "query": "How does the IRC adapter handle direct messages versus channel messages when routing user_id?",
+      "expected_source_paths": ["channels/irc.py"]
+    },
+    {
+      "id": "q58",
+      "category": "channels",
+      "query": "How does the Google Chat adapter reply inline in the webhook response instead of using the REST API?",
+      "expected_source_paths": ["channels/google_chat.py"]
+    },
+    {
+      "id": "q59",
+      "category": "channels",
+      "query": "Where is the registry that discovers built-in plus entry-point plus user-local channel adapters?",
+      "expected_source_paths": ["channels/registry.py"]
+    },
+    {
+      "id": "q60",
+      "category": "tools",
+      "query": "How does image_gen auto-route between Gemini Flash Image and DALL-E 3 based on which API key is set?",
+      "expected_source_paths": ["tools/handlers/creative.py"]
+    },
+    {
+      "id": "q61",
+      "category": "core",
+      "query": "Where is the workspace context block that injects active project plus enabled channels into the system prompt?",
+      "expected_source_paths": ["prompts.py"]
+    },
+    {
+      "id": "q62",
+      "category": "core",
+      "query": "How does the bootstrap flow pre-warm the BGE model and the optional TinyClick vision model?",
+      "expected_source_paths": ["bootstrap.py"]
     }
   ]
 }

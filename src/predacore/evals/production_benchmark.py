@@ -262,7 +262,25 @@ async def run_pass(
     fetch_k: int = 30,
     k_values: tuple[int, ...] = (5, 10, 20),
 ) -> dict[str, Any]:
-    """Run all queries through ``store.recall`` and aggregate metrics."""
+    """Run all queries through ``store.recall`` and aggregate metrics.
+
+    T11.5: arms the verifier-tier counter contextvar so we can see how
+    often each tier (blob-sha / substring / AST-symbol / line-anchor)
+    fired during this pass. Counts only fire when ``verify=True``.
+    """
+    from predacore.memory.store import _verifier_tier_counter
+    tier_counters: dict[str, int] = {
+        "tier_0_blob_sha":      0,
+        "tier_1_substring":     0,
+        "tier_1_5_ast_symbol":  0,
+        "tier_2_line_anchor":   0,
+        "failed_all_tiers":     0,
+        "not_applicable":       0,
+        "file_unreadable":      0,
+        "empty_chunk":          0,
+    }
+    counter_token = _verifier_tier_counter.set(tier_counters)
+
     print(f"\n── PASS: {label}  (verify={verify}, verify_drop={verify_drop})")
     per_query: list[dict] = []
     t0 = time.time()
@@ -337,10 +355,15 @@ async def run_pass(
             m[f"NDCG@{k}"] = round(sum(r[f"ndcg@{k}"] for r in rs) / c, 4)
         cat_metrics[cat] = m
 
+    # Reset the contextvar so other passes don't share counts.
+    _verifier_tier_counter.reset(counter_token)
+    overall["verifier_tier_counts"] = dict(tier_counters)
+
     return {
         "overall": overall,
         "by_category": cat_metrics,
         "per_query": per_query,
+        "verifier_tier_counts": dict(tier_counters),
     }
 
 
@@ -464,6 +487,24 @@ def _format_overall(p: dict[str, Any]) -> str:
     for key in sorted(o):
         if key.startswith("R@") or key.startswith("NDCG@"):
             pieces.append(f"    {key:10s} {o[key]:.4f}")
+    # T11.5 — verifier tier breakdown (only meaningful when verify=True)
+    counts = o.get("verifier_tier_counts") or {}
+    nonzero = {k: v for k, v in counts.items() if v > 0}
+    if nonzero:
+        total = sum(counts.values()) or 1
+        pieces.append(f"    verifier breakdown ({total} chunks):")
+        # Order: tier 0 → 1 → 1.5 → 2 → failed → other
+        order = [
+            "tier_0_blob_sha", "tier_1_substring",
+            "tier_1_5_ast_symbol", "tier_2_line_anchor",
+            "failed_all_tiers", "not_applicable",
+            "file_unreadable", "empty_chunk",
+        ]
+        for k in order:
+            v = counts.get(k, 0)
+            if v > 0:
+                pct = round(100.0 * v / total, 1)
+                pieces.append(f"      {k:24s} {v:5d}  ({pct:5.1f}%)")
     return "\n".join(pieces)
 
 
