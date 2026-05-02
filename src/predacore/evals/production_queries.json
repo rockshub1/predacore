@@ -1,0 +1,186 @@
+{
+  "_doc": "Hand-curated query set for the production-DB benchmark. Each query has a natural-language form an agent would actually issue and the source file(s) that should appear in top-k retrieval. Path strings match what reindex_file() stores in source_path (relative to project root or absolute — the matcher handles both via .endswith()).",
+  "_version": "1.0",
+  "queries": [
+    {
+      "id": "q01",
+      "category": "tools",
+      "query": "How does the tool dispatcher decide if confirmation is needed before executing a tool?",
+      "expected_source_paths": ["tools/dispatcher.py", "tools/trust_policy.py"]
+    },
+    {
+      "id": "q02",
+      "category": "tools",
+      "query": "Where is the WRITE_TOOLS classification defined that triggers cache invalidation on mutating operations?",
+      "expected_source_paths": ["tools/enums.py"]
+    },
+    {
+      "id": "q03",
+      "category": "tools",
+      "query": "How does the adaptive timeout tracker compute P95 from observed sample latencies?",
+      "expected_source_paths": ["tools/dispatcher.py"]
+    },
+    {
+      "id": "q04",
+      "category": "tools",
+      "query": "Where is the tool result cache implementation with origin scoping for cross-user isolation?",
+      "expected_source_paths": ["tools/resilience.py"]
+    },
+    {
+      "id": "q05",
+      "category": "tools",
+      "query": "How are tool calls routed from name to handler function in the registry?",
+      "expected_source_paths": ["tools/handlers/__init__.py", "tools/dispatcher.py"]
+    },
+    {
+      "id": "q06",
+      "category": "llm",
+      "query": "How does the LLM router fall over from one provider to another on rate limits?",
+      "expected_source_paths": ["llm_providers/router.py"]
+    },
+    {
+      "id": "q07",
+      "category": "llm",
+      "query": "Where is the circuit breaker for LLM providers that uses asyncio locks instead of threading?",
+      "expected_source_paths": ["llm_providers/circuit_breaker.py"]
+    },
+    {
+      "id": "q08",
+      "category": "llm",
+      "query": "How does the Anthropic provider serialize tool calls into the Messages API wire format?",
+      "expected_source_paths": ["llm_providers/anthropic.py", "llm_providers/_anthropic_wire.py"]
+    },
+    {
+      "id": "q09",
+      "category": "llm",
+      "query": "What is the response cache implementation for idempotent LLM calls at temperature zero?",
+      "expected_source_paths": ["llm_providers/response_cache.py"]
+    },
+    {
+      "id": "q10",
+      "category": "auth",
+      "query": "How is SSRF validation done on URLs with redirect chains, with per-hop revalidation?",
+      "expected_source_paths": ["auth/security.py"]
+    },
+    {
+      "id": "q11",
+      "category": "auth",
+      "query": "Where is the Docker sandbox lifecycle managed for code execution with multi-runtime support?",
+      "expected_source_paths": ["auth/sandbox.py"]
+    },
+    {
+      "id": "q12",
+      "category": "auth",
+      "query": "How does the JWT verification handle base64url padding and constant-time comparison?",
+      "expected_source_paths": ["auth/middleware.py"]
+    },
+    {
+      "id": "q13",
+      "category": "memory",
+      "query": "How does the unified memory store recall memories with hybrid BGE plus BM25 plus fuzzy ranking?",
+      "expected_source_paths": ["memory/store.py", "memory/retriever.py"]
+    },
+    {
+      "id": "q14",
+      "category": "memory",
+      "query": "Where is the auto-chunker that splits long content into overlapping semantic chunks?",
+      "expected_source_paths": ["memory/chunker.py"]
+    },
+    {
+      "id": "q15",
+      "category": "memory",
+      "query": "How does the memory healer detect and repair stale embeddings on version skew?",
+      "expected_source_paths": ["memory/healer.py"]
+    },
+    {
+      "id": "q16",
+      "category": "memory",
+      "query": "Where is the secret scanner that refuses memory writes containing API keys at the ingress?",
+      "expected_source_paths": ["memory/safety.py"]
+    },
+    {
+      "id": "q17",
+      "category": "agents",
+      "query": "How does the agent engine compose dynamic agent specs with scoped allowed tools per type?",
+      "expected_source_paths": ["agents/engine.py"]
+    },
+    {
+      "id": "q18",
+      "category": "agents",
+      "query": "Where is the DAF agent process lifecycle for spawn, heartbeat, and retire implemented?",
+      "expected_source_paths": ["agents/daf/agent_process.py", "agents/daf/service.py"]
+    },
+    {
+      "id": "q19",
+      "category": "agents",
+      "query": "How does meta-cognition detect agent loops using shell command fingerprints?",
+      "expected_source_paths": ["agents/meta_cognition.py"]
+    },
+    {
+      "id": "q20",
+      "category": "channels",
+      "query": "How does the Slack adapter handle Socket Mode connections without webhooks?",
+      "expected_source_paths": ["channels/slack.py"]
+    },
+    {
+      "id": "q21",
+      "category": "channels",
+      "query": "Where is the channel registry that loads adapters from setuptools entry points?",
+      "expected_source_paths": ["channels/registry.py"]
+    },
+    {
+      "id": "q22",
+      "category": "operators",
+      "query": "How does the desktop operator perform smart text input with three-tier fallback?",
+      "expected_source_paths": ["operators/smart_input.py", "operators/desktop.py"]
+    },
+    {
+      "id": "q23",
+      "category": "operators",
+      "query": "Where is the Chrome browser bridge that uses CDP DevTools Protocol?",
+      "expected_source_paths": ["operators/browser_bridge.py"]
+    },
+    {
+      "id": "q24",
+      "category": "services",
+      "query": "How does the DB server queue writes with backpressure to prevent unbounded growth?",
+      "expected_source_paths": ["services/db_server.py"]
+    },
+    {
+      "id": "q25",
+      "category": "services",
+      "query": "Where is the lane queue that serializes per-session task execution to prevent races?",
+      "expected_source_paths": ["services/lane_queue.py"]
+    },
+    {
+      "id": "q26",
+      "category": "services",
+      "query": "How does the identity service resolve cross-channel user IDs to a canonical user?",
+      "expected_source_paths": ["services/identity_service.py"]
+    },
+    {
+      "id": "q27",
+      "category": "vendor",
+      "query": "How does the skill scanner detect exfiltration patterns in skill recipes?",
+      "expected_source_paths": ["_vendor/common/skill_scanner.py"]
+    },
+    {
+      "id": "q28",
+      "category": "vendor",
+      "query": "Where is the persistent audit log for governance events with hash chaining concerns?",
+      "expected_source_paths": ["_vendor/ethical_governance_module/persistent_audit.py"]
+    },
+    {
+      "id": "q29",
+      "category": "config",
+      "query": "How are launch profile presets defined and merged with the user YAML config?",
+      "expected_source_paths": ["config.py"]
+    },
+    {
+      "id": "q30",
+      "category": "core",
+      "query": "How does the gateway route incoming messages through identity, lane queue, and the core agent loop?",
+      "expected_source_paths": ["gateway.py", "core.py"]
+    }
+  ]
+}

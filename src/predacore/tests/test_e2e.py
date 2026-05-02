@@ -680,7 +680,7 @@ class TestConfigLoading:
 
         assert cfg.name == "PredaCore"
         assert cfg.llm.provider == "gemini-cli"  # default provider
-        assert cfg.security.trust_level == "normal"
+        assert cfg.security.trust_level == "ask_everytime"
         assert cfg.launch.profile == "enterprise"
 
     def test_yaml_overrides_apply(self, tmp_path):
@@ -739,7 +739,7 @@ class TestConfigLoading:
             config_path=str(tmp_path / "no.yaml"),
             profile_override="enterprise",
         )
-        assert cfg.security.trust_level == "normal"
+        assert cfg.security.trust_level == "ask_everytime"
         assert cfg.launch.approvals_required is True
         assert cfg.launch.egm_mode == "strict"
         assert cfg.launch.enable_self_evolution is False
@@ -1530,7 +1530,7 @@ class TestConfigCoreIntegration:
     def test_trust_level_propagates_to_core(self, tmp_path):
         """Config trust level is used in the tool executor."""
         cfg = _make_config(tmp_path)
-        cfg.security.trust_level = "paranoid"
+        cfg.security.trust_level = "ask_everytime"
 
         with patch("predacore.core.LLMInterface") as MockLLM:
             llm_inst = MockLLM.return_value
@@ -1545,7 +1545,7 @@ class TestConfigCoreIntegration:
 
             from predacore.core import PredaCoreCore
             core = PredaCoreCore(cfg)
-            assert core.config.security.trust_level == "paranoid"
+            assert core.config.security.trust_level == "ask_everytime"
 
 
 # ---------------------------------------------------------------------------

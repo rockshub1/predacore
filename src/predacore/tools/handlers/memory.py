@@ -1,6 +1,7 @@
-"""Memory handlers: memory_store, memory_recall."""
+"""Memory handlers: memory_store, memory_recall, plus bulk-index pair."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -12,6 +13,7 @@ from ._context import (
     ToolErrorKind,
     _lazy_memory_types,
     missing_param,
+    subsystem_unavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,33 @@ def _normalize_scope(scope: str | None) -> str:
     except ImportError:
         from src.predacore.memory.store import normalize_memory_scope  # type: ignore
     return normalize_memory_scope(scope)
+
+
+def _normalize_scope_strict(scope: str | None, *, tool: str) -> str:
+    """Strict scope validation for write/read request boundaries.
+
+    Unlike the lenient ``_normalize_scope`` (which silently downgrades
+    unknown values to ``"global"`` so legacy rows still surface), this one
+    REJECTS unknown scopes so a typo like ``"teaam"`` doesn't masquerade
+    as global and accidentally write team-intended data into the global
+    bucket. Only use at input boundaries — never on stored metadata.
+    """
+    try:
+        from predacore.memory.store import _VALID_MEMORY_SCOPES
+    except ImportError:
+        from src.predacore.memory.store import _VALID_MEMORY_SCOPES  # type: ignore
+    value = scope.strip().lower() if isinstance(scope, str) else "global"
+    if not value:
+        return "global"
+    if value not in _VALID_MEMORY_SCOPES:
+        valid = ", ".join(sorted(_VALID_MEMORY_SCOPES))
+        raise ToolError(
+            f"Unknown memory scope: {scope!r}. Valid scopes: {valid}",
+            kind=ToolErrorKind.INVALID_PARAM,
+            tool_name=tool,
+            suggestion="Pass one of: global, agent, team, scratch.",
+        )
+    return value
 
 
 def _ttl_to_expires_at(ttl_seconds: Any) -> str | None:
@@ -98,11 +127,13 @@ async def handle_memory_store(args: dict[str, Any], ctx: ToolContext) -> str:
     if not isinstance(tags, list):
         tags = []
     tags = [str(t)[:64] for t in tags[:_MEMORY_TAGS_MAX]]
-    memory_scope = _normalize_scope(args.get("scope") or "global")
+    memory_scope = _normalize_scope_strict(args.get("scope") or "global", tool="memory_store")
     team_id = _resolve_team_id(args, ctx)
     agent_id = str(args.get("agent_id") or "").strip() or None
     if memory_scope in ("team", "scratch") and not team_id:
         raise missing_param("team_id", tool="memory_store")
+    if memory_scope == "agent" and not agent_id:
+        raise missing_param("agent_id", tool="memory_store")
     session_key = key
     if memory_scope != "global":
         session_key = f"{memory_scope}:{team_id}:{key}"
@@ -230,15 +261,20 @@ async def handle_memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
     query_lower = query.lower()
     user_id = str(args.get("user_id") or os.getenv("USER") or "default")
     search_mode = str(args.get("search_mode") or "semantic").strip().lower()
-    memory_scope = _normalize_scope(args.get("scope") or "global")
+    memory_scope = _normalize_scope_strict(args.get("scope") or "global", tool="memory_recall")
     team_id = _resolve_team_id(args, ctx)
     if memory_scope in ("team", "scratch") and not team_id:
         raise missing_param("team_id", tool="memory_recall")
-    top_k_raw = args.get("top_k") or 5
+    # Default top_k=10 (was 5). Production benchmark on the predacore source
+    # tree showed R@10=1.000 and R@5=0.967 — the engine reliably finds the
+    # right file in top-10 even when top-5 misses. Bumping the agent-facing
+    # default from 5→10 gets agents the precision the engine already delivers.
+    # Cap stays at 20 to bound prompt growth.
+    top_k_raw = args.get("top_k") or 10
     try:
         top_k = max(1, min(int(top_k_raw), 20))
     except (ValueError, TypeError):
-        top_k = 5
+        top_k = 10
 
     # L5 — auto-default project filter to current project unless caller
     # passed an explicit value. Pass "all" to disable filter (cross-project
@@ -564,3 +600,207 @@ async def handle_memory_explain(args: dict[str, Any], ctx: ToolContext) -> str:
             f"embedding {trace.get('embedding_version', '?')}_"
         )
     return "\n".join(lines)
+
+
+# ── Bulk indexing handlers (PR T5a) ────────────────────────────────────
+
+
+async def handle_memory_scan_directory(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Cheap dry-run: count what bulk_index_directory WOULD walk.
+
+    Use BEFORE memory_bulk_index when the directory is unfamiliar — gives
+    you a count and time estimate so you can decide between full bulk,
+    scoped bulk (just one subpath), or skipping.
+
+    Args:
+        args: ``{"path": str, "ignore": list[str] | None}``
+        ctx: Tool context (uses ctx.unified_memory).
+    """
+    if ctx.unified_memory is None:
+        raise subsystem_unavailable(
+            "Unified memory store", tool="memory_scan_directory"
+        )
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise missing_param("path", tool="memory_scan_directory")
+    ignore_patterns = args.get("ignore")
+    if ignore_patterns is not None and not isinstance(ignore_patterns, list):
+        raise ToolError(
+            "`ignore` must be a list of patterns",
+            kind=ToolErrorKind.INVALID_PARAM,
+            tool_name="memory_scan_directory",
+        )
+    try:
+        result = await ctx.unified_memory.scan_directory(
+            path, ignore_patterns=ignore_patterns,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ToolError(
+            f"Scan failed: {exc}",
+            kind=ToolErrorKind.EXECUTION,
+            tool_name="memory_scan_directory",
+        ) from exc
+    return json.dumps(result, indent=2, default=str)
+
+
+async def handle_memory_bulk_index(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Walk a directory and reindex every file that survives the filter.
+
+    WHEN TO CALL:
+      - User wants you to deeply analyze, refactor, or work on a project
+        you don't have indexed (e.g. *"help me refactor the auth layer
+        in /path/to/repo"*). One bulk-index up front pays for itself in
+        every subsequent recall during the session.
+      - User explicitly says *"index this folder"* / *"learn this codebase"*.
+      - First time predacore is invoked in a fresh project and the user
+        plans to stay there.
+
+    WHEN NOT TO CALL:
+      - User just glanced at one file (touch-index handles single edits).
+      - Brief project visit — touch-index covers what you actually open.
+      - Directory is huge (>5000 files) — call ``memory_scan_directory``
+        first, then call this with a scoped ``path`` (e.g. just ``src/auth``).
+
+    Args:
+        args: ``{
+          "path": str,           # required: directory to walk
+          "ignore": list[str],   # optional: extra ignore patterns (gitignore syntax)
+          "skip_unchanged": bool # optional: default True; set False to force
+                                 #   reindex even when mtime matches
+        }``
+        ctx: Tool context (uses ctx.unified_memory).
+
+    Returns JSON with files_indexed, files_skipped_unchanged, files_ignored,
+    files_failed, chunks_added, elapsed_sec.
+    """
+    if ctx.unified_memory is None:
+        raise subsystem_unavailable(
+            "Unified memory store", tool="memory_bulk_index"
+        )
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise missing_param("path", tool="memory_bulk_index")
+    ignore_patterns = args.get("ignore")
+    if ignore_patterns is not None and not isinstance(ignore_patterns, list):
+        raise ToolError(
+            "`ignore` must be a list of patterns",
+            kind=ToolErrorKind.INVALID_PARAM,
+            tool_name="memory_bulk_index",
+        )
+    skip_unchanged = bool(args.get("skip_unchanged", True))
+    user_id = str(args.get("user_id") or os.getenv("USER") or "default")
+
+    # Wire the global status + abort token. memory_index_status reads them;
+    # memory_bulk_abort writes the abort flag. The walker polls the token
+    # between files and updates status as it goes.
+    try:
+        from predacore.memory.workspace import (
+            get_global_abort_token,
+            get_global_status,
+            mark_bulk_indexed,
+        )
+    except ImportError:
+        from src.predacore.memory.workspace import (  # type: ignore
+            get_global_abort_token,
+            get_global_status,
+            mark_bulk_indexed,
+        )
+
+    abort_token = get_global_abort_token()
+    abort_token.reset()  # clean start; user has to abort during THIS run
+    status = get_global_status()
+
+    try:
+        result = await ctx.unified_memory.bulk_index_directory(
+            path,
+            user_id=user_id,
+            ignore_patterns=ignore_patterns,
+            skip_unchanged=skip_unchanged,
+            abort_token=abort_token,
+            status=status,
+        )
+    except (OSError, RuntimeError, ValueError, ConnectionError) as exc:
+        raise ToolError(
+            f"Bulk index failed: {exc}",
+            kind=ToolErrorKind.EXECUTION,
+            tool_name="memory_bulk_index",
+        ) from exc
+
+    if "error" in result:
+        raise ToolError(
+            f"Bulk index error: {result['error']}",
+            kind=ToolErrorKind.INVALID_PARAM,
+            tool_name="memory_bulk_index",
+        )
+
+    # Write the first-touch marker on a successful (non-aborted) bulk so
+    # subsequent daemon starts in this project don't re-prompt.
+    if not result.get("aborted") and result.get("files_indexed", 0) > 0:
+        try:
+            home_dir = getattr(getattr(ctx, "config", None), "home_dir", None)
+            mark_bulk_indexed(
+                project_id=result.get("project_id", ""),
+                files_indexed=result.get("files_indexed", 0),
+                chunks_added=result.get("chunks_added", 0),
+                home_dir=home_dir,
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Failed to write first-touch marker: %s", exc)
+
+    return json.dumps(result, indent=2, default=str)
+
+
+async def handle_memory_bulk_abort(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Request graceful abort of an in-flight bulk index.
+
+    The walker polls the abort token between files; the active call
+    returns at the next file boundary with ``aborted=True``. Files
+    already indexed remain in the DB. Use this when:
+
+      - User says "stop indexing" / "cancel" mid-run
+      - You realize you scoped wrong (was indexing a 50K-file repo when
+        user only needed src/auth)
+      - Any non-fatal reason to halt cleanly
+
+    Args:
+        args: ``{"reason": str}`` (optional reason for the audit trail).
+        ctx: Tool context (uses workspace.AbortToken).
+    """
+    try:
+        from predacore.memory.workspace import get_global_abort_token, get_global_status
+    except ImportError:
+        from src.predacore.memory.workspace import (  # type: ignore
+            get_global_abort_token,
+            get_global_status,
+        )
+
+    reason = str(args.get("reason") or "user requested").strip() or "user requested"
+    token = get_global_abort_token()
+    status = get_global_status()
+    if status.state != "indexing":
+        return json.dumps({
+            "status": "no_op",
+            "message": f"No bulk index is currently running (state={status.state}).",
+        }, indent=2)
+    token.request_abort(reason=reason)
+    return json.dumps({
+        "status": "abort_requested",
+        "reason": reason,
+        "note": "Walker will exit at the next file boundary; partial index is preserved.",
+    }, indent=2)
+
+
+async def handle_memory_index_status(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Return the current bulk-index status (state, progress, errors).
+
+    Read-only. Useful when:
+
+      - User asks "is it still indexing?" mid-run
+      - You want to check progress before deciding to abort
+      - `predacore status` surfaces this same data via the same global
+    """
+    try:
+        from predacore.memory.workspace import get_global_status
+    except ImportError:
+        from src.predacore.memory.workspace import get_global_status  # type: ignore
+    return json.dumps(get_global_status().to_dict(), indent=2, default=str)

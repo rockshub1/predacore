@@ -27,12 +27,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import struct
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -136,6 +138,60 @@ def _unpack_embedding(data: bytes) -> list[float]:
     return list(struct.unpack(f"{n}f", data))
 
 
+def _compute_blob_sha(content_bytes: bytes) -> str:
+    """Compute git-style blob sha for ``content_bytes``.
+
+    Matches ``git hash-object`` exactly: sha1 of ``b"blob {len}\\0" + bytes``.
+    Pure stdlib — does not require git on PATH. Used by the T7 tier-0
+    verifier: if the file's current blob sha matches the one stored at
+    index time, every chunk of that file is verified in one hash op.
+    """
+    header = f"blob {len(content_bytes)}".encode() + b"\0"
+    return hashlib.sha1(header + content_bytes).hexdigest()  # noqa: S324
+
+
+def _compute_blob_sha_for_path(path: str | Path) -> str | None:
+    """Hash the file at ``path`` git-style. Returns None on read failure."""
+    try:
+        with open(path, "rb") as f:
+            content_bytes = f.read()
+    except (OSError, IsADirectoryError):
+        return None
+    return _compute_blob_sha(content_bytes)
+
+
+# T7 verifier cache — keyed by (path, mtime) so file edits invalidate
+# automatically. Bounded; LRU-ish via insertion order pruning.
+_BLOB_SHA_CACHE: dict[tuple[str, float], str | None] = {}
+_BLOB_SHA_CACHE_LOCK = threading.Lock()
+_BLOB_SHA_CACHE_MAX = 4000
+
+
+def _cached_blob_sha_for_path(path: str | Path) -> str | None:
+    """Path → blob sha, mtime-keyed cache. None on failure (also cached)."""
+    p = str(path)
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        return None
+    key = (p, mtime)
+    with _BLOB_SHA_CACHE_LOCK:
+        cached = _BLOB_SHA_CACHE.get(key, _MISSING)
+    if cached is not _MISSING:
+        return cached  # type: ignore[return-value]
+    sha = _compute_blob_sha_for_path(p)
+    with _BLOB_SHA_CACHE_LOCK:
+        if len(_BLOB_SHA_CACHE) >= _BLOB_SHA_CACHE_MAX:
+            # Drop oldest 10% — Python dicts preserve insertion order.
+            for k in list(_BLOB_SHA_CACHE.keys())[: _BLOB_SHA_CACHE_MAX // 10]:
+                _BLOB_SHA_CACHE.pop(k, None)
+        _BLOB_SHA_CACHE[key] = sha
+    return sha
+
+
+_MISSING = object()
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -221,36 +277,102 @@ def _memory_is_visible_in_recall(
     return True
 
 
+def _row_field(mem: Any, key: str, default: Any = None) -> Any:
+    """Read ``key`` off a sqlite3.Row, dict, or duck-typed object."""
+    try:
+        keys = mem.keys()  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        keys = ()
+    if key in keys:
+        try:
+            return mem[key]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError):
+            pass
+    if hasattr(mem, "get"):
+        try:
+            return mem.get(key, default)
+        except TypeError:
+            return default
+    return default
+
+
+# Symbol-definition patterns for tier-1.5 AST-symbol verification. Cheap
+# regex (no full AST parse) — looks for the token form most languages
+# actually use. Catches Python (def/class/async def), Rust (fn/pub fn/
+# async fn), TS/JS (function/class). False negatives (e.g. exotic syntax)
+# fall through to tier-2 line-anchor; never a false positive on a name
+# that doesn't exist as a definition.
+_SYMBOL_DEF_RE = re.compile(
+    r"\b(?:def|async\s+def|class|fn|pub\s+fn|async\s+fn|function)\s+(\w+)"
+)
+
+
+def _extract_symbol_name(anchor: str) -> str | None:
+    """Pull a symbol name out of an anchor line.
+
+    Anchor lines look like ``def foo(...)``, ``class Bar(Base):``,
+    ``pub fn baz<T>() -> ...``. Returns the bare name (``foo``, ``Bar``,
+    ``baz``) or None if no def-like keyword is present.
+    """
+    if not anchor:
+        return None
+    m = _SYMBOL_DEF_RE.search(anchor)
+    return m.group(1) if m else None
+
+
+def _symbol_defined_in(source: str, symbol: str) -> bool:
+    """True if ``source`` contains a definition of ``symbol`` (def / class
+    / fn / function / etc.). Whole-word match on the symbol token so a
+    longer name (``foo_bar``) doesn't accidentally match ``foo``.
+    """
+    if not symbol:
+        return False
+    pattern = (
+        r"\b(?:def|async\s+def|class|fn|pub\s+fn|async\s+fn|function)\s+"
+        + re.escape(symbol)
+        + r"\b"
+    )
+    return re.search(pattern, source) is not None
+
+
 def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | None:
-    """T5+ real-time verification: is this chunk's content still present in
-    its source file?
+    """Real-time verification: is this chunk's content still trustworthy?
 
     Returns:
-        True   — chunk has a source_path AND content/anchor was located
-                 in the current file → chunk is still accurate.
-        False  — chunk has a source_path BUT file is missing OR content
-                 not found → chunk has drifted; do NOT trust it.
+        True   — verified by at least one tier (blob sha / substring /
+                 AST symbol / line anchor).
+        False  — chunk has a source_path but no tier verifies it →
+                 chunk has drifted; do NOT trust.
         None   — chunk has no source_path (synthesis memory, decision,
-                 user-stated preference, etc.) — verification not applicable.
-                 Don't drop: trust the trust_source × confidence weights.
+                 user-stated preference, etc.). Skip; let the trust_source
+                 × confidence ranking decide.
 
-    The check is two-tier:
-      1. Full content substring match (whitespace-stripped) — strongest signal
-      2. First non-blank line of chunk content present in file — anchor match
-         (handles minor body edits while keeping the function/class header)
+    Tier ladder (cheapest first; first ``True`` short-circuits):
 
-    For predacore's typical workload (1500+ code_extracted chunks of mostly
-    Python), this gives true 100% accuracy on code-backed retrievals — we
-    KNOW the chunk content still resolves in the file at recall time.
+      0. **Git-blob equality (T7)** — re-hash the file bytes git-style;
+         if it matches the stored ``source_blob_sha``, every chunk of that
+         file is verified in one hash op. Cheapest path on warm cache.
+         Skipped if the row was indexed without a blob sha.
+
+      1. **Full substring match** — chunk content present verbatim in the
+         current file (whitespace-stripped). Strongest semantic signal
+         when blob sha is absent or stale.
+
+      2. **AST symbol presence (T7)** — for ``chunk_kind in {function,
+         class, method}`` with an anchor line, verify the named symbol
+         still exists as a definition in the current source. Survives
+         body edits / refactors that the substring tier would reject.
+
+      3. **First-line anchor** — first non-blank line of chunk found in
+         the current file. Loosest tier; catches minor reformatting.
+
+    For predacore's typical workload (1500+ code_extracted chunks), tier-0
+    verifies the entire file in O(file_size) when nothing has changed; the
+    other tiers fire only when the file has been edited.
     """
-    src = None
-    try:
-        src = mem["source_path"] if "source_path" in mem.keys() else None  # type: ignore[union-attr]
-    except (AttributeError, TypeError):
-        if hasattr(mem, "get"):
-            src = mem.get("source_path")
+    src = _row_field(mem, "source_path", None)
     if not src:
-        return None  # not verifiable; not the same as failed
+        return None
 
     try:
         path = Path(str(src))
@@ -259,33 +381,54 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
     if not path.exists() or not path.is_file():
         return False
 
+    chunk = (_row_field(mem, "content", "") or "").strip()
+    if not chunk:
+        return False
+
+    # ── Tier 0: git-blob equality (T7) ────────────────────────────────
+    stored_sha = _row_field(mem, "source_blob_sha", None)
+    if stored_sha:
+        current_sha = _cached_blob_sha_for_path(path)
+        if current_sha is not None and current_sha == stored_sha:
+            return True
+        # Mismatch / unhashable: fall through to disk-content tiers.
+
+    # Read the file once for tiers 1 / 1.5 / 2.
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             current = f.read()
     except OSError:
         return False
 
-    # Pull chunk content
-    try:
-        chunk = mem["content"] if "content" in mem.keys() else ""  # type: ignore[union-attr]
-    except (AttributeError, TypeError):
-        chunk = mem.get("content", "") if hasattr(mem, "get") else ""
-    chunk = (chunk or "").strip()
-    if not chunk:
-        return False
-
-    # Tier 1: full content substring match (whitespace-normalized)
+    # ── Tier 1: full substring match ──────────────────────────────────
     if chunk in current:
         return True
 
-    # Tier 2: first non-blank line of chunk present in current file
-    # (anchor match — body may have drifted but the def/class line is there)
+    # ── Tier 1.5: AST-symbol presence (T7) ────────────────────────────
+    metadata = _row_field(mem, "metadata", None)
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = None
+    if isinstance(metadata, dict):
+        chunk_kind = metadata.get("chunk_kind") or metadata.get("kind") or ""
+        if chunk_kind in {"function", "class", "method"}:
+            anchor_text = (
+                metadata.get("anchor")
+                or chunk.splitlines()[0] if chunk.splitlines() else ""
+            )
+            symbol = _extract_symbol_name(anchor_text or "")
+            if symbol and _symbol_defined_in(current, symbol):
+                return True
+
+    # ── Tier 2: first-line anchor ─────────────────────────────────────
     for line in chunk.splitlines():
         line = line.strip()
         if line:
             if line in current:
                 return True
-            break  # only check the FIRST non-blank line as anchor
+            break
 
     return False
 
@@ -2313,8 +2456,9 @@ class UnifiedMemoryStore:
           3. Purge prior ``trust_source='code_extracted'`` rows for this
              ``source_path`` so a re-index is idempotent and stale chunks
              from the previous version don't linger.
-          4. Insert each chunk as a fresh row with ``trust_source='code_extracted'``,
-             carrying ``source_path``, ``source_mtime``, ``chunk_ordinal``,
+          4. Insert all chunks under ``trust_source='code_extracted'`` in a
+             SINGLE batched embed + transaction (T5c throughput path).
+             Per-chunk: ``source_path``, ``source_mtime``, ``chunk_ordinal``,
              ``project_id``, ``branch``, plus ``line_start/end/anchor`` in
              metadata.
 
@@ -2352,41 +2496,51 @@ class UnifiedMemoryStore:
                 "note": "empty or whitespace-only file",
             }
 
-        # Purge prior code_extracted rows for this source_path so the
-        # re-index is idempotent.
         path_str = str(p)
-
-        def _stale_ids() -> list[str]:
-            if self._conn is None:
-                return []
-            rows = self._conn.execute(
-                "SELECT id FROM memories "
-                "WHERE source_path = ? AND trust_source = 'code_extracted'",
-                (path_str,),
-            ).fetchall()
-            return [r[0] for r in rows]
-
-        prior_ids: list[str] = []
-        if self._conn is not None:
-            prior_ids = await self._in_thread(_stale_ids)
-        elif self._db_adapter is not None:
-            adapter_rows = await self._db_adapter.query_dicts(
-                self._DB_NAME,
-                "SELECT id FROM memories "
-                "WHERE source_path = ? AND trust_source = 'code_extracted'",
-                [path_str],
-            )
-            prior_ids = [row["id"] for row in adapter_rows]
-
-        stale_removed = 0
-        for rid in prior_ids:
-            if await self.delete(rid):
-                stale_removed += 1
-
         try:
             mtime = int(p.stat().st_mtime)
         except OSError:
             mtime = None
+
+        # T7 — git-style blob sha at index time. Hash the file bytes once
+        # so the tier-0 verifier can short-circuit later (one stat + one
+        # hash = whole-file verification, no per-chunk substring match).
+        blob_sha = _compute_blob_sha_for_path(p)
+
+        # Purge + insert in one batched call for the conn path (T5c). Adapter
+        # path keeps the per-row loop because we don't own its transaction
+        # boundary — semantically identical, just slower.
+        if self._conn is not None:
+            stale_removed, new_ids = await self._bulk_store_code_chunks(
+                chunks=chunks,
+                source_path=path_str,
+                source_mtime=mtime,
+                source_blob_sha=blob_sha,
+                project_id=project_id,
+                branch=branch,
+                user_id=user_id,
+            )
+            return {
+                "path": path_str,
+                "chunk_count": len(chunks),
+                "stale_rows_removed": stale_removed,
+                "new_ids": new_ids,
+                "strategy": "semantic-chunker-v1",
+            }
+
+        # Adapter path — purge then per-row store(). Idempotent semantics
+        # preserved; just no transaction batching here.
+        adapter_rows = await self._db_adapter.query_dicts(
+            self._DB_NAME,
+            "SELECT id FROM memories "
+            "WHERE source_path = ? AND trust_source = 'code_extracted'",
+            [path_str],
+        )
+        prior_ids = [row["id"] for row in adapter_rows]
+        stale_removed = 0
+        for rid in prior_ids:
+            if await self.delete(rid):
+                stale_removed += 1
 
         new_ids: list[dict[str, Any]] = []
         for chunk in chunks:
@@ -2403,6 +2557,7 @@ class UnifiedMemoryStore:
                 user_id=user_id,
                 source_path=path_str,
                 source_mtime=mtime,
+                source_blob_sha=blob_sha,
                 chunk_ordinal=chunk.ordinal,
                 project_id=project_id,
                 branch=branch,
@@ -2415,8 +2570,6 @@ class UnifiedMemoryStore:
                     "anchor": chunk.anchor,
                 },
             )
-            # store() returns "" if scan_for_secrets refused the chunk —
-            # skip those silently (the safety counter already recorded it).
             if mid:
                 new_ids.append({
                     "id": mid,
@@ -2431,6 +2584,627 @@ class UnifiedMemoryStore:
             "stale_rows_removed": stale_removed,
             "new_ids": new_ids,
             "strategy": "semantic-chunker-v1",
+        }
+
+    # ── Batched per-file store (T5c throughput path) ──────────────────
+    #
+    # The reindex_file fast path. One SQLite transaction per file instead
+    # of one-per-chunk; one batched embed call instead of N. Restricted to
+    # the ``self._conn`` mode (local SQLite store) — adapter mode keeps the
+    # original per-row store() loop because we don't own its transaction
+    # boundary. Equivalence is enforced by tests in TestBulkIndexEngine.
+    async def _bulk_store_code_chunks(
+        self,
+        *,
+        chunks: list[Any],          # chunker.Chunk objects
+        source_path: str,
+        source_mtime: int | None,
+        source_blob_sha: str | None = None,
+        project_id: str,
+        branch: str | None,
+        user_id: str,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Batch-purge stale + batch-insert fresh chunks for one file.
+
+        Returns ``(stale_removed_count, new_ids_list)`` where new_ids has
+        the same shape as :meth:`reindex_file` produces today.
+        """
+        # 1) Ingress secret scan — done before embedding so we don't waste
+        # GPU/CPU on rows that won't be stored. Refused chunks are dropped
+        # from the batch and the safety counter is bumped, exactly mirroring
+        # the per-row store() behavior.
+        try:
+            from .safety import scan_for_secrets
+        except ImportError:
+            scan_for_secrets = None  # type: ignore[misc,assignment]
+
+        kept: list[Any] = []
+        for chunk in chunks:
+            content = chunk.content or ""
+            if not content:
+                continue
+            if scan_for_secrets is not None and self._safety_stats is not None:
+                matches = scan_for_secrets(content)
+                if matches:
+                    self._safety_stats.record_block(matches)
+                    kinds = sorted({m.name for m in matches})
+                    logger.warning(
+                        "store() refused — content contains %d secret(s) of kind %s",
+                        len(matches), kinds,
+                    )
+                    continue
+            kept.append(chunk)
+
+        # 2) Batched embed — ONE Rust call (rayon-tokenized, batched forward).
+        # An empty kept list still does the purge + commit (idempotent).
+        embeddings: list[list[float] | None] = [None] * len(kept)
+        if self._embed and kept:
+            try:
+                vecs = await self._embed.embed([c.content for c in kept])
+                if vecs and len(vecs) == len(kept):
+                    embeddings = list(vecs)
+            except (ValueError, TypeError, RuntimeError) as exc:
+                logger.debug("Batched embed failed for %s: %s", source_path, exc)
+
+        # 3) Build INSERT param tuples for kept rows.
+        now = _now_iso()
+        rows_to_insert: list[tuple] = []
+        new_ids_meta: list[dict[str, Any]] = []
+        for chunk, embedding_vec in zip(kept, embeddings):
+            content = chunk.content or ""
+            memory_id = _uuid()
+            tags = [
+                "file",
+                "code_extracted",
+                f"kind:{chunk.kind}",
+                f"lines:{chunk.line_start}-{chunk.line_end}",
+            ]
+            tags_json = json.dumps(tags)
+            metadata = {
+                "line_start": chunk.line_start,
+                "line_end": chunk.line_end,
+                "chunk_kind": chunk.kind,
+                "anchor": chunk.anchor,
+            }
+            prepared_metadata = _prepare_memory_metadata(
+                metadata, memory_scope="global", team_id=None, agent_id=None,
+            )
+            meta_json = json.dumps(prepared_metadata)
+
+            content_hash = compute_content_hash(content)
+            anchor_hash = compute_anchor_hash(content)
+            embedding_blob = _pack_embedding(embedding_vec) if embedding_vec else None
+            embedding_version = CURRENT_EMBEDDING_VERSION if embedding_vec else ""
+
+            rows_to_insert.append((
+                memory_id,
+                content,
+                "note",                  # memory_type
+                2,                       # importance
+                "",                      # source
+                tags_json,
+                meta_json,
+                user_id,
+                embedding_blob,
+                now, now, now,           # created/updated/last_accessed
+                2.0,                     # decay_score (= float(importance))
+                None,                    # expires_at
+                None,                    # session_id
+                None,                    # parent_id
+                content_hash,
+                anchor_hash,
+                embedding_version,
+                CURRENT_CHUNKER_VERSION,
+                "code_extracted",        # trust_source
+                1.0,                     # confidence
+                project_id,
+                branch,
+                source_path,
+                source_blob_sha,         # T7 — populated by reindex_file
+                source_mtime,
+                chunk.ordinal,
+            ))
+            new_ids_meta.append({
+                "id": memory_id,
+                "kind": chunk.kind,
+                "lines": f"{chunk.line_start}-{chunk.line_end}",
+                "anchor": chunk.anchor,
+                "_embedding": embedding_vec,
+                "_metadata": prepared_metadata,
+            })
+
+        insert_sql = """INSERT INTO memories
+                   (id, content, memory_type, importance, source, tags, metadata,
+                    user_id, embedding, created_at, updated_at, last_accessed,
+                    decay_score, expires_at, session_id, parent_id,
+                    content_hash, anchor_hash, embedding_version, chunker_version,
+                    trust_source, confidence,
+                    project_id, branch, source_path, source_blob_sha,
+                    source_mtime, chunk_ordinal)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?)"""
+
+        # 4) Single transaction: purge stale + insert all new rows + commit ONCE.
+        def _txn() -> tuple[int, list[str]]:
+            assert self._conn is not None
+            stale_rows = self._conn.execute(
+                "SELECT id FROM memories "
+                "WHERE source_path = ? AND trust_source = 'code_extracted'",
+                (source_path,),
+            ).fetchall()
+            stale_ids = [r[0] for r in stale_rows]
+            if stale_ids:
+                # Bulk delete in chunks (SQLite parameter limit is 999).
+                CHUNK = 500
+                for i in range(0, len(stale_ids), CHUNK):
+                    sub = stale_ids[i : i + CHUNK]
+                    placeholders = ",".join("?" * len(sub))
+                    self._conn.execute(
+                        f"DELETE FROM memories WHERE id IN ({placeholders})",
+                        sub,
+                    )
+                    self._conn.execute(
+                        "DELETE FROM relations "
+                        f"WHERE source_entity_id IN ({placeholders}) "
+                        f"   OR target_entity_id IN ({placeholders})",
+                        sub + sub,
+                    )
+            if rows_to_insert:
+                self._conn.executemany(insert_sql, rows_to_insert)
+            self._conn.commit()
+            return (len(stale_ids), stale_ids)
+
+        async with self._db_write_lock:
+            async with self._db_lock:
+                stale_count, stale_ids = await self._in_thread(_txn)
+
+        # 5) Update the in-memory vector index outside the DB lock — pure
+        # in-RAM ops, cheap, but no need to hold the write lock for them.
+        if self._vec_index is not None:
+            for sid in stale_ids:
+                try:
+                    await self._vec_index.remove(sid)
+                except (ValueError, KeyError):
+                    pass
+            for entry in new_ids_meta:
+                vec = entry.pop("_embedding", None)
+                meta = entry.pop("_metadata", {})
+                if vec is None:
+                    continue
+                try:
+                    await self._vec_index.add(
+                        entry["id"],
+                        vec,
+                        metadata={
+                            "type": "note",
+                            "user": user_id,
+                            "scope": meta.get("scope", "global"),
+                            "team_id": meta.get("team_id", ""),
+                        },
+                    )
+                except (ValueError, TypeError) as exc:
+                    logger.debug("Vector index add failed (will rebuild): %s", exc)
+        else:
+            # Strip private keys even when no vec index attached.
+            for entry in new_ids_meta:
+                entry.pop("_embedding", None)
+                entry.pop("_metadata", None)
+
+        return stale_count, new_ids_meta
+
+    # ── Bulk indexing (PR T5a) ──────────────────────────────────────────
+    #
+    # Walks a directory and reindexes every file that survives a
+    # gitignore-style filter. Built on the existing :meth:`reindex_file`
+    # primitive so semantics match per-file path exactly:
+    #   - Same chunker, same secret scanner ingress, same idempotent purge
+    #   - Same source_path / source_blob_sha / project_id metadata
+    #   - Same auto-trigger compatibility: touch-index keeps files current
+    #     after bulk completes; git-sync catches external mutations
+    #
+    # The *bulk* part is just "walker + filter + loop". Idempotent: a
+    # second call on the same root re-indexes only files whose mtime has
+    # changed since they were stored.
+
+    # Built-in default ignore list — applied even if no .memoryignore exists.
+    # Same shape we validated in production_benchmark.py: skip build artifacts
+    # plus discussion-heavy directories that confuse semantic ranking
+    # (tests/, docs/, evals/, defaults/). Users can override via .memoryignore.
+    _BULK_DEFAULT_IGNORE: tuple[str, ...] = (
+        "__pycache__/",
+        ".git/",
+        ".venv/",
+        "venv/",
+        "node_modules/",
+        "target/",
+        "dist/",
+        "build/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".audit/",
+        ".idea/",
+        ".vscode/",
+        # Discussion-heavy (semantic noise on "where is X implemented?" queries)
+        "tests/",
+        "docs/",
+        "documentation/",
+        "evals/",
+        "defaults/",
+    )
+
+    # File suffixes the chunker handles meaningfully. Anything else
+    # (binaries, archives) gets skipped by safe_read_text anyway, but
+    # checking suffix first saves the open() call.
+    _BULK_INDEXABLE_SUFFIXES: frozenset[str] = frozenset({
+        ".py", ".rs", ".md", ".toml", ".js", ".ts", ".jsx", ".tsx",
+        ".go", ".rb", ".java", ".kt", ".c", ".cpp", ".h", ".hpp",
+        ".swift", ".php", ".sh", ".yaml", ".yml", ".json",
+    })
+
+    async def bulk_index_directory(
+        self,
+        root: str | Path,
+        *,
+        project_id: str | None = None,
+        branch: str | None = None,
+        user_id: str = "default",
+        ignore_patterns: list[str] | None = None,
+        skip_unchanged: bool = True,
+        progress_cb: Callable[[int, int, str], None] | None = None,
+        abort_token: Any = None,
+        status: Any = None,
+    ) -> dict[str, Any]:
+        """Walk ``root`` and reindex every file that survives the filter.
+
+        Args:
+          root: Directory to walk. Subdirectories are walked recursively.
+          project_id: Tag every chunk with this project id. Default:
+            auto-detect from ``root`` via ``default_project()``.
+          branch: Optional git branch tag for chunks.
+          user_id: Owner for created memories. Default ``"default"``.
+          ignore_patterns: Extra patterns to merge with built-in defaults
+            and any ``.memoryignore`` / ``.gitignore`` at ``root``. None
+            means just defaults + on-disk ignore files.
+          skip_unchanged: If True (default), skip files whose mtime
+            matches the most recent indexed chunk's ``source_mtime`` —
+            cheap correctness on warm runs.
+          progress_cb: Optional ``(current, total, current_path)`` callback
+            invoked after each file. Useful for status surfaces.
+          abort_token: Optional ``predacore.memory.workspace.AbortToken``.
+            Polled between files; if ``is_aborted`` flips True, the walker
+            exits at the next file boundary, returning partial stats with
+            ``aborted=True``. Files already indexed remain in the DB.
+          status: Optional ``predacore.memory.workspace.MemoryIndexStatus``
+            singleton to update with begin / progress / finish events.
+            When set, ``predacore status`` and the ``memory_index_status``
+            tool reflect this run's progress in real time.
+
+        Returns dict shape::
+
+          {
+            "root": "/path/to/root",
+            "project_id": "...",
+            "files_walked": int,
+            "files_ignored": int,
+            "files_skipped_unchanged": int,
+            "files_indexed": int,
+            "files_failed": int,
+            "chunks_added": int,
+            "elapsed_sec": float,
+            "errors": [{"path": ..., "error": ...}, ...]  # at most 10
+          }
+        """
+        from .project_id import default_project
+
+        root_path = Path(root).resolve()
+        if not root_path.is_dir():
+            return {
+                "root": str(root_path),
+                "error": "not_a_directory",
+                "files_walked": 0,
+                "files_indexed": 0,
+            }
+
+        effective_project_id = project_id or default_project(str(root_path))
+
+        # Build the ignore matcher: defaults + repo's .memoryignore/.gitignore
+        # + caller-provided extras. Order doesn't matter — MemoryIgnore
+        # treats them all as a single pattern set with negation support.
+        from .safety import MemoryIgnore
+        all_patterns: list[str] = list(self._BULK_DEFAULT_IGNORE)
+        try:
+            file_matcher = MemoryIgnore.for_root(root_path)
+            all_patterns.extend(file_matcher.includes)
+            # Negations from the on-disk file get layered onto our defaults
+            for neg in file_matcher.excludes:
+                all_patterns.append("!" + neg)
+        except OSError:
+            pass
+        if ignore_patterns:
+            all_patterns.extend(ignore_patterns)
+        ignore = MemoryIgnore(all_patterns)
+
+        # Discover candidates first so we know totals upfront for progress
+        candidates: list[Path] = []
+        ignored_count = 0
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            # Prune ignored directories in-place to avoid descending
+            kept_dirs: list[str] = []
+            for d in dirnames:
+                rel_dir = str(Path(dirpath, d).relative_to(root_path))
+                if ignore.matches(rel_dir + "/"):
+                    ignored_count += 1
+                    continue
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+
+            for fn in filenames:
+                p = Path(dirpath) / fn
+                if p.suffix not in self._BULK_INDEXABLE_SUFFIXES:
+                    continue
+                rel = str(p.relative_to(root_path))
+                if ignore.matches(rel):
+                    ignored_count += 1
+                    continue
+                candidates.append(p)
+        candidates.sort()  # deterministic order across runs
+
+        # Pre-compute "skip if mtime matches stored" set (cheap query).
+        skip_paths: set[str] = set()
+        if skip_unchanged:
+            skip_paths = await self._collect_unchanged_paths(
+                candidates, project_id=effective_project_id,
+            )
+
+        t0 = time.time()
+        stats = {
+            "root": str(root_path),
+            "project_id": effective_project_id,
+            "files_walked": len(candidates),
+            "files_ignored": ignored_count,
+            "files_skipped_unchanged": 0,
+            "files_indexed": 0,
+            "files_failed": 0,
+            "chunks_added": 0,
+            "aborted": False,
+            "errors": [],
+        }
+        total = len(candidates)
+
+        # Initialize the global status if caller passed one. We deliberately
+        # don't import workspace.py at module top to avoid a circular: the
+        # caller (handler / daemon) constructs a status object and threads
+        # it in, so this module stays workspace-agnostic.
+        if status is not None:
+            try:
+                status.begin(
+                    project_id=effective_project_id,
+                    root=str(root_path),
+                    files_total=total,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        for i, p in enumerate(candidates):
+            # Abort check: polled between files (cheap; one bool read).
+            # We don't try to abort mid-file because reindex_file is itself
+            # multi-step and reverting partial chunk writes is more risk
+            # than the saved seconds are worth.
+            if abort_token is not None and getattr(abort_token, "is_aborted", False):
+                stats["aborted"] = True
+                stats["abort_reason"] = getattr(abort_token, "reason", "")
+                if status is not None:
+                    try:
+                        status.mark_aborted(stats["abort_reason"] or "unknown")
+                    except Exception:  # noqa: BLE001
+                        pass
+                logger.info(
+                    "Bulk index aborted at %d/%d: %s",
+                    i, total, stats.get("abort_reason"),
+                )
+                break
+
+            if str(p) in skip_paths:
+                stats["files_skipped_unchanged"] += 1
+                if status is not None:
+                    try:
+                        status.update(skipped_delta=1)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if progress_cb:
+                    try:
+                        progress_cb(i + 1, total, str(p))
+                    except Exception:  # noqa: BLE001
+                        pass
+                continue
+            try:
+                result = await self.reindex_file(
+                    p,
+                    project_id=effective_project_id,
+                    branch=branch,
+                    user_id=user_id,
+                )
+                if "error" in result:
+                    stats["files_failed"] += 1
+                    if status is not None:
+                        try:
+                            status.update(failed_delta=1)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if len(stats["errors"]) < 10:
+                        stats["errors"].append({
+                            "path": str(p),
+                            "error": result.get("error"),
+                            "reason": result.get("reason"),
+                        })
+                else:
+                    chunks = len(result.get("new_ids", []) or [])
+                    stats["files_indexed"] += 1
+                    stats["chunks_added"] += chunks
+                    if status is not None:
+                        try:
+                            status.update(indexed_delta=1, chunks_delta=chunks)
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception as exc:  # noqa: BLE001
+                stats["files_failed"] += 1
+                if status is not None:
+                    try:
+                        status.update(failed_delta=1)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if len(stats["errors"]) < 10:
+                    stats["errors"].append({"path": str(p), "error": str(exc)})
+
+            if progress_cb:
+                try:
+                    progress_cb(i + 1, total, str(p))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        stats["elapsed_sec"] = round(time.time() - t0, 2)
+
+        # Final status update (only if we didn't already mark_aborted above).
+        if status is not None and not stats["aborted"]:
+            try:
+                status.finish(success=stats["files_failed"] == 0)
+            except Exception:  # noqa: BLE001
+                pass
+
+        logger.info(
+            "Bulk index of %s: %d indexed / %d skipped / %d ignored / %d failed%s (%.1fs)",
+            root_path, stats["files_indexed"], stats["files_skipped_unchanged"],
+            stats["files_ignored"], stats["files_failed"],
+            " [aborted]" if stats["aborted"] else "", stats["elapsed_sec"],
+        )
+        return stats
+
+    async def _collect_unchanged_paths(
+        self, candidates: list[Path], *, project_id: str,
+    ) -> set[str]:
+        """Return paths whose latest indexed mtime equals current disk mtime.
+
+        Cheap pre-pass for ``bulk_index_directory(skip_unchanged=True)``.
+        Skipping these files avoids re-embedding chunks that haven't
+        changed — turns warm runs from O(files × embed) into O(files × stat).
+        """
+        if not candidates:
+            return set()
+        path_strs = [str(p) for p in candidates]
+        # Build a {path: latest_indexed_mtime} map in one query.
+        indexed: dict[str, int] = {}
+        # SQLite can't bind a list directly; chunk into IN groups of 200.
+        CHUNK = 200
+        for i in range(0, len(path_strs), CHUNK):
+            batch = path_strs[i : i + CHUNK]
+            placeholders = ",".join("?" for _ in batch)
+            sql = (
+                "SELECT source_path, MAX(source_mtime) "
+                "FROM memories "
+                f"WHERE source_path IN ({placeholders}) "
+                "  AND project_id = ? "
+                "  AND trust_source = 'code_extracted' "
+                "  AND source_mtime IS NOT NULL "
+                "GROUP BY source_path"
+            )
+            params = list(batch) + [project_id]
+
+            def _query(_sql=sql, _params=params) -> list[tuple]:
+                if self._conn is None:
+                    return []
+                return self._conn.execute(_sql, _params).fetchall()
+
+            if self._conn is not None:
+                rows = await self._in_thread(_query)
+            elif self._db_adapter is not None:
+                adapter_rows = await self._db_adapter.query(
+                    self._DB_NAME, sql, params,
+                )
+                rows = [tuple(r) for r in adapter_rows]
+            else:
+                rows = []
+            for sp, mtime in rows:
+                if mtime is not None:
+                    indexed[sp] = int(mtime)
+
+        skip: set[str] = set()
+        for p in candidates:
+            sp = str(p)
+            if sp not in indexed:
+                continue
+            try:
+                disk_mtime = int(p.stat().st_mtime)
+            except OSError:
+                continue
+            if disk_mtime == indexed[sp]:
+                skip.add(sp)
+        return skip
+
+    async def scan_directory(
+        self,
+        root: str | Path,
+        *,
+        ignore_patterns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Dry-run counter — what bulk_index_directory WOULD walk.
+
+        Cheap (no file reads, no embeds). Useful for the first-touch
+        prompt: surface file count + estimated time before the user
+        commits to a multi-minute operation.
+        """
+        from .safety import MemoryIgnore
+
+        root_path = Path(root).resolve()
+        if not root_path.is_dir():
+            return {"root": str(root_path), "error": "not_a_directory"}
+
+        all_patterns: list[str] = list(self._BULK_DEFAULT_IGNORE)
+        try:
+            file_matcher = MemoryIgnore.for_root(root_path)
+            all_patterns.extend(file_matcher.includes)
+            for neg in file_matcher.excludes:
+                all_patterns.append("!" + neg)
+        except OSError:
+            pass
+        if ignore_patterns:
+            all_patterns.extend(ignore_patterns)
+        ignore = MemoryIgnore(all_patterns)
+
+        indexable = 0
+        ignored = 0
+        by_suffix: dict[str, int] = {}
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            kept_dirs = []
+            for d in dirnames:
+                rel = str(Path(dirpath, d).relative_to(root_path))
+                if ignore.matches(rel + "/"):
+                    ignored += 1
+                    continue
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+
+            for fn in filenames:
+                p = Path(dirpath) / fn
+                if p.suffix not in self._BULK_INDEXABLE_SUFFIXES:
+                    continue
+                rel = str(p.relative_to(root_path))
+                if ignore.matches(rel):
+                    ignored += 1
+                    continue
+                indexable += 1
+                by_suffix[p.suffix] = by_suffix.get(p.suffix, 0) + 1
+
+        # Estimates calibrated against production_benchmark: ~14 chunks/file
+        # average, ~2.4s/file cold (will drop with PR T5c batched embedding)
+        return {
+            "root": str(root_path),
+            "indexable_files": indexable,
+            "ignored_count": ignored,
+            "by_suffix": dict(sorted(by_suffix.items(), key=lambda kv: -kv[1])),
+            "estimated_chunks": indexable * 14,
+            "estimated_minutes_cold": round(indexable * 2.4 / 60, 1),
+            "estimated_minutes_warm": round(indexable * 0.05 / 60, 1),
         }
 
     async def sync_git_changes(

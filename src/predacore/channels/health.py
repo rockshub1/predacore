@@ -292,6 +292,14 @@ class ChannelHealthMonitor:
         )
         return record
 
+    def unregister(self, channel_name: str) -> bool:
+        """Drop a channel from the monitor. Returns True if it was present."""
+        if channel_name in self._channels:
+            del self._channels[channel_name]
+            logger.info("Health monitor unregistered channel: %s", channel_name)
+            return True
+        return False
+
     def mark_started(self, channel_name: str) -> None:
         """Mark a channel as started and healthy."""
         record = self._channels.get(channel_name)

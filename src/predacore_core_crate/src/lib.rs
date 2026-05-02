@@ -19,6 +19,7 @@ mod synonyms;
 mod vector;
 
 use pyo3::prelude::*;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Compute cosine similarity between two vectors.
 #[pyfunction]
@@ -131,9 +132,29 @@ fn classify_all_relations(sentence: &str) -> Vec<(String, f32)> {
 
 /// Embed texts using GTE-small (384-dim). Downloads model on first call (~67MB).
 /// Returns list of 384-dim float vectors, L2-normalized.
+///
+/// Wrapped in ``catch_unwind`` so that any panic inside Candle tensor ops,
+/// model loading, or HF Hub I/O surfaces as a clean Python ``RuntimeError``
+/// instead of crashing the Python interpreter (a panic crossing the PyO3
+/// FFI boundary is undefined behavior; the safety net costs almost nothing
+/// at the per-call level given how much work this function already does).
 #[pyfunction]
 fn embed(texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
-    embedding::embed(&texts).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    let result = catch_unwind(AssertUnwindSafe(|| embedding::embed(&texts)));
+    match result {
+        Ok(Ok(vecs)) => Ok(vecs),
+        Ok(Err(e)) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+        Err(panic_payload) => {
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                format!("Rust panic in embed(): {s}")
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                format!("Rust panic in embed(): {s}")
+            } else {
+                "Rust panic in embed() (non-string payload)".to_string()
+            };
+            Err(pyo3::exceptions::PyRuntimeError::new_err(msg))
+        }
+    }
 }
 
 /// Get the embedding dimension (384 for GTE-small).

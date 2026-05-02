@@ -83,9 +83,31 @@ fn ensure_model() -> Result<(), String> {
     Ok(())
 }
 
-/// Embed a batch of texts using GTE-small.
-/// Returns Vec<Vec<f32>> where each inner vec is 384-dimensional.
+/// Maximum batch size for a single forward pass. Bounded so output tensor
+/// stays under ~50 MB (BATCH × MAX_SEQ_LEN × hidden=384 × 4 bytes ≈ 25 MB
+/// at 32 batch). Larger batches give marginal speedup beyond ~32 because
+/// Candle's CPU forward pass already multi-threads internally.
+const EMBED_BATCH_SIZE: usize = 32;
+
+/// Embed a batch of texts using BGE-small with REAL batched forward.
+///
+/// Optimization story (PR T5c):
+///   - **Parallel tokenization** via rayon: tokenization is CPU-bound and
+///     embarrassingly parallel. par_iter() over texts gets us linear
+///     speedup across cores during preprocessing.
+///   - **Real batched forward pass**: previous version called the model
+///     once per text (batch_size=1), wasting ~5× the per-call setup.
+///     We now stack texts into a single (batch, max_len) tensor padded
+///     with attention_mask=0 and call forward once per batch.
+///   - **Bounded batch size**: caps memory at ~25 MB per batch so we
+///     don't OOM on long input lists. Texts beyond the limit chunk
+///     transparently and outputs are concatenated in input order.
+///
+/// API stability: ``embed(texts: &[String]) -> Vec<Vec<f32>>`` is
+/// unchanged — Python callers see a faster function with the same shape.
 pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    use rayon::prelude::*;
+
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -94,96 +116,143 @@ pub fn embed(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let guard = MODEL.lock().map_err(|e| format!("Lock error: {e}"))?;
     let m = guard.as_ref().ok_or("Model not loaded")?;
 
+    // ── Phase 1: parallel tokenization ──────────────────────────────────
+    // tokenizers::Tokenizer is internally Send+Sync for its core path; we
+    // borrow `&m.tokenizer` from each rayon worker. Truncation + tensor-
+    // building stays sequential (cheap copies; the heavy work is the
+    // model forward pass).
+    let encodings: Vec<_> = texts
+        .par_iter()
+        .map(|t| {
+            m.tokenizer
+                .encode(t.as_str(), true)
+                .map_err(|e| format!("Tokenization error: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
-    for text in texts {
-        let encoding = m
-            .tokenizer
-            .encode(text.as_str(), true)
-            .map_err(|e| format!("Tokenization error: {e}"))?;
+    // ── Phase 2: batched forward, chunked to bound memory ───────────────
+    for chunk_encodings in encodings.chunks(EMBED_BATCH_SIZE) {
+        let batch_size = chunk_encodings.len();
 
-        let mut ids = encoding.get_ids().to_vec();
-        let mut type_ids = encoding.get_type_ids().to_vec();
-        let mut attention_mask = encoding.get_attention_mask().to_vec();
-
-        // Truncate to max sequence length
-        if ids.len() > MAX_SEQ_LEN {
-            ids.truncate(MAX_SEQ_LEN);
-            type_ids.truncate(MAX_SEQ_LEN);
-            attention_mask.truncate(MAX_SEQ_LEN);
+        // Truncate per-row + find batch-local max length.
+        let mut row_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+        let mut row_type_ids: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+        let mut row_masks: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+        let mut max_len = 0usize;
+        for enc in chunk_encodings {
+            let mut ids = enc.get_ids().to_vec();
+            let mut tids = enc.get_type_ids().to_vec();
+            let mut mask = enc.get_attention_mask().to_vec();
+            if ids.len() > MAX_SEQ_LEN {
+                ids.truncate(MAX_SEQ_LEN);
+                tids.truncate(MAX_SEQ_LEN);
+                mask.truncate(MAX_SEQ_LEN);
+            }
+            max_len = max_len.max(ids.len());
+            row_ids.push(ids);
+            row_type_ids.push(tids);
+            row_masks.push(mask);
+        }
+        // Guard against degenerate empty-tokenization (would yield 0×0 tensor).
+        if max_len == 0 {
+            for _ in 0..batch_size {
+                all_embeddings.push(vec![0.0_f32; embedding_dim()]);
+            }
+            continue;
         }
 
-        let seq_len = ids.len();
+        // Pad to batch-local max with token_id=0 (BERT [PAD] convention) +
+        // attention_mask=0 so the model ignores padded positions during
+        // attention AND mean pooling.
+        for ((ids, tids), mask) in row_ids
+            .iter_mut()
+            .zip(row_type_ids.iter_mut())
+            .zip(row_masks.iter_mut())
+        {
+            while ids.len() < max_len {
+                ids.push(0);
+                tids.push(0);
+                mask.push(0);
+            }
+        }
 
-        let input_ids = Tensor::new(ids.as_slice(), &m.device)
-            .map_err(|e| format!("Tensor error: {e}"))?
-            .reshape((1, seq_len))
-            .map_err(|e| format!("Reshape error: {e}"))?;
+        // Flatten to (batch * max_len) for tensor construction.
+        let flat_ids: Vec<u32> = row_ids.into_iter().flatten().collect();
+        let flat_tids: Vec<u32> = row_type_ids.into_iter().flatten().collect();
+        let flat_mask: Vec<u32> = row_masks.into_iter().flatten().collect();
 
-        let token_type_ids = Tensor::new(type_ids.as_slice(), &m.device)
-            .map_err(|e| format!("Tensor error: {e}"))?
-            .reshape((1, seq_len))
-            .map_err(|e| format!("Reshape error: {e}"))?;
+        let input_ids = Tensor::new(flat_ids.as_slice(), &m.device)
+            .map_err(|e| format!("input_ids tensor: {e}"))?
+            .reshape((batch_size, max_len))
+            .map_err(|e| format!("input_ids reshape: {e}"))?;
+        let token_type_ids = Tensor::new(flat_tids.as_slice(), &m.device)
+            .map_err(|e| format!("token_type_ids tensor: {e}"))?
+            .reshape((batch_size, max_len))
+            .map_err(|e| format!("token_type_ids reshape: {e}"))?;
+        let attention_mask_tensor = Tensor::new(flat_mask.as_slice(), &m.device)
+            .map_err(|e| format!("attention_mask tensor: {e}"))?
+            .reshape((batch_size, max_len))
+            .map_err(|e| format!("attention_mask reshape: {e}"))?;
 
-        let attention_mask_tensor = Tensor::new(attention_mask.as_slice(), &m.device)
-            .map_err(|e| format!("Tensor error: {e}"))?
-            .reshape((1, seq_len))
-            .map_err(|e| format!("Reshape error: {e}"))?;
-
-        // Forward pass
+        // Single forward pass over the whole batch.
         let output = m
             .model
             .forward(&input_ids, &token_type_ids, Some(&attention_mask_tensor))
             .map_err(|e| format!("Forward pass error: {e}"))?;
 
-        // Mean pooling over sequence dimension (with attention mask)
+        // Mean pooling with attention mask broadcast over the hidden dim.
         let mask_f32 = attention_mask_tensor
             .to_dtype(candle_core::DType::F32)
-            .map_err(|e| format!("Dtype error: {e}"))?
+            .map_err(|e| format!("Mask dtype: {e}"))?
             .unsqueeze(2)
-            .map_err(|e| format!("Unsqueeze error: {e}"))?;
-
+            .map_err(|e| format!("Mask unsqueeze: {e}"))?;
         let masked = output
             .broadcast_mul(&mask_f32)
-            .map_err(|e| format!("Mul error: {e}"))?;
-
-        let summed = masked
-            .sum(1)
-            .map_err(|e| format!("Sum error: {e}"))?;
-
+            .map_err(|e| format!("Masked mul: {e}"))?;
+        let summed = masked.sum(1).map_err(|e| format!("Sum: {e}"))?;
         let mask_sum = mask_f32
             .sum(1)
-            .map_err(|e| format!("Mask sum error: {e}"))?
+            .map_err(|e| format!("Mask sum: {e}"))?
             .clamp(1e-9, f64::MAX)
-            .map_err(|e| format!("Clamp error: {e}"))?;
-
+            .map_err(|e| format!("Mask clamp: {e}"))?;
         let mean_pooled = summed
             .broadcast_div(&mask_sum)
-            .map_err(|e| format!("Div error: {e}"))?;
+            .map_err(|e| format!("Mean pool: {e}"))?;
 
-        // L2 normalize
+        // L2 normalize per row → (batch, dim).
         let norm = mean_pooled
             .sqr()
-            .map_err(|e| format!("Sqr error: {e}"))?
+            .map_err(|e| format!("Sqr: {e}"))?
             .sum(1)
-            .map_err(|e| format!("Sum error: {e}"))?
+            .map_err(|e| format!("Norm sum: {e}"))?
             .sqrt()
-            .map_err(|e| format!("Sqrt error: {e}"))?
+            .map_err(|e| format!("Sqrt: {e}"))?
             .clamp(1e-12, f64::MAX)
-            .map_err(|e| format!("Clamp error: {e}"))?;
-
+            .map_err(|e| format!("Norm clamp: {e}"))?
+            .unsqueeze(1)
+            .map_err(|e| format!("Norm unsqueeze: {e}"))?;
         let normalized = mean_pooled
-            .broadcast_div(&norm.unsqueeze(1).map_err(|e| format!("Unsqueeze error: {e}"))?)
-            .map_err(|e| format!("Div error: {e}"))?;
+            .broadcast_div(&norm)
+            .map_err(|e| format!("Normalize: {e}"))?;
 
-        // Extract as Vec<f32>
-        let embedding: Vec<f32> = normalized
-            .squeeze(0)
-            .map_err(|e| format!("Squeeze error: {e}"))?
+        // Extract per-row Vec<f32>. (batch, dim) → flat → split.
+        let dim = embedding_dim();
+        let flat: Vec<f32> = normalized
+            .flatten_all()
+            .map_err(|e| format!("Flatten: {e}"))?
             .to_vec1()
-            .map_err(|e| format!("ToVec error: {e}"))?;
-
-        all_embeddings.push(embedding);
+            .map_err(|e| format!("ToVec: {e}"))?;
+        if flat.len() != batch_size * dim {
+            return Err(format!(
+                "shape mismatch: got {} floats, expected {} × {} = {}",
+                flat.len(), batch_size, dim, batch_size * dim,
+            ));
+        }
+        for i in 0..batch_size {
+            all_embeddings.push(flat[i * dim..(i + 1) * dim].to_vec());
+        }
     }
 
     Ok(all_embeddings)

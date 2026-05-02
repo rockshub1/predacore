@@ -16,7 +16,16 @@ from ._context import (
 
 logger = logging.getLogger(__name__)
 
-_DESKTOP_TIMEOUT = 300  # seconds — raised from 45 per "remove all limits"
+# Trust-tiered timeout. yolo gets the original "no limits" 300s for long
+# automation flows; ask_everytime caps at 60s so a misbehaving action can't
+# hold the macOS Accessibility framework for 5 minutes and stall everything
+# else. Operators that need a longer hold can still pass `timeout` in args
+# (the handler honors it, capped by the trust ceiling).
+_DESKTOP_TIMEOUT_BY_TRUST: dict[str, float] = {
+    "yolo": 300.0,
+    "ask_everytime": 60.0,
+}
+_DESKTOP_TIMEOUT_DEFAULT = 60.0
 
 
 async def handle_desktop_control(args: dict[str, Any], ctx: ToolContext) -> str:
@@ -27,20 +36,24 @@ async def handle_desktop_control(args: dict[str, Any], ctx: ToolContext) -> str:
     if ctx.desktop_operator is None:
         raise subsystem_unavailable("Desktop control", tool="desktop_control")
 
+    trust = getattr(ctx.config.security, "trust_level", "ask_everytime")
+    timeout = _DESKTOP_TIMEOUT_BY_TRUST.get(trust, _DESKTOP_TIMEOUT_DEFAULT)
+
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
             loop.run_in_executor(None, ctx.desktop_operator.execute, action, args),
-            timeout=_DESKTOP_TIMEOUT,
+            timeout=timeout,
         )
         out = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         return out[:50000] if len(out) > 50000 else out
     except asyncio.TimeoutError as exc:
         raise ToolError(
-            f"Desktop control timed out after {_DESKTOP_TIMEOUT}s — action '{action}' took too long",
+            f"Desktop control timed out after {timeout:.0f}s (trust={trust}) — "
+            f"action '{action}' took too long",
             kind=ToolErrorKind.TIMEOUT,
             tool_name="desktop_control",
-            suggestion="Try a simpler action or increase timeout",
+            suggestion="Try a simpler action, switch to yolo trust, or increase timeout",
         ) from exc
     except ToolError:
         raise  # Re-raise our own errors

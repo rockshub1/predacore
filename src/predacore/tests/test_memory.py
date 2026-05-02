@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -951,3 +952,180 @@ class TestMemoryE2EPersistence:
         assert await store2.count() == 1
         assert not (tmp_path / "vectors.json").exists()  # No separate vector file
         store2.close()
+
+
+# ── Healer rate-brake (T5c follow-up) ─────────────────────────────────
+#
+# Two regressions to guard against:
+#  1. The brake's cap should scale with row count so a model upgrade on a
+#     bulk-indexed DB doesn't trip it.
+#  2. audit_invariants only LABELS rows; it must not count toward the
+#     repair brake (would block reembed_skewed from ever running).
+class TestHealerRateBrake:
+    @pytest.mark.asyncio
+    async def test_cap_floor_for_small_db(self, tmp_path):
+        from predacore.memory.healer import Healer, MAX_AUTO_REPAIRS_PER_HOUR
+        store = UnifiedMemoryStore(db_path=str(tmp_path / "small.db"))
+        try:
+            await store.store("a"); await store.store("b")
+            healer = Healer(store, user="t", enabled=False)
+            assert healer._current_repair_cap() == MAX_AUTO_REPAIRS_PER_HOUR
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_cap_scales_with_row_count(self, tmp_path):
+        from predacore.memory.healer import Healer, MAX_AUTO_REPAIRS_PER_HOUR
+        store = UnifiedMemoryStore(db_path=str(tmp_path / "big.db"))
+        try:
+            # Inject row count via bulk insert (skip embeddings — the cap
+            # query is COUNT(*), not embedding-dependent).
+            assert store._conn is not None
+            now = _now_iso()
+            store._conn.executemany(
+                "INSERT INTO memories (id, content, memory_type, importance, "
+                "source, tags, metadata, user_id, created_at, updated_at, "
+                "last_accessed, decay_score) VALUES (?, '', 'note', 1, '', "
+                "'[]', '{}', 'default', ?, ?, ?, 1.0)",
+                [(_uuid(), now, now, now) for _ in range(8000)],
+            )
+            store._conn.commit()
+            healer = Healer(store, user="t", enabled=False)
+            cap = healer._current_repair_cap()
+            assert cap == max(MAX_AUTO_REPAIRS_PER_HOUR, 8000 // 5)
+            assert cap == 1600
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_audit_does_not_count_toward_brake(self, tmp_path):
+        """A row flagged version_skew by audit must NOT bump the brake."""
+        from predacore.memory.healer import Healer
+        store = UnifiedMemoryStore(db_path=str(tmp_path / "audit.db"))
+        try:
+            # Row with old embedding_version → audit will flag version_skew.
+            assert store._conn is not None
+            now = _now_iso()
+            store._conn.execute(
+                "INSERT INTO memories (id, content, memory_type, importance, "
+                "source, tags, metadata, user_id, embedding, created_at, "
+                "updated_at, last_accessed, decay_score, embedding_version, "
+                "verification_state) VALUES (?, ?, 'note', 1, '', '[]', '{}', "
+                "'default', ?, ?, ?, ?, 1.0, 'old-version', 'ok')",
+                (_uuid(), "row", b"\x00" * 4, now, now, now),
+            )
+            store._conn.commit()
+            healer = Healer(store, user="t", enabled=False)
+            healer.audit_invariants()
+            assert healer.stats.auto_repairs_last_hour == 0
+        finally:
+            store.close()
+
+
+# ── Tier-0 + Tier-1.5 verifiers (T7) ─────────────────────────────────
+#
+# Five guarantees:
+#  1. blob sha computation matches git hash-object exactly
+#  2. tier-0 verifies True when the file hasn't changed
+#  3. tier-0 falls through (does NOT return False) when bytes drifted —
+#     other tiers should still get a chance
+#  4. tier-1.5 (AST symbol) finds renames/refactors the substring tier misses
+#  5. cache invalidates on mtime change
+
+
+class TestT7Verifiers:
+    def test_blob_sha_matches_git_hash_object(self, tmp_path):
+        """Our pure-stdlib hash must equal `git hash-object` byte-for-byte."""
+        from predacore.memory.store import (
+            _compute_blob_sha,
+            _compute_blob_sha_for_path,
+        )
+        # Reference value: `printf 'hello\n' | git hash-object --stdin`
+        # → ce013625030ba8dba906f756967f9e9ca394464a
+        f = tmp_path / "hello.txt"
+        f.write_bytes(b"hello\n")
+        assert _compute_blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+        assert _compute_blob_sha_for_path(f) == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+    def test_tier0_verifies_unchanged_file(self, tmp_path):
+        """When file's blob sha == stored blob sha → True without reading content."""
+        from predacore.memory.store import (
+            _compute_blob_sha_for_path,
+            _verify_chunk_against_source,
+        )
+        f = tmp_path / "code.py"
+        f.write_text("def foo():\n    return 42\n")
+        sha = _compute_blob_sha_for_path(f)
+        # Chunk content deliberately differs from file content — only blob sha
+        # match drives verification, proving tier-0 short-circuits.
+        mem = {
+            "source_path": str(f),
+            "source_blob_sha": sha,
+            "content": "(this string is not in the file)",
+            "metadata": "{}",
+        }
+        assert _verify_chunk_against_source(mem) is True
+
+    def test_tier0_falls_through_on_sha_mismatch(self, tmp_path):
+        """Wrong blob sha must NOT short-circuit to True — should fall through
+        to substring tier so the caller can decide based on content."""
+        from predacore.memory.store import _verify_chunk_against_source
+        f = tmp_path / "code.py"
+        f.write_text("def foo():\n    return 42\n")
+        # Stored sha doesn't match file → tier-0 fails. Content IS in file →
+        # tier-1 (substring) verifies True.
+        mem = {
+            "source_path": str(f),
+            "source_blob_sha": "0" * 40,
+            "content": "def foo():",
+            "metadata": "{}",
+        }
+        assert _verify_chunk_against_source(mem) is True
+
+    def test_tier_1_5_ast_symbol_survives_body_edit(self, tmp_path):
+        """When the function body was edited but the def line + name are
+        intact, tier-1.5 should still verify (substring + line-anchor would
+        fail because chunk text differs from current source)."""
+        from predacore.memory.store import _verify_chunk_against_source
+        f = tmp_path / "code.py"
+        # Current file: function body has been refactored.
+        f.write_text("def foo(x):\n    return x * 2\n")
+        # Stored chunk: original body. Substring fails. Line-anchor would only
+        # match if `def foo(x):` is the first line — let's give the chunk a
+        # leading docstring so the first line ISN'T `def foo(x):`.
+        chunk_text = '"""docstring above moved away"""\ndef foo_OLD_NAME(x):\n    return x'
+        # Wait — the symbol name in the chunk anchor must match what's still
+        # in the file. Use anchor with the current name to test tier-1.5.
+        mem = {
+            "source_path": str(f),
+            "source_blob_sha": None,
+            "content": "def foo(x):\n    return x * 99\n",  # body differs
+            "metadata": json.dumps({
+                "chunk_kind": "function",
+                "anchor": "def foo(x):",
+            }),
+        }
+        # Substring "def foo(x):\n    return x * 99\n" not in file (body
+        # differs). Line-anchor "def foo(x):" IS in file. So even without
+        # tier-1.5 we'd verify via line-anchor. Need a stricter test —
+        # delete the def line from the chunk so tier-2 also fails.
+        del chunk_text  # silences the dead var
+        mem["content"] = "    return x * 99\nsome_other_line"
+        # Now: tier-1 (substring) fails, tier-2 (line-anchor "    return x * 99")
+        # not in file. Only tier-1.5 (symbol "foo" defined in file) wins.
+        assert _verify_chunk_against_source(mem) is True
+
+    def test_blob_sha_cache_invalidates_on_mtime(self, tmp_path):
+        """Editing the file must invalidate the cache so tier-0 picks up
+        the new sha — otherwise we'd verify against stale data."""
+        import time as _t
+        from predacore.memory.store import _cached_blob_sha_for_path
+        f = tmp_path / "edit.py"
+        f.write_text("v1")
+        sha1 = _cached_blob_sha_for_path(f)
+        # Force mtime forward (some filesystems have 1s resolution)
+        _t.sleep(0.05)
+        f.write_text("v2_different")
+        os.utime(f, (f.stat().st_atime, f.stat().st_mtime + 1))
+        sha2 = _cached_blob_sha_for_path(f)
+        assert sha1 != sha2

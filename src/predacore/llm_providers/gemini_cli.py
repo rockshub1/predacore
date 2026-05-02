@@ -110,7 +110,7 @@ class GeminiCLIProvider(LLMProvider):
         model = self.config.model or "gemini-2.5-flash"
 
         # Construct command
-        _trust = os.getenv("PREDACORE_TRUST_LEVEL", "normal").lower()
+        _trust = os.getenv("PREDACORE_TRUST_LEVEL", "ask_everytime").lower()
         cmd = [gemini_bin, "-p", "", "-o", "text"]
         if _trust == "yolo":
             cmd.append("--yolo")

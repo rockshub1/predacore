@@ -41,10 +41,16 @@ class ToolCircuitBreaker:
     """Per-tool circuit breaker with auto-recovery.
 
     State machine:
-      CLOSED → OPEN        after ``failure_threshold`` consecutive failures
-      OPEN → HALF_OPEN     after ``cooldown_seconds`` elapsed
-      HALF_OPEN → CLOSED   on first success (probe passed)
-      HALF_OPEN → OPEN     on first failure (probe failed, reset cooldown)
+      CLOSED → OPEN          after ``failure_threshold`` consecutive failures
+      OPEN → HALF_OPEN       after ``cooldown_seconds`` elapsed
+      HALF_OPEN → CLOSED     after ``success_threshold`` consecutive probes
+      HALF_OPEN → OPEN       on any failure (resets cooldown)
+
+    The N-success probe (rather than 1-success) prevents flapping: a single
+    lucky success during a transient recovery window won't close the circuit
+    only for it to immediately re-open on the next call. We need
+    ``success_threshold`` clean probes in a row to consider the dependency
+    truly recovered.
 
     Usage:
         cb = ToolCircuitBreaker()
@@ -59,10 +65,12 @@ class ToolCircuitBreaker:
 
     failure_threshold: int = 3
     cooldown_seconds: float = 60.0
+    success_threshold: int = 3  # Probes needed in HALF_OPEN to fully close
     # Per-tool state
     _failures: dict[str, int] = field(default_factory=dict)
     _states: dict[str, CircuitState] = field(default_factory=dict)
     _opened_at: dict[str, float] = field(default_factory=dict)
+    _half_open_successes: dict[str, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def state(self, tool_name: str) -> CircuitState:
@@ -85,16 +93,32 @@ class ToolCircuitBreaker:
         return self.state(tool_name) == CircuitState.OPEN
 
     def record_success(self, tool_name: str) -> None:
-        """Record a successful execution — resets failure count and closes circuit."""
+        """Record a successful execution.
+
+        From CLOSED: resets failure count.
+        From HALF_OPEN: increments probe counter; closes only after
+            ``success_threshold`` consecutive probes succeed (prevents flapping).
+        """
         with self._lock:
-            self._failures[tool_name] = 0
             current = self._get_state(tool_name)
-            if current in (CircuitState.HALF_OPEN, CircuitState.OPEN):
-                self._states[tool_name] = CircuitState.CLOSED
-                logger.info(
-                    "Circuit breaker CLOSED for '%s' after successful probe",
-                    tool_name,
-                )
+            if current == CircuitState.HALF_OPEN:
+                count = self._half_open_successes.get(tool_name, 0) + 1
+                self._half_open_successes[tool_name] = count
+                if count >= self.success_threshold:
+                    self._states[tool_name] = CircuitState.CLOSED
+                    self._failures[tool_name] = 0
+                    self._half_open_successes[tool_name] = 0
+                    logger.info(
+                        "Circuit breaker CLOSED for '%s' after %d successful probes",
+                        tool_name, self.success_threshold,
+                    )
+                else:
+                    logger.debug(
+                        "Circuit breaker HALF_OPEN probe %d/%d for '%s'",
+                        count, self.success_threshold, tool_name,
+                    )
+            else:
+                self._failures[tool_name] = 0
 
     def record_failure(self, tool_name: str) -> None:
         """Record a failure — may trip the circuit."""
@@ -104,9 +128,10 @@ class ToolCircuitBreaker:
             count = self._failures[tool_name]
 
             if current == CircuitState.HALF_OPEN:
-                # Probe failed — reopen
+                # Probe failed — reopen and clear probe counter
                 self._states[tool_name] = CircuitState.OPEN
                 self._opened_at[tool_name] = time.time()
+                self._half_open_successes[tool_name] = 0
                 logger.warning(
                     "Circuit breaker RE-OPENED for '%s' (probe failed)",
                     tool_name,
@@ -186,20 +211,25 @@ class ToolResultCache:
         """Check if a tool's results can be cached."""
         return tool_name in self._ttl_map
 
-    def _make_key(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Create a cache key from tool name + arguments."""
+    def _make_key(self, tool_name: str, args: dict[str, Any], origin: str = "") -> str:
+        """Create a cache key from tool name + arguments + origin.
+
+        `origin` (e.g. "user", "agent:planner", or a stable user/session id)
+        scopes the key so two callers issuing the same args don't read each
+        other's cached results. Empty origin = single-tenant default.
+        """
         args_str = json.dumps(args, sort_keys=True, default=str)
         key_hash = hashlib.md5(
-            f"{tool_name}:{args_str}".encode(), usedforsecurity=False
+            f"{tool_name}:{origin}:{args_str}".encode(), usedforsecurity=False
         ).hexdigest()[:16]
-        return f"{tool_name}:{key_hash}"
+        return f"{tool_name}:{origin}:{key_hash}"
 
-    def get(self, tool_name: str, args: dict[str, Any]) -> str | None:
+    def get(self, tool_name: str, args: dict[str, Any], *, origin: str = "") -> str | None:
         """Retrieve cached result if fresh, else None."""
         if not self.is_cacheable(tool_name):
             return None
 
-        key = self._make_key(tool_name, args)
+        key = self._make_key(tool_name, args, origin)
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
@@ -236,11 +266,13 @@ class ToolResultCache:
                 return True
         return False
 
-    def put(self, tool_name: str, args: dict[str, Any], result: str, *, never_cache: bool = False) -> None:
-        """Store result in cache.
+    def put(self, tool_name: str, args: dict[str, Any], result: str, *, never_cache: bool = False, origin: str = "") -> None:
+        """Store result in cache, scoped by origin.
 
         Args:
             never_cache: If True, explicitly skip caching this result.
+            origin: Caller scope for cache isolation. Same value must be
+                used on the matching get() to retrieve.
         """
         if never_cache:
             return
@@ -250,7 +282,7 @@ class ToolResultCache:
         if self._is_error_result(result):
             return
 
-        key = self._make_key(tool_name, args)
+        key = self._make_key(tool_name, args, origin)
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)

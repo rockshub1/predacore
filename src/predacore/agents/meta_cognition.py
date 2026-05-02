@@ -145,26 +145,34 @@ def _shell_command_fingerprint(command: str) -> str:
 
     Rules:
       - Strip leading `cd <path> && ` (it's navigation, not the action)
-      - Strip trailing pipes/redirects (`| head`, `2>&1`, `>out.log`)
-      - Return up to first 3 tokens of what's left.
+      - Strip trailing I/O redirects only (`| head`, `2>&1`, `>out.log`).
+        Command separators like `&&`, `||`, `;` are KEPT — they introduce
+        new commands that must remain visible to loop detection. Truncating
+        at `&&` previously hid destructive trailers (e.g. `safe_cmd && rm -rf /`
+        collapsed to `safe_cmd`).
+      - Return up to first 8 tokens of what's left so chained commands like
+        `git reset --hard HEAD~1 && npm publish` survive in the fingerprint
+        with both halves visible.
 
     Examples:
       `cd ~/proj && cat package.json | head -5`  → `cat package.json`
       `cd X && npm run build 2>&1 | tail -30`    → `npm run build`
       `cat X/tsconfig.json`                       → `cat X/tsconfig.json`
-      `cd X && npx next build 2>&1 | head -100`  → `npx next build`
+      `safe_cmd && rm -rf /`                      → `safe_cmd && rm -rf` (preserved)
     """
     if not command:
         return ""
     cmd = command.strip()
     cmd = _CD_PREFIX_RE.sub("", cmd)
-    # Cut at pipes or redirects so `cat x | head` == `cat x > y`
-    for sep in (" | ", " 2>&1", " 2>/dev/null", " >", " &&"):
+    # Cut only at true I/O redirects, NOT command separators like && / ; / ||.
+    for sep in (" | ", " 2>&1", " 2>/dev/null", " > ", " >> ", " 2> "):
         idx = cmd.find(sep)
         if idx > 0:
             cmd = cmd[:idx]
+    # Final-redirect form `>file` (no surrounding spaces) at end of string.
+    cmd = re.sub(r"\s+>{1,2}\s*\S+$", "", cmd)
     tokens = cmd.split()
-    return " ".join(tokens[:3])
+    return " ".join(tokens[:8])
 
 
 @dataclass

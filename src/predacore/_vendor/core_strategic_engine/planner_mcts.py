@@ -21,7 +21,11 @@ from uuid import UUID, uuid4
 from google.protobuf.struct_pb2 import Struct
 from prometheus_client import Counter, Histogram
 
-from predacore._vendor.common.llm import default_params, get_default_llm_client
+# LLM access goes through the production LLMInterface (router with circuit
+# breaker, failover, response cache). The MCTS planner uses a thin local
+# adapter so its existing ``await self.llm.generate(...)`` call shape stays
+# stable while the underlying client is the same one the rest of the system
+# uses.
 from predacore._vendor.common.logging_utils import log_json
 from predacore._vendor.common.models import Plan, PlanStep, StatusEnum
 from predacore._vendor.common.protos import egm_pb2, egm_pb2_grpc
@@ -34,6 +38,36 @@ try:
     _PLAN_RANKER_AVAILABLE = True
 except Exception:  # noqa: BLE001 — graceful degradation
     _PLAN_RANKER_AVAILABLE = False
+
+
+class _LLMGenerateAdapter:
+    """Thin shim exposing ``await adapter.generate(messages, temperature=, max_tokens=)``
+    on top of ``predacore.llm_providers.LLMInterface.chat()``.
+
+    The MCTS planner was written against the old vendor LLM client's
+    ``generate()`` API; rather than touch every call site, we wrap the
+    production interface here so the planner gets circuit-breaker,
+    failover, and response-cache for free while keeping its existing
+    call shape.
+    """
+
+    def __init__(self, *, logger: logging.Logger | None = None) -> None:
+        from predacore.config import load_config
+        from predacore.llm_providers.router import LLMInterface
+        self._logger = logger or logging.getLogger(__name__)
+        self._llm = LLMInterface(load_config())
+
+    async def generate(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> str:
+        response = await self._llm.chat(
+            messages, temperature=temperature, max_tokens=max_tokens
+        )
+        return str(response.get("content") or "")
 
 
 class ABMCTSPlanner:
@@ -52,7 +86,7 @@ class ABMCTSPlanner:
             "ABMCTSPlanner initialized (prototype; defers to HTN baseline)."
         )
         try:
-            self.llm = get_default_llm_client(logger=self.logger)
+            self.llm = _LLMGenerateAdapter(logger=self.logger)
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"LLM client not initialized for MCTS scoring: {e}")
             self.llm = None
@@ -185,7 +219,7 @@ class ABMCTSPlanner:
                 {"role": "user", "content": _json.dumps(prompt, ensure_ascii=False)},
             ]
             alt_raw = await self.llm.generate(
-                msgs, params=default_params(temperature=0.4, max_tokens=800)
+                msgs, temperature=0.4, max_tokens=800
             )
             try:
                 alt = _json.loads(alt_raw)
@@ -270,7 +304,7 @@ class ABMCTSPlanner:
                         },
                     ]
                     score_raw = await self.llm.generate(
-                        msgs2, params=default_params(temperature=0.2, max_tokens=200)
+                        msgs2, temperature=0.2, max_tokens=200
                     )
                     pr = _json.loads(score_raw)
                     sc = float(pr.get("score", 0.0))
@@ -358,7 +392,7 @@ class ABMCTSPlanner:
         ]
         try:
             content = await self.llm.generate(
-                msgs, params=default_params(temperature=0.2, max_tokens=250)
+                msgs, temperature=0.2, max_tokens=250
             )
             pr = _json.loads(content)
             s, j = float(pr.get("score", 0.0)), str(pr.get("justification", ""))
@@ -438,7 +472,7 @@ class ABMCTSPlanner:
         ]
         try:
             raw = await self.llm.generate(
-                msgs, params=default_params(temperature=0.4, max_tokens=700)
+                msgs, temperature=0.4, max_tokens=700
             )
             obj = _json.loads(raw)
             cands = (obj.get("candidates") or [])[: self.branch_factor]

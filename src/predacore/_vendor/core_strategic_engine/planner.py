@@ -9,15 +9,12 @@ from dataclasses import dataclass, field  # Added dataclasses
 from typing import Any
 from uuid import UUID
 
-import grpc  # For potential KN call errors
 import spacy
 
-# Import necessary components and models
+# Import necessary components and models. The Knowledge Nexus service was
+# retired (PR 1.7); the planner used to query it for entity context but
+# now operates from the goal text + LLM-driven decomposition alone.
 from predacore._vendor.common.models import Plan, PlanStep, StatusEnum
-from predacore._vendor.common.protos import (  # To interact with KN
-    knowledge_nexus_pb2,
-    knowledge_nexus_pb2_grpc,
-)
 
 # --- Add these new structures after the imports ---
 
@@ -64,10 +61,13 @@ class HierarchicalStrategicPlannerV1(AbstractHierarchicalPlanner):
 
     def __init__(
         self,
-        kn_stub: knowledge_nexus_pb2_grpc.KnowledgeNexusServiceStub,
+        kn_stub: Any = None,  # retained for backward compat — KN was retired
         logger: logging.Logger | None = None,
     ):
-        self.kn_stub = kn_stub
+        # kn_stub is accepted but unused; callers that still pass it (the
+        # MCTS planner does, threading None through from subsystem_init)
+        # don't need to change.
+        self.kn_stub = None
         self.logger = logger or logging.getLogger(__name__)
         # --- Existing spaCy loading ---
         try:
@@ -345,31 +345,20 @@ class HierarchicalStrategicPlannerV1(AbstractHierarchicalPlanner):
         return subgoals
 
     async def _query_knowledge(self, entity: str) -> dict[str, Any]:
-        """Queries KN for a specific entity name. Returns relevant node IDs."""
-        self.logger.debug(f"Querying knowledge for entity: {entity}")
-        knowledge = {"relevant_nodes": []}
-        try:
-            request = knowledge_nexus_pb2.QueryNodesRequest(
-                properties_filter=knowledge_nexus_pb2.google_dot_protobuf_dot_struct__pb2.Struct(
-                    fields={
-                        "name": knowledge_nexus_pb2.google_dot_protobuf_dot_struct__pb2.Value(
-                            string_value=entity
-                        )
-                    }
-                )
-            )
-            response = await self.kn_stub.QueryNodes(request)
-            knowledge["relevant_nodes"] = [node.id for node in response.nodes]
-            self.logger.info(
-                f"Found {len(knowledge['relevant_nodes'])} relevant nodes in KN for '{entity}'."
-            )
-        except grpc.aio.AioRpcError as e:
-            self.logger.error(
-                f"gRPC error querying KN for '{entity}': {e.details()}", exc_info=True
-            )
-        except Exception as e:
-            self.logger.error(f"Error querying KN for '{entity}': {e}", exc_info=True)
-        return knowledge
+        """Stub: KN service was retired in PR 1.7.
+
+        The planner used to call out to the gRPC Knowledge Nexus to fetch
+        entity nodes for query/summarize intents. The replacement story
+        lives in ``predacore.memory.UnifiedMemoryStore`` (entity extraction
+        + retrieval), but wiring that into the HTN goal-routing path is a
+        separate piece of work. For now this returns an empty result and
+        downstream HTN routing falls back to the goal text alone.
+        """
+        self.logger.debug(
+            "Knowledge Nexus query suppressed (service retired): entity=%s",
+            entity,
+        )
+        return {"relevant_nodes": []}
 
     # --- Remove old _select_strategy and _generate_steps ---
 

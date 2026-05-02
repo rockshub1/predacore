@@ -13,7 +13,6 @@ import json
 import os
 from typing import Any
 
-from predacore._vendor.common.llm import default_params, get_default_llm_client
 from predacore._vendor.common.protos import egm_pb2
 
 
@@ -39,6 +38,10 @@ async def propose_roster_diff(
     """Ask the LLM to propose spawn/retire operations in strict JSON.
 
     limits: {"max_total": int, "max_per_type": {type_id: int}}
+
+    ``llm_client`` is a ``predacore.llm_providers.LLMInterface`` instance.
+    Its ``chat()`` returns ``{"content": str, "tool_calls": ..., "usage": ...}``;
+    we only consume ``content``.
     """
     system = (
         "You are an operations planner. You must output only JSON. "
@@ -46,20 +49,19 @@ async def propose_roster_diff(
         "Constraints: never exceed per-type or total limits; prefer keeping at least one python_executor."
     )
     user = json.dumps({"state": state, "limits": limits}, ensure_ascii=False)
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
     schema_hint = (
         "Respond with: {\n"
         '  "actions": [ {"op": "spawn|retire", "agent_type_id": string, "count": int } ],\n'
         '  "justification": string\n'
         "}"
     )
-    content = await llm_client.generate(
-        messages + [{"role": "system", "content": schema_hint}],
-        params=default_params(temperature=0.1, max_tokens=400),
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+        {"role": "system", "content": schema_hint},
+    ]
+    response = await llm_client.chat(messages, temperature=0.1, max_tokens=400)
+    content = str(response.get("content") or "")
     try:
         plan = json.loads(content)
         if not isinstance(plan, dict) or "actions" not in plan:
@@ -82,8 +84,13 @@ async def scheduler_tick(daf_service, egm_stub, logger) -> None:
     if os.getenv("LLM_SCHEDULER_ENABLED") != "1":
         return
 
+    # Use the production LLMInterface so the scheduler benefits from the same
+    # circuit breaker / failover / response-cache as the main agent loop —
+    # one LLM abstraction across the system, not two.
     try:
-        llm = get_default_llm_client(logger=logger)
+        from predacore.config import load_config
+        from predacore.llm_providers.router import LLMInterface
+        llm = LLMInterface(load_config())
     except (ImportError, RuntimeError, OSError, ValueError) as e:
         logger.debug(f"LLM scheduler disabled (no client): {e}")
         return

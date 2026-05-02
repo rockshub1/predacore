@@ -256,23 +256,27 @@ class ToolExecutor:
         base_delay: float = 0.5,
         **kwargs: Any,
     ) -> httpx.Response:
-        """HTTP request with exponential backoff retry on transient errors."""
+        """HTTP request with exponential backoff retry + per-hop SSRF validation.
+
+        Redirects are followed manually via ``ssrf_safe_request`` so each hop
+        is re-validated against private IPs / DNS rebinding.
+        """
         from random import random
 
         import httpx
 
-        from predacore.auth.security import validate_url_ssrf
-
-        validate_url_ssrf(url)  # raises ValueError if unsafe
+        from predacore.auth.security import ssrf_safe_request
 
         retryable = {429, 500, 502, 503, 504}
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
+                # follow_redirects must stay False — ssrf_safe_request walks
+                # the chain itself with per-hop validation.
                 async with httpx.AsyncClient(
-                    timeout=HTTP_CLIENT_TIMEOUT, follow_redirects=True
+                    timeout=HTTP_CLIENT_TIMEOUT, follow_redirects=False
                 ) as client:
-                    resp = await getattr(client, method)(url, **kwargs)
+                    resp = await ssrf_safe_request(client, method, url, **kwargs)
                     if resp.status_code in retryable and attempt < max_attempts:
                         delay = base_delay * (2 ** (attempt - 1)) * (1 + 0.1 * random())
                         ra = resp.headers.get("Retry-After")

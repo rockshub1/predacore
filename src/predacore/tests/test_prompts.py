@@ -193,3 +193,83 @@ class TestFileCache:
         f.write_text("  content with spaces  \n\n")
         content = _read_file_cached(f)
         assert content == "content with spaces"
+
+
+# ── Workspace context block (T5d) ──────────────────────────────────
+#
+# The block must:
+#  1. surface the active project_id and channels (so the model can match tone)
+#  2. say "first touch" when the marker file is missing
+#  3. say "bulk-indexed" once the marker file exists
+#  4. never raise — return "" on any detection failure
+
+
+class TestWorkspaceContextBlock:
+    def _config(self, tmp_path, channels=("cli",)):
+        """Minimal config with channels.enabled + home_dir wired up."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            home_dir=str(tmp_path),
+            channels=SimpleNamespace(enabled=list(channels)),
+        )
+
+    def test_first_touch_when_marker_missing(self, tmp_path, monkeypatch):
+        from predacore.prompts import _workspace_context_block
+        # Force a known project_id, marker file absent
+        monkeypatch.setattr(
+            "predacore.memory.project_id.default_project",
+            lambda *a, **kw: "demo_project",
+        )
+        block = _workspace_context_block(self._config(tmp_path))
+        assert "First Touch" in block
+        assert "demo_project" in block
+        assert "memory_bulk_index" in block
+
+    def test_indexed_when_marker_present(self, tmp_path, monkeypatch):
+        from predacore.memory.workspace import mark_bulk_indexed
+        from predacore.prompts import _workspace_context_block
+        monkeypatch.setattr(
+            "predacore.memory.project_id.default_project",
+            lambda *a, **kw: "demo_project",
+        )
+        mark_bulk_indexed(
+            "demo_project",
+            files_indexed=10,
+            chunks_added=42,
+            home_dir=str(tmp_path),
+        )
+        block = _workspace_context_block(self._config(tmp_path))
+        assert "First Touch" not in block
+        assert "bulk-indexed" in block
+        assert "demo_project" in block
+
+    def test_channels_listed_in_block(self, tmp_path, monkeypatch):
+        from predacore.prompts import _workspace_context_block
+        monkeypatch.setattr(
+            "predacore.memory.project_id.default_project",
+            lambda *a, **kw: "demo_project",
+        )
+        block = _workspace_context_block(
+            self._config(tmp_path, channels=("cli", "voice", "slack")),
+        )
+        assert "cli" in block and "voice" in block and "slack" in block
+
+    def test_returns_empty_when_project_unresolved(self, tmp_path, monkeypatch):
+        from predacore.prompts import _workspace_context_block
+        monkeypatch.setattr(
+            "predacore.memory.project_id.default_project",
+            lambda *a, **kw: "all",
+        )
+        assert _workspace_context_block(self._config(tmp_path)) == ""
+
+    def test_never_raises_on_detection_failure(self, tmp_path, monkeypatch):
+        from predacore.prompts import _workspace_context_block
+
+        def _boom(*a, **kw):
+            raise RuntimeError("project_id detection blew up")
+
+        monkeypatch.setattr(
+            "predacore.memory.project_id.default_project", _boom,
+        )
+        # Must swallow — assembly shouldn't break because of workspace probe.
+        assert _workspace_context_block(self._config(tmp_path)) == ""

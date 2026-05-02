@@ -58,6 +58,23 @@ _BUILTIN_ADAPTERS: dict[str, str] = {
     "signal":   "predacore.channels.signal:SignalAdapter",
     "imessage": "predacore.channels.imessage:IMessageAdapter",
     "email":    "predacore.channels.email:EmailAdapter",
+    "twilio":   "predacore.channels.twilio:TwilioAdapter",
+    "matrix":   "predacore.channels.matrix:MatrixAdapter",
+    "mastodon": "predacore.channels.mastodon:MastodonAdapter",
+    "bluesky":  "predacore.channels.bluesky:BlueskyAdapter",
+    # T11 — research-validated
+    "mattermost":  "predacore.channels.mattermost:MattermostAdapter",
+    "rocketchat":  "predacore.channels.rocketchat:RocketchatAdapter",
+    "vonage":      "predacore.channels.vonage:VonageAdapter",
+    "messagebird": "predacore.channels.messagebird:MessagebirdAdapter",
+    "line":        "predacore.channels.line:LineAdapter",
+    "viber":       "predacore.channels.viber:ViberAdapter",
+    "xmpp":        "predacore.channels.xmpp:XmppAdapter",
+    "irc":         "predacore.channels.irc:IrcAdapter",
+    "google_chat": "predacore.channels.google_chat:GoogleChatAdapter",
+    "threema":     "predacore.channels.threema:ThreemaAdapter",
+    "zalo":        "predacore.channels.zalo:ZaloAdapter",
+    "kakaotalk":   "predacore.channels.kakaotalk:KakaotalkAdapter",
 }
 
 

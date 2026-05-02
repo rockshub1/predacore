@@ -49,6 +49,16 @@ class _BytesSafeEncoder(json.JSONEncoder):
 
 log = logging.getLogger(__name__)
 
+
+# Backpressure on the single-writer queue. If writes outpace SQLite throughput
+# the queue grows unbounded and reads start timing out as connections pile up.
+# Cap the queue and reject writes with a clear error after a short wait so the
+# caller can retry / backoff instead of hanging forever.
+_DEFAULT_WRITE_QUEUE_MAX = int(os.environ.get("PREDACORE_DB_WRITE_QUEUE_MAX", "50"))
+_DEFAULT_WRITE_QUEUE_PUT_TIMEOUT = float(
+    os.environ.get("PREDACORE_DB_WRITE_QUEUE_PUT_TIMEOUT", "10.0")
+)
+
 _DEFAULT_SOCKET = str(Path.home() / ".predacore" / "db.sock")
 _HEADER = struct.Struct("!I")  # 4-byte big-endian unsigned int
 
@@ -69,10 +79,18 @@ class DBServer:
         self._db_registry: dict[str, str] = dict(db_registry)
         self._connections: dict[str, sqlite3.Connection] = {}
         self._server: asyncio.AbstractServer | None = None
-        self._write_queue: asyncio.Queue[tuple[asyncio.Future, str, str, list | None]] = asyncio.Queue()
+        # Bounded queue: writes time out via wait_for() rather than queueing
+        # forever when SQLite is slow.
+        self._write_queue: asyncio.Queue[tuple[asyncio.Future, str, str, list | None]] = (
+            asyncio.Queue(maxsize=_DEFAULT_WRITE_QUEUE_MAX)
+        )
+        self._write_put_timeout: float = _DEFAULT_WRITE_QUEUE_PUT_TIMEOUT
         self._writer_task: asyncio.Task | None = None
         self._conn_count: int = 0
         self._query_count: int = 0
+        # Cumulative count of writes rejected due to queue-full backpressure.
+        # Useful for `predacore status` to surface "DB is overloaded" signals.
+        self._write_rejections: int = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -284,7 +302,23 @@ class DBServer:
                     payload = (sql, params.get("params"))
                 else:
                     payload = sql  # type: ignore[assignment]
-                await self._write_queue.put((fut, method, db_name, payload))
+                # Backpressure: if the writer can't drain fast enough, return
+                # a structured 503-equivalent rather than hanging forever.
+                try:
+                    await asyncio.wait_for(
+                        self._write_queue.put((fut, method, db_name, payload)),
+                        timeout=self._write_put_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    self._write_rejections += 1
+                    return {
+                        "error": (
+                            f"DB write queue full (>{self._write_queue.maxsize} pending "
+                            f"after {self._write_put_timeout:.0f}s) — server overloaded. "
+                            "Retry with backoff."
+                        ),
+                        "id": req_id,
+                    }
                 result = await fut
             elif method == "query":
                 result = await asyncio.get_running_loop().run_in_executor(

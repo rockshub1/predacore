@@ -138,10 +138,14 @@ from .mcp import (
 
 # ── Memory ──
 from .memory import (
+    handle_memory_bulk_abort,
+    handle_memory_bulk_index,
     handle_memory_delete,
     handle_memory_explain,
     handle_memory_get,
+    handle_memory_index_status,
     handle_memory_recall,
+    handle_memory_scan_directory,
     handle_memory_stats,
     handle_memory_store,
 )
@@ -200,6 +204,10 @@ HANDLER_MAP: dict[str, Callable] = {
     ToolName.MEMORY_DELETE: handle_memory_delete,
     ToolName.MEMORY_STATS: handle_memory_stats,
     ToolName.MEMORY_EXPLAIN: handle_memory_explain,
+    ToolName.MEMORY_BULK_INDEX: handle_memory_bulk_index,
+    ToolName.MEMORY_BULK_ABORT: handle_memory_bulk_abort,
+    ToolName.MEMORY_INDEX_STATUS: handle_memory_index_status,
+    ToolName.MEMORY_SCAN_DIRECTORY: handle_memory_scan_directory,
     # Voice
     ToolName.SPEAK: handle_speak,
     ToolName.VOICE_NOTE: handle_voice_note,
@@ -280,6 +288,8 @@ __all__ = [
     "handle_memory_store", "handle_memory_recall",
     "handle_memory_get", "handle_memory_delete",
     "handle_memory_stats", "handle_memory_explain",
+    "handle_memory_bulk_index", "handle_memory_scan_directory",
+    "handle_memory_bulk_abort", "handle_memory_index_status",
     "handle_speak", "handle_voice_note",
     "handle_desktop_control", "handle_screen_vision", "handle_android_control",
     "handle_multi_agent", "handle_strategic_plan", "handle_openclaw_delegate",

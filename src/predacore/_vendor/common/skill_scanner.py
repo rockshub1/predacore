@@ -106,9 +106,13 @@ _READ_TOOLS = frozenset({
     "identity_read",
 })
 
-# Tools that send data to network
+# Tools that send data to network. ``api_call`` was missing here despite
+# being the most direct way to POST data outbound — adding it closes a
+# coverage hole that the exfiltration-pattern detector would otherwise miss.
 _NETWORK_SEND_TOOLS = frozenset({
-    "web_scrape", "browser_automation", "speak", "voice_note",
+    "api_call",
+    "web_scrape", "browser_automation", "browser_control",
+    "speak", "voice_note",
     "image_gen", "multi_agent", "openclaw_delegate",
 })
 
@@ -200,29 +204,80 @@ class SkillScanner:
         return findings
 
     def _check_exfiltration_pattern(self, genome: SkillGenome) -> list[ScanFinding]:
-        """Detect read-then-send patterns that could exfiltrate data."""
+        """Detect read-then-send patterns that could exfiltrate data.
+
+        The check is **sequence-aware**: a read step + an unrelated network
+        step elsewhere in the recipe is NOT exfiltration (a skill might
+        legitimately do both in independent contexts). We flag when the
+        network step ACTUALLY consumes the read step's output, evidenced by:
+
+          (a) the network step is the immediate next step (data flows by
+              implicit pipe), OR
+          (b) the network step has ``use_previous=True`` AND the immediately
+              preceding step is a read tool, OR
+          (c) the network step's parameters reference an output variable
+              that resolves to a read step (templated ``{{prev}}`` or
+              ``{{step_N}}``).
+
+        The previous stateless detector flagged any read+send combo, even
+        unrelated ones, AND missed encode-then-send (since base64/encode
+        between them broke the read→send adjacency). The new shape catches
+        intent-bearing pipes while reducing false positives.
+        """
         findings = []
-        has_read = False
-        read_step_idx = -1
 
         for i, step in enumerate(genome.steps):
-            if step.tool_name in _READ_TOOLS:
-                has_read = True
-                read_step_idx = i
+            if step.tool_name not in _NETWORK_SEND_TOOLS:
+                continue
 
-            if has_read and step.tool_name in _NETWORK_SEND_TOOLS:
+            # Look at the immediately preceding step — only adjacency or
+            # explicit use_previous wiring qualifies as exfiltration intent.
+            prev_idx = i - 1
+            if prev_idx < 0:
+                continue
+            prev_step = genome.steps[prev_idx]
+            prev_is_read = prev_step.tool_name in _READ_TOOLS
+
+            # (a) + (b): adjacency, with use_previous strengthening the signal
+            uses_prev = bool(getattr(step, "use_previous", False))
+            if prev_is_read and (uses_prev or i - prev_idx == 1):
                 findings.append(ScanFinding(
                     rule="exfiltration_pattern",
                     severity="critical",
                     description=(
-                        f"Skill reads local data (step {read_step_idx}: "
-                        f"{genome.steps[read_step_idx].tool_name}) then sends to "
-                        f"network (step {i}: {step.tool_name}). "
-                        f"This pattern can exfiltrate sensitive data."
+                        f"Step {i} ({step.tool_name}) sends data to the "
+                        f"network immediately after step {prev_idx} "
+                        f"({prev_step.tool_name}) read local data"
+                        + (" (use_previous=True)" if uses_prev else "")
+                        + ". This pattern can exfiltrate sensitive data."
                     ),
                     step_index=i,
                     tool_name=step.tool_name,
                 ))
+                continue
+
+            # (c): templated reference to an earlier read step's output
+            params_str = str(step.parameters)
+            for j in range(i):
+                if genome.steps[j].tool_name not in _READ_TOOLS:
+                    continue
+                if (
+                    "{{prev}}" in params_str
+                    or f"{{{{step_{j}}}}}" in params_str
+                    or f"{{{{steps[{j}]}}}}" in params_str
+                ):
+                    findings.append(ScanFinding(
+                        rule="exfiltration_pattern",
+                        severity="critical",
+                        description=(
+                            f"Step {i} ({step.tool_name}) parameters reference "
+                            f"the output of read step {j} ({genome.steps[j].tool_name}) "
+                            f"and send to the network. Likely exfiltration."
+                        ),
+                        step_index=i,
+                        tool_name=step.tool_name,
+                    ))
+                    break
         return findings
 
     def _check_sensitive_paths(self, genome: SkillGenome) -> list[ScanFinding]:

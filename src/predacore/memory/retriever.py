@@ -35,8 +35,14 @@ class MemoryRetriever:
     Token budgets (default max_tokens=3000):
         Preferences:      500 tokens  — always included first
         Entity context:    800 tokens  — entities found in the query
-        Semantic results: 1200 tokens  — embedding similarity search
+        Semantic results: 1800 tokens  — embedding similarity search (fetch_k=25)
+        Fuzzy matches:     400 tokens  — typo-tolerant trigram (Rust)
         Episode summaries: 500 tokens  — recent session summaries
+
+    Note: the per-section budgets are caps; if max_tokens is tight the
+    later sections shrink first. Benchmarks call ``store.recall`` directly
+    and don't go through this retriever — adjusting these budgets changes
+    the auto-context per LLM turn but doesn't move benchmark numbers.
     """
 
     def __init__(
@@ -87,7 +93,11 @@ class MemoryRetriever:
             chars_used += len(entity_section)
 
         # ── 3. Semantic search results ───────────────────────────────
-        semantic_budget = min(1200 * _CHARS_PER_TOKEN, (max_chars - chars_used) // 2)
+        # Bumped 1200→1800 tokens. With fetch_k=25 below, more candidates
+        # survive the trim and reach the LLM — the auto-context per turn
+        # carries strictly more relevant memories without inflating any
+        # benchmark (benchmarks call store.recall directly, bypassing this).
+        semantic_budget = min(1800 * _CHARS_PER_TOKEN, (max_chars - chars_used) // 2)
         semantic_section = await self._build_semantic_section(
             query,
             user_id,
@@ -225,10 +235,15 @@ class MemoryRetriever:
         results = self._semantic_cache.get(cache_key)
         if results is None:
             try:
+                # fetch_k=25 (was 15). The token budget below trims the final
+                # output, so a larger fetch gives the budget more candidates
+                # to pick from — improves diversity across files when many
+                # chunks come from the same source. Cost: a few extra cosine
+                # comparisons in Rust (~negligible).
                 results = await self._store.recall(
                     query=query,
                     user_id=user_id,
-                    top_k=15,
+                    top_k=25,
                     min_importance=1,
                     scopes=scopes,
                     team_id=team_id,

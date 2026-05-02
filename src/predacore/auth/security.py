@@ -14,12 +14,17 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import re
 import socket
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -421,3 +426,75 @@ def validate_url_ssrf(url: str) -> bool:
         )
 
     return True
+
+
+async def validate_url_ssrf_async(url: str) -> bool:
+    """Async variant of ``validate_url_ssrf`` — runs DNS in a thread executor.
+
+    Synchronous ``socket.getaddrinfo`` blocks the event loop. Wrapping the
+    sync validator in ``asyncio.to_thread`` keeps the loop responsive while
+    DNS resolves; the IP-check logic is identical.
+    """
+    return await asyncio.to_thread(validate_url_ssrf, url)
+
+
+# Status codes that trigger a redirect according to RFC 7231 + 7538.
+_REDIRECT_STATUSES: frozenset[int] = frozenset({301, 302, 303, 307, 308})
+
+# Default ceiling on hops — a malicious chain shouldn't exhaust resources.
+DEFAULT_MAX_REDIRECTS: int = 10
+
+
+async def ssrf_safe_request(
+    client: "httpx.AsyncClient",
+    method: str,
+    url: str,
+    *,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    **request_kwargs: Any,
+) -> "httpx.Response":
+    """Execute an HTTP request with per-hop SSRF validation.
+
+    httpx's built-in ``follow_redirects=True`` would follow a redirect from
+    a public host to ``http://localhost/admin`` without re-validating —
+    classic SSRF bypass. This helper disables auto-redirects and manually
+    walks the chain, calling :func:`validate_url_ssrf_async` on each hop.
+
+    Per RFC 7231 §6.4.4, a 303 See Other always uses GET on the next hop;
+    other 3xx codes preserve the original method.
+    """
+    import httpx  # local to avoid hard import at module load
+
+    current_url = url
+    current_method = method.upper()
+
+    # Caller may have set follow_redirects=True in the client config; we
+    # need it disabled for this loop to be authoritative.
+    request_kwargs.setdefault("follow_redirects", False)
+
+    for _hop in range(max_redirects + 1):
+        await validate_url_ssrf_async(current_url)
+        resp = await client.request(current_method, current_url, **request_kwargs)
+        if resp.status_code not in _REDIRECT_STATUSES:
+            return resp
+
+        location = resp.headers.get("Location")
+        if not location:
+            return resp  # 3xx without Location — caller decides what to do
+
+        # Resolve relative redirects against the current URL.
+        next_url = str(httpx.URL(current_url).join(location))
+
+        # 303 always demotes to GET; 307/308 preserve method by spec.
+        if resp.status_code == 303:
+            current_method = "GET"
+            request_kwargs.pop("content", None)
+            request_kwargs.pop("json", None)
+            request_kwargs.pop("data", None)
+
+        current_url = next_url
+
+    raise ValueError(
+        f"Too many redirects (>{max_redirects}) following {url}; "
+        "blocked to prevent SSRF redirect chain."
+    )

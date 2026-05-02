@@ -226,7 +226,7 @@ class TestDataclassDefaults:
 
     def test_security_config_defaults(self):
         cfg = SecurityConfig()
-        assert cfg.trust_level == "normal"
+        assert cfg.trust_level == "ask_everytime"
         assert cfg.permission_mode == "auto"
         assert cfg.docker_sandbox is False
         # Raised 5 → 50 per "remove all limits"
@@ -340,7 +340,7 @@ class TestProfilePresets:
 
     def test_enterprise_posture(self):
         p = PROFILE_PRESETS["enterprise"]
-        assert p["security"]["trust_level"] == "normal"
+        assert p["security"]["trust_level"] == "ask_everytime"
         assert p["security"]["docker_sandbox"] is True
         assert p["launch"]["approvals_required"] is True
         assert p["launch"]["egm_mode"] == "strict"
@@ -414,11 +414,11 @@ class TestYAMLLoading:
     def test_nested_yaml(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text(
-            "llm:\n  provider: openai\n  model: gpt-4\nsecurity:\n  trust_level: paranoid\n"
+            "llm:\n  provider: openai\n  model: gpt-4\nsecurity:\n  trust_level: ask_everytime\n"
         )
         result = _load_yaml_config(config_file)
         assert result["llm"]["provider"] == "openai"
-        assert result["security"]["trust_level"] == "paranoid"
+        assert result["security"]["trust_level"] == "ask_everytime"
 
 
 # ── Dict to Config ─────────────────────────────────────────────────
@@ -439,12 +439,12 @@ class TestDictToConfig:
     def test_nested_sub_config(self):
         cfg = _dict_to_config({
             "llm": {"provider": "openai", "model": "gpt-4", "temperature": 0.3},
-            "security": {"trust_level": "paranoid"},
+            "security": {"trust_level": "ask_everytime"},
         })
         assert cfg.llm.provider == "openai"
         assert cfg.llm.model == "gpt-4"
         assert cfg.llm.temperature == pytest.approx(0.3)
-        assert cfg.security.trust_level == "paranoid"
+        assert cfg.security.trust_level == "ask_everytime"
 
     def test_unknown_keys_ignored(self):
         cfg = _dict_to_config({"llm": {"provider": "openai", "bogus_key": True}})
@@ -492,9 +492,9 @@ class TestEnvOverrides:
             assert result.get("llm", {}).get("provider") == "openai"
 
     def test_trust_level_override(self):
-        with patch.dict(os.environ, {"PREDACORE_TRUST_LEVEL": "paranoid"}, clear=True):
+        with patch.dict(os.environ, {"PREDACORE_TRUST_LEVEL": "ask_everytime"}, clear=True):
             result = _env_overrides()
-            assert result.get("security", {}).get("trust_level") == "paranoid"
+            assert result.get("security", {}).get("trust_level") == "ask_everytime"
 
     def test_channels_csv(self):
         with patch.dict(os.environ, {"PREDACORE_CHANNELS": "cli,telegram,discord"}, clear=True):
@@ -578,6 +578,20 @@ class TestLoadConfig:
         assert cfg.launch.profile == "beast"
         assert cfg.security.trust_level == "yolo"
 
+    def test_legacy_normal_normalized_to_ask_everytime(self, tmp_path):
+        """Old configs with trust_level: normal still load — silently mapped."""
+        config_file = tmp_path / "legacy.yaml"
+        config_file.write_text("security:\n  trust_level: normal\n")
+        cfg = load_config(config_path=str(config_file))
+        assert cfg.security.trust_level == "ask_everytime"
+
+    def test_legacy_paranoid_normalized_to_ask_everytime(self, tmp_path):
+        """Old configs with trust_level: paranoid still load — silently mapped."""
+        config_file = tmp_path / "legacy.yaml"
+        config_file.write_text("security:\n  trust_level: paranoid\n")
+        cfg = load_config(config_path=str(config_file))
+        assert cfg.security.trust_level == "ask_everytime"
+
     def test_directories_created(self, tmp_path):
         home = tmp_path / "prom_home"
         with patch.dict(os.environ, {"PREDACORE_HOME": str(home)}, clear=False):
@@ -608,9 +622,9 @@ class TestSaveDefaultConfig:
 
     def test_content_has_trust_level(self, tmp_path):
         target = tmp_path / "config.yaml"
-        save_default_config(str(target), trust_level="paranoid")
+        save_default_config(str(target), trust_level="ask_everytime")
         content = target.read_text()
-        assert "trust_level: paranoid" in content
+        assert "trust_level: ask_everytime" in content
 
     def test_content_has_model(self, tmp_path):
         target = tmp_path / "config.yaml"

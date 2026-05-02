@@ -2,21 +2,57 @@
 Flame tool handlers — skill evolution, scanning, sync, endorsement.
 
 Tools:
-  collective_intelligence_status  — show Flame stats
+  collective_intelligence_status  — show Flame stats (always available)
   collective_intelligence_sync    — pull/push skills from shared pool
+                                    (gated by PREDACORE_FLAME_SYNC_ENABLED)
   skill_evolve     — detect patterns + crystallize skills
-  skill_scan       — security scan a genome
+                     (gated by PREDACORE_SKILL_EVOLUTION_ENABLED)
+  skill_scan       — security scan a genome (always available; static analyzer)
   skill_endorse    — approve/reject pending skills
+                     (gated by PREDACORE_SKILL_EVOLUTION_ENABLED)
+
+Both feature gates default OFF. Cross-instance sync needs a real shared
+transport (NFS / S3 / etc.) which most setups don't have, and internal
+crystallization clutters the marketplace before users have repeated
+patterns worth crystallizing. Power users can flip the env vars on.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from ._context import ToolContext, ToolError, ToolErrorKind
 
 logger = logging.getLogger(__name__)
+
+
+# -- Feature flags -------------------------------------------------------
+
+def _skill_evolution_enabled() -> bool:
+    return os.environ.get("PREDACORE_SKILL_EVOLUTION_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _flame_sync_enabled() -> bool:
+    return os.environ.get("PREDACORE_FLAME_SYNC_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+_DISABLED_EVOLUTION_MSG = (
+    "Skill evolution is disabled. Pattern detection and crystallization will "
+    "not run on a fresh install — the marketplace stays clean. Set "
+    "PREDACORE_SKILL_EVOLUTION_ENABLED=1 to enable."
+)
+_DISABLED_SYNC_MSG = (
+    "Cross-instance Flame sync is disabled. The default `~/.predacore/flame/shared/` "
+    "is local-only; real sync needs a shared filesystem. Set "
+    "PREDACORE_FLAME_SYNC_ENABLED=1 (and ensure the shared dir is on shared "
+    "storage) to enable."
+)
 
 
 def _get_crystallizer(ctx: ToolContext):
@@ -46,18 +82,34 @@ def _get_scanner(ctx: ToolContext):
 async def handle_collective_intelligence_status(
     args: dict[str, Any], ctx: ToolContext
 ) -> str:
-    """Show Flame status: local skills, shared pool, trust distribution."""
+    """Show Flame status: feature flags, local skills, shared pool, trust.
+
+    Always available — this is the canonical way to find out whether
+    evolution / sync are turned on for this instance.
+    """
+    evolution_on = _skill_evolution_enabled()
+    sync_on = _flame_sync_enabled()
+    result: dict[str, Any] = {
+        "feature_flags": {
+            "skill_evolution_enabled": evolution_on,
+            "flame_sync_enabled": sync_on,
+        },
+    }
+    if not (evolution_on or sync_on):
+        result["status"] = "disabled"
+        result["message"] = (
+            "Both skill evolution and Flame sync are disabled. Set "
+            "PREDACORE_SKILL_EVOLUTION_ENABLED=1 and/or "
+            "PREDACORE_FLAME_SYNC_ENABLED=1 to opt in."
+        )
+        return json.dumps(result, indent=2, default=str)
     try:
-        collective_intelligence = _get_flame(ctx)
-        crystallizer = _get_crystallizer(ctx)
-
-        hive_stats = collective_intelligence.stats()
-        evo_stats = crystallizer.stats()
-
-        result = {
-            "collective_intelligence": hive_stats,
-            "evolution": evo_stats,
-        }
+        if evolution_on:
+            crystallizer = _get_crystallizer(ctx)
+            result["evolution"] = crystallizer.stats()
+        if sync_on:
+            collective_intelligence = _get_flame(ctx)
+            result["collective_intelligence"] = collective_intelligence.stats()
         return json.dumps(result, indent=2, default=str)
     except (RuntimeError, ImportError, OSError, ValueError) as e:
         logger.error("collective_intelligence_status failed: %s", e)
@@ -68,6 +120,11 @@ async def handle_collective_intelligence_sync(
     args: dict[str, Any], ctx: ToolContext
 ) -> str:
     """Sync with the shared skill pool."""
+    if not _flame_sync_enabled():
+        return json.dumps({
+            "status": "disabled",
+            "message": _DISABLED_SYNC_MSG,
+        }, indent=2)
     try:
         collective_intelligence = _get_flame(ctx)
         result = collective_intelligence.sync()
@@ -81,6 +138,11 @@ async def handle_skill_evolve(
     args: dict[str, Any], ctx: ToolContext
 ) -> str:
     """Detect patterns and crystallize skills."""
+    if not _skill_evolution_enabled():
+        return json.dumps({
+            "status": "disabled",
+            "message": _DISABLED_EVOLUTION_MSG,
+        }, indent=2)
     action = str(args.get("action", "stats")).strip().lower()
     crystallizer = _get_crystallizer(ctx)
 
@@ -154,7 +216,7 @@ async def handle_skill_evolve(
             return json.dumps(crystallizer.stats(), indent=2, default=str)
 
         else:
-            raise ToolError(f"Unknown action: {action}. Use: detect, crystallize, list, stats", kind=ToolErrorKind.VALIDATION, tool_name="skill_evolve")
+            raise ToolError(f"Unknown action: {action}. Use: detect, crystallize, list, stats", kind=ToolErrorKind.INVALID_PARAM, tool_name="skill_evolve")
 
     except (RuntimeError, ImportError, OSError, ValueError, KeyError) as e:
         logger.error("skill_evolve failed: %s", e)
@@ -167,7 +229,7 @@ async def handle_skill_scan(
     """Security scan a skill genome."""
     genome_id = args.get("genome_id", "")
     if not genome_id:
-        raise ToolError("Missing genome_id parameter", kind=ToolErrorKind.VALIDATION, tool_name="skill_scan")
+        raise ToolError("Missing genome_id parameter", kind=ToolErrorKind.INVALID_PARAM, tool_name="skill_scan")
 
     try:
         scanner = _get_scanner(ctx)
@@ -200,11 +262,16 @@ async def handle_skill_endorse(
     args: dict[str, Any], ctx: ToolContext
 ) -> str:
     """Endorse or reject a pending skill."""
+    if not _skill_evolution_enabled():
+        return json.dumps({
+            "status": "disabled",
+            "message": _DISABLED_EVOLUTION_MSG,
+        }, indent=2)
     genome_id = args.get("genome_id", "")
     action = str(args.get("action", "endorse")).strip().lower()
 
     if not genome_id:
-        raise ToolError("Missing genome_id parameter", kind=ToolErrorKind.VALIDATION, tool_name="skill_scan")
+        raise ToolError("Missing genome_id parameter", kind=ToolErrorKind.INVALID_PARAM, tool_name="skill_scan")
 
     try:
         crystallizer = _get_crystallizer(ctx)
@@ -242,7 +309,7 @@ async def handle_skill_endorse(
             }, indent=2)
 
         else:
-            raise ToolError(f"Unknown action: {action}. Use: endorse, reject", kind=ToolErrorKind.VALIDATION, tool_name="skill_endorse")
+            raise ToolError(f"Unknown action: {action}. Use: endorse, reject", kind=ToolErrorKind.INVALID_PARAM, tool_name="skill_endorse")
 
     except (RuntimeError, ImportError, OSError, ValueError, KeyError) as e:
         logger.error("skill_endorse failed: %s", e)

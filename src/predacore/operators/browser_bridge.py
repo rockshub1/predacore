@@ -390,53 +390,10 @@ class _ChromeCDP:
 
 # ── SafariJSBridge Backend ──────────────────────────────────────────
 
-class _SafariJSBridge:
-    """Safari automation via AppleScript ``do JavaScript``."""
-    def __init__(self) -> None:
-        self._ok: bool = False
-
-    @property
-    def connected(self) -> bool:
-        return self._ok
-
-    async def connect(self) -> bool:
-        out = await self._applescript('tell application "Safari" to return name of front document')
-        self._ok = out is not None
-        return self._ok
-
-    async def evaluate_js(self, code: str, timeout: float = _DEFAULT_TIMEOUT) -> Any:
-        escaped = code.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        script = f'tell application "Safari"\n  do JavaScript "{escaped}" in document 1\nend tell'
-        raw = await self._applescript(script, timeout=timeout)
-        if raw is None:
-            return {"error": "AppleScript execution failed"}
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return raw
-
-    async def close(self) -> None:
-        self._ok = False
-
-    async def _applescript(self, script: str, timeout: float = _DEFAULT_TIMEOUT) -> str | None:
-        loop = asyncio.get_running_loop()
-        try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(None, self._osascript, script, timeout),
-                timeout=timeout + 1.0,
-            )
-        except (asyncio.TimeoutError, OSError, RuntimeError):
-            return None
-
-    @staticmethod
-    def _osascript(script: str, timeout: float = 10.0) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout,
-            )
-            return proc.stdout.strip() if proc.returncode == 0 else None
-        except (subprocess.TimeoutExpired, OSError):
-            return None
+# Safari backend removed in T4 — PredaCore is Chrome-only. CDP gives
+# us full DOM access at native speed; AppleScript-based Safari control
+# can't match it (no shadow-DOM traversal, no real pointer events, no
+# CDP-native input dispatch). One backend = one well-tested path.
 
 
 # ── Frontmost browser detection ─────────────────────────────────────
@@ -501,12 +458,18 @@ class BrowserBridge:
 
     SPA_HYDRATION_DELAY_S: float = 4.0  # Legacy fallback only
 
-    def __init__(self, cdp_port: int = _CDP_PORT) -> None:
+    def __init__(
+        self, cdp_port: int = _CDP_PORT, *,
+        selector_cache: Any = None,  # operators.selector_cache.SelectorCache | None
+    ) -> None:
         self._cdp = _ChromeCDP()
-        self._safari = _SafariJSBridge()
         self._cdp_port = cdp_port
-        self._backend: _ChromeCDP | _SafariJSBridge | None = None
+        self._backend: _ChromeCDP | None = None
         self._browser: str = ""
+        # T4b — selector cache (optional). When set, click() consults
+        # the cache before calling _resolve(), and writes back on success.
+        self._selector_cache = selector_cache
+        self._cache_stats = {"hits": 0, "misses": 0, "verifies_failed": 0}
 
     @property
     def connected(self) -> bool:
@@ -518,19 +481,23 @@ class BrowserBridge:
 
     @property
     def is_cdp(self) -> bool:
-        return isinstance(self._backend, _ChromeCDP)
+        # Chrome-only as of T4 — kept for callsite compatibility, always True
+        # when connected.
+        return self._backend is not None
 
     # ── Connection ─────────────────────────────────────────
 
     async def connect(self, browser: str = "auto", stealth: bool = True) -> bool:
-        if browser == "auto":
-            ok = await self._auto_connect()
-        elif browser.lower() == "safari":
-            ok = await self._use_safari()
-        else:
-            ok = await self._use_cdp(browser)
+        """Connect to Chrome via CDP. ``browser`` is accepted for backward compat
+        but only Chrome / Chromium-derivatives are supported (T4: Chrome-only)."""
+        if browser.lower() == "safari":
+            logger.warning(
+                "Safari support removed in T4 — connecting to Chrome instead. "
+                "If you need Safari, use a previous version of PredaCore."
+            )
+        ok = await self._auto_connect()
         # Apply stealth patches to mask CDP fingerprints
-        if ok and stealth and self.is_cdp:
+        if ok and stealth and self.is_cdp and self._backend is not None:
             try:
                 await self._backend.apply_stealth()
                 logger.info("CDP stealth patches applied")
@@ -567,14 +534,115 @@ class BrowserBridge:
     # ── Click ──────────────────────────────────────────────
 
     async def click(self, selector: str = "", text: str = "", role: str = "", index: int = -1) -> dict[str, Any]:
+        """Click an element by selector OR by natural-language ``text`` / ``role``.
+
+        Resolution order (T4b):
+          1. Explicit ``selector`` — bypass cache, click directly.
+          2. Cache hit on ``(domain, text, role)`` → CDP-verify the cached
+             selector still resolves → click. ~50ms.
+          3. Cache miss / verify-fail → existing ``_resolve()`` (text-search
+             through the page tree) → click → cache the result for next time.
+        """
         if not self.connected:
             return {"ok": False, "error": "Not connected"}
         if selector:
             return await self._click_sel(selector)
+
+        # ── T4b: try the selector cache first ─────────────────────────
+        # Skip cache when index>=0 (the resolver wants the Nth match,
+        # not necessarily the same one we cached).
+        cached_xpath: str | None = None
+        if self._selector_cache is not None and (text or role) and index < 0:
+            cached_xpath = await self._cache_lookup_and_verify(text=text, role=role)
+
+        if cached_xpath:
+            self._cache_stats["hits"] += 1
+            result = await self._click_sel(cached_xpath)
+            if isinstance(result, dict) and result.get("ok"):
+                # Bump use counter — fire-and-forget, don't block click latency
+                try:
+                    domain = await self._current_domain()
+                    if domain:
+                        await asyncio.to_thread(
+                            self._selector_cache.bump_use,
+                            domain=domain, text=text, role=role,
+                        )
+                except Exception:  # noqa: BLE001 — never let cache writes fail clicks
+                    pass
+            return {**(result or {}), "cache": "hit"}
+
+        # ── Fallback: full resolver path ──────────────────────────────
+        if self._selector_cache is not None and (text or role):
+            self._cache_stats["misses"] += 1
         target = await self._resolve(text=text, role=role, index=index)
         if target is None:
             return {"ok": False, "error": f"Element not found: {text or role}"}
-        return await self._click_sel(target)
+        result = await self._click_sel(target)
+        # Write to cache only on successful click + only when we used the
+        # natural-language path (no explicit selector, no index disambiguator).
+        if (
+            isinstance(result, dict) and result.get("ok")
+            and self._selector_cache is not None
+            and (text or role) and index < 0
+        ):
+            try:
+                domain = await self._current_domain()
+                if domain:
+                    await asyncio.to_thread(
+                        self._selector_cache.record,
+                        domain=domain, text=text, role=role,
+                        xpath=target, label=text,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Selector cache record failed: %s", exc)
+        return {**(result or {}), "cache": "miss"}
+
+    async def _cache_lookup_and_verify(
+        self, *, text: str, role: str,
+    ) -> str | None:
+        """Cache lookup + CDP verify. Returns xpath if verified, else None.
+
+        Verification is a single ``document.querySelector(xpath)`` call —
+        if it returns truthy and the bbox isn't off-screen / collapsed,
+        the selector still resolves. On verify-fail, the cache row is
+        invalidated so the next attempt goes through the full resolver.
+        """
+        cache = self._selector_cache
+        if cache is None:
+            return None
+        try:
+            domain = await self._current_domain()
+            if not domain:
+                return None
+            entry = await asyncio.to_thread(cache.lookup, domain, text, role)
+            if entry is None:
+                return None
+            # Verify the selector still resolves and is interactable.
+            check_js = (
+                f'(function(){{var el=document.querySelector("{_js_esc(entry.xpath)}");'
+                f'if(!el)return null;var r=el.getBoundingClientRect();'
+                f'return r.width>=4&&r.height>=4?"{_js_esc(entry.xpath)}":null;}})()'
+            )
+            verified = await self._eval(check_js)
+            if not verified:
+                self._cache_stats["verifies_failed"] += 1
+                # Drop the stale entry — next cache miss will repopulate.
+                await asyncio.to_thread(
+                    cache.invalidate, domain=domain, text=text, role=role,
+                )
+                return None
+            return entry.xpath
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Selector cache lookup failed: %s", exc)
+            return None
+
+    async def _current_domain(self) -> str:
+        """Bare host of the currently-loaded page. Empty string on failure."""
+        url = await self.get_url()
+        if not url:
+            return ""
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower()
 
     # ── Type text ──────────────────────────────────────────
 
@@ -753,40 +821,33 @@ class BrowserBridge:
     async def navigate(self, url: str, wait_for: str = "") -> dict[str, Any]:
         """Navigate and wait intelligently.
 
-        For CDP: uses Page.navigate + Page.loadEventFired (real event).
-        For Safari: AppleScript URL setter + adaptive poll.
+        Uses Page.navigate + readyState polling. Falls back to a brief SPA
+        hydration sleep for JS frameworks (React, Vue, etc.) so the DOM is
+        actually mounted by the time we return.
 
         Args:
             wait_for: optional CSS selector to wait for after load.
         """
-        if not self.connected:
+        if not self.connected or self._backend is None:
             return {"ok": False, "error": "Not connected"}
 
-        if isinstance(self._backend, _ChromeCDP):
-            cdp = self._backend
-            res = await cdp.send("Page.navigate", {"url": url}, timeout=_NAVIGATE_TIMEOUT)
-            if "error" in res and res["error"] != "":
-                return {"ok": False, "error": res["error"]}
-            # Poll document.readyState until "complete" (simpler and more reliable
-            # than event-based Page.loadEventFired which has race conditions with
-            # the single-websocket message loop).
-            deadline = time.time() + _NAVIGATE_TIMEOUT
-            while time.time() < deadline:
-                state = await cdp.evaluate_js("document.readyState", timeout=2)
-                if state == "complete":
-                    break
-                await asyncio.sleep(0.15)
-            # Brief settle for SPA hydration (JS framework init)
-            await asyncio.sleep(_NAVIGATE_SETTLE_MS / 1000.0)
-            if wait_for:
-                await self.wait_for_element(wait_for, timeout=5.0)
-        else:
-            # Safari fallback
-            as_url = url.replace("\\", "\\\\").replace('"', '\\"')
-            script = f'tell application "Safari"\n  set URL of document 1 to "{as_url}"\nend tell'
-            assert isinstance(self._backend, _SafariJSBridge)
-            await self._backend._applescript(script)
-            await asyncio.sleep(self.SPA_HYDRATION_DELAY_S)
+        cdp = self._backend
+        res = await cdp.send("Page.navigate", {"url": url}, timeout=_NAVIGATE_TIMEOUT)
+        if "error" in res and res["error"] != "":
+            return {"ok": False, "error": res["error"]}
+        # Poll document.readyState until "complete" (simpler and more reliable
+        # than event-based Page.loadEventFired which has race conditions with
+        # the single-websocket message loop).
+        deadline = time.time() + _NAVIGATE_TIMEOUT
+        while time.time() < deadline:
+            state = await cdp.evaluate_js("document.readyState", timeout=2)
+            if state == "complete":
+                break
+            await asyncio.sleep(0.15)
+        # Brief settle for SPA hydration (JS framework init)
+        await asyncio.sleep(_NAVIGATE_SETTLE_MS / 1000.0)
+        if wait_for:
+            await self.wait_for_element(wait_for, timeout=5.0)
 
         title = await self._eval("document.title||''") or ""
         text_len = await self._eval("(document.body.textContent||'').length") or 0
@@ -1980,11 +2041,26 @@ class BrowserBridge:
             except (OSError, FileNotFoundError):
                 return False
 
+        # T4: persistent profile so logins / cookies / history survive across
+        # PredaCore launches without disturbing the user's main Chrome session.
+        # Default location: ``~/.predacore/chrome-profile``. Override via
+        # ``PREDACORE_BROWSER_PROFILE_DIR`` if the user wants a different one.
+        profile_dir = os.environ.get(
+            "PREDACORE_BROWSER_PROFILE_DIR",
+            str(Path.home() / ".predacore" / "chrome-profile"),
+        )
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
         try:
             subprocess.Popen(
                 [
                     chrome_bin,
                     f"--remote-debugging-port={self._cdp_port}",
+                    f"--user-data-dir={profile_dir}",
+                    # Skip first-run wizards / default-browser nags so we
+                    # boot straight into a usable session.
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -2014,12 +2090,6 @@ class BrowserBridge:
         if await self._cdp.connect(port=self._cdp_port):
             self._backend, self._browser = self._cdp, name
             self._cdp._bridge_ref = self  # Back-ref for dialog auto-handling
-            return True
-        return False
-
-    async def _use_safari(self) -> bool:
-        if await self._safari.connect():
-            self._backend, self._browser = self._safari, "Safari"
             return True
         return False
 

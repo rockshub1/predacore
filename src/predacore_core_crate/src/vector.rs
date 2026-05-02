@@ -6,6 +6,12 @@
 /// Compute cosine similarity between two vectors.
 /// Both vectors are assumed to be L2-normalized (dot product = cosine sim).
 /// Falls back to safe computation if not normalized.
+///
+/// Uses chunks of 8 floats to give the auto-vectorizer a clean shape; bounds
+/// checks on safe indexing get hoisted out of these tight loops, so dropping
+/// `unsafe` here costs no measurable performance while removing a class of
+/// PyO3-boundary panics (an out-of-bounds read in unsafe Rust would have
+/// crashed the Python interpreter).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "vector dimension mismatch");
     let len = a.len().min(b.len());
@@ -14,15 +20,18 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let mut norm_a = 0.0_f32;
     let mut norm_b = 0.0_f32;
 
-    // Process in chunks of 8 for auto-vectorization (SIMD)
+    // Trim both slices to a common length so safe indexing never trips.
+    let a = &a[..len];
+    let b = &b[..len];
+
     let chunks = len / 8;
     let remainder = len % 8;
 
     for i in 0..chunks {
         let base = i * 8;
         for j in 0..8 {
-            let ai = unsafe { *a.get_unchecked(base + j) };
-            let bi = unsafe { *b.get_unchecked(base + j) };
+            let ai = a[base + j];
+            let bi = b[base + j];
             dot += ai * bi;
             norm_a += ai * ai;
             norm_b += bi * bi;
@@ -32,8 +41,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     // Handle remainder
     let base = chunks * 8;
     for j in 0..remainder {
-        let ai = unsafe { *a.get_unchecked(base + j) };
-        let bi = unsafe { *b.get_unchecked(base + j) };
+        let ai = a[base + j];
+        let bi = b[base + j];
         dot += ai * bi;
         norm_a += ai * ai;
         norm_b += bi * bi;
@@ -67,16 +76,16 @@ pub fn vector_search(query: &[f32], vectors: &[Vec<f32>], top_k: usize) -> Vec<(
         .map(|(i, v)| (i, cosine_similarity(query, v)))
         .collect();
 
-    // Partial sort: only need top-k, no need to sort everything
+    // Partial sort: only need top-k, no need to sort everything.
+    // Tied scores fall back to the smaller index so results are deterministic
+    // — without this, two equally-scored vectors could swap positions across
+    // runs, breaking caches and flaking tests.
     if top_k < scores.len() {
-        scores.select_nth_unstable_by(top_k, |a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scores.select_nth_unstable_by(top_k, score_then_index_desc);
         scores.truncate(top_k);
     }
 
-    // Sort the top-k by score descending
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scores.sort_by(score_then_index_desc);
     scores
 }
 
@@ -96,14 +105,19 @@ pub fn vector_search_parallel(query: &[f32], vectors: &[Vec<f32>], top_k: usize)
         .collect();
 
     if top_k < scores.len() {
-        scores.select_nth_unstable_by(top_k, |a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scores.select_nth_unstable_by(top_k, score_then_index_desc);
         scores.truncate(top_k);
     }
 
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scores.sort_by(score_then_index_desc);
     scores
+}
+
+/// Comparator: score descending, ties broken by original index ascending.
+fn score_then_index_desc(a: &(usize, f32), b: &(usize, f32)) -> std::cmp::Ordering {
+    b.1.partial_cmp(&a.1)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.0.cmp(&b.0))
 }
 
 #[cfg(test)]
@@ -201,5 +215,26 @@ mod tests {
         v2[100] = 1.0;
         let results = vector_search(&query, &[v1, v2], 1);
         assert_eq!(results[0].0, 0); // v1 more similar
+    }
+
+    #[test]
+    fn test_vector_search_ties_deterministic_by_index() {
+        // Three vectors that all produce identical cosine scores against
+        // the query. Without the index tiebreaker, select_nth_unstable_by
+        // could put any of them first; with it, the lowest index wins.
+        let query = vec![1.0, 0.0, 0.0];
+        let vectors = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+        ];
+        for _ in 0..20 {
+            let results = vector_search(&query, &vectors, 3);
+            assert_eq!(
+                results.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+                vec![0, 1, 2],
+                "ties must break deterministically by ascending index"
+            );
+        }
     }
 }

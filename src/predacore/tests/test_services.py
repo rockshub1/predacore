@@ -1530,3 +1530,64 @@ class TestPluginRegistry:
         assert loaded[0]["name"] == "sample"
         assert loaded[0]["tools"] == 1
         await reg.unload_plugin("sample")
+
+
+# ---------------------------------------------------------------------------
+# DB Server write-queue backpressure (PR 7)
+# ---------------------------------------------------------------------------
+
+
+class TestDBServerWriteQueueBackpressure:
+    """The single-writer queue must be bounded; full-queue writes return
+    a structured error rather than hanging the caller."""
+
+    def test_queue_bounded(self, tmp_path):
+        """Default queue maxsize is positive (not 0=unbounded)."""
+        from predacore.services.db_server import DBServer
+        server = DBServer(
+            db_registry={"main": str(tmp_path / "x.db")},
+            socket_path=str(tmp_path / "s.sock"),
+        )
+        assert server._write_queue.maxsize > 0, "queue must be bounded for backpressure"
+
+    def test_queue_maxsize_env_override(self, tmp_path, monkeypatch):
+        """Operators can tune queue depth via PREDACORE_DB_WRITE_QUEUE_MAX."""
+        monkeypatch.setenv("PREDACORE_DB_WRITE_QUEUE_MAX", "7")
+        import importlib
+
+        import predacore.services.db_server as db_mod
+        importlib.reload(db_mod)
+        try:
+            server = db_mod.DBServer(
+                db_registry={"main": str(tmp_path / "x.db")},
+                socket_path=str(tmp_path / "s.sock"),
+            )
+            assert server._write_queue.maxsize == 7
+        finally:
+            # Restore default for subsequent tests
+            monkeypatch.delenv("PREDACORE_DB_WRITE_QUEUE_MAX", raising=False)
+            importlib.reload(db_mod)
+
+    def test_put_timeout_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PREDACORE_DB_WRITE_QUEUE_PUT_TIMEOUT", "2.5")
+        import importlib
+
+        import predacore.services.db_server as db_mod
+        importlib.reload(db_mod)
+        try:
+            server = db_mod.DBServer(
+                db_registry={"main": str(tmp_path / "x.db")},
+                socket_path=str(tmp_path / "s.sock"),
+            )
+            assert server._write_put_timeout == pytest.approx(2.5)
+        finally:
+            monkeypatch.delenv("PREDACORE_DB_WRITE_QUEUE_PUT_TIMEOUT", raising=False)
+            importlib.reload(db_mod)
+
+    def test_rejection_counter_starts_at_zero(self, tmp_path):
+        from predacore.services.db_server import DBServer
+        server = DBServer(
+            db_registry={"main": str(tmp_path / "x.db")},
+            socket_path=str(tmp_path / "s.sock"),
+        )
+        assert server._write_rejections == 0

@@ -1,12 +1,16 @@
 """
-Thread-safe circuit breaker for LLM provider failover.
+Async-safe circuit breaker for LLM provider failover.
+
+All methods are async and use ``asyncio.Lock`` to coordinate state under
+concurrent access from the same event loop. The lock-held sections only
+do dict operations (no I/O), so contention is bounded.
 
 Extracted from LLMInterface to be reusable and testable independently.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
 
 logger = logging.getLogger(__name__)
@@ -30,13 +34,17 @@ class CircuitBreaker:
         self.window_seconds = window_seconds
         self.cooldown_seconds = cooldown_seconds
 
-        self._lock = threading.Lock()
+        # asyncio.Lock instead of threading.Lock — this breaker is only
+        # touched from async paths (router.chat). Using a sync lock would
+        # block the event loop under contention; using asyncio.Lock makes
+        # the design honest about its concurrency model.
+        self._lock = asyncio.Lock()
         self._failures: dict[str, list[tuple[float, str]]] = {}
         self._tripped_until: dict[str, float] = {}
 
-    def is_open(self, provider: str) -> bool:
+    async def is_open(self, provider: str) -> bool:
         """Check if provider's circuit is tripped (should be skipped)."""
-        with self._lock:
+        async with self._lock:
             now = time.time()
             tripped = self._tripped_until.get(provider, 0)
 
@@ -71,28 +79,28 @@ class CircuitBreaker:
 
             return False
 
-    def record_failure(self, provider: str, error: Exception | str) -> None:
+    async def record_failure(self, provider: str, error: Exception | str) -> None:
         """Record a provider failure."""
-        with self._lock:
+        async with self._lock:
             if provider not in self._failures:
                 self._failures[provider] = []
             self._failures[provider].append((time.time(), str(error)))
         logger.warning("Provider '%s' failed: %s", provider, error)
 
-    def record_success(self, provider: str) -> None:
+    async def record_success(self, provider: str) -> None:
         """Record a provider success — clears failure history for faster recovery."""
-        with self._lock:
+        async with self._lock:
             if provider in self._failures:
                 self._failures[provider].clear()
 
-    def reset(self, provider: str) -> None:
+    async def reset(self, provider: str) -> None:
         """Manually reset a provider's circuit breaker."""
-        with self._lock:
+        async with self._lock:
             self._failures.pop(provider, None)
             self._tripped_until.pop(provider, None)
 
-    def reset_all(self) -> None:
+    async def reset_all(self) -> None:
         """Reset all circuit breakers."""
-        with self._lock:
+        async with self._lock:
             self._failures.clear()
             self._tripped_until.clear()

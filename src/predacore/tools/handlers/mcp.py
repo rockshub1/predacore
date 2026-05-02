@@ -194,15 +194,8 @@ async def handle_mcp_add(args: dict[str, Any], ctx: ToolContext) -> str:
     # packages the user hasn't installed globally yet.
     install = args.get("install") or {}
     if isinstance(install, dict):
-        trust = getattr(ctx.config.security, "trust_level", "normal")
-        if trust == "paranoid" and install:
-            raise ToolError(
-                "mcp_add's `install` step is disabled in paranoid trust mode. "
-                "Install the backing package manually, then call mcp_add with "
-                "just `command`.",
-                kind=ToolErrorKind.BLOCKED,
-                tool_name="mcp_add",
-            )
+        # mcp_add is in WRITE_TOOLS — the dispatcher confirms it via the
+        # ask_everytime policy. No additional handler-side trust gate.
         if "npm" in install:
             pkg = str(install["npm"])
             if not _NPM_NAME_RE.match(pkg):

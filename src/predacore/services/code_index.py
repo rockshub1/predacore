@@ -542,17 +542,14 @@ class CodeIndex:
     async def _ensure_embedder(self):
         if self._embedder is not None:
             return
-        # Prefer Rust embedder (predacore_core) — no PyTorch needed
-        try:
-            import predacore_core
-            self._embedder = _RustEmbedder()
-            logger.info("Code index using Rust embedder (predacore_core)")
-            return
-        except ImportError:
-            pass
-        # Fallback to Python embedder
-        from predacore._vendor.common.embedding import get_default_embedding_client
-        self._embedder = get_default_embedding_client()
+        # Single source of truth: the Rust kernel. Same BGE-small embeddings
+        # as the memory store, so code-index vectors and memory vectors live
+        # in the same semantic space (cross-querying is meaningful).
+        # ``predacore_core`` is a hard dep of the memory subsystem already —
+        # we don't carry a Python fallback here either.
+        import predacore_core  # noqa: F401  — fail fast if Rust kernel missing
+        self._embedder = _RustEmbedder()
+        logger.info("Code index using Rust embedder (predacore_core)")
 
     async def _batch_embed(self, texts: list[str]) -> list[list[float]]:
         """Embed texts in batches."""

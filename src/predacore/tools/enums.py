@@ -64,6 +64,10 @@ class ToolName(str, Enum):
     MEMORY_DELETE = "memory_delete"
     MEMORY_STATS = "memory_stats"
     MEMORY_EXPLAIN = "memory_explain"
+    MEMORY_BULK_INDEX = "memory_bulk_index"
+    MEMORY_BULK_ABORT = "memory_bulk_abort"
+    MEMORY_INDEX_STATUS = "memory_index_status"
+    MEMORY_SCAN_DIRECTORY = "memory_scan_directory"
 
     # Voice
     SPEAK = "speak"
@@ -167,13 +171,79 @@ class ToolStatus(str, Enum):
 
 # ---------------------------------------------------------------------------
 # Write tools — tools that mutate state (used for cache invalidation)
+#
+# Membership rule: include any tool whose execution could affect a future
+# read's correctness. Cost of false positive (over-include) = lost cache
+# benefit. Cost of false negative (under-include) = stale data served from
+# cache after a mutation. Bias toward over-include.
+#
+# Transitive tools (multi_agent, tool_pipeline, marketplace_invoke, api_call,
+# openclaw_delegate) call arbitrary downstream tools — included conservatively.
+#
+# TODO: split mixed-action tools (desktop_control / android_control /
+# browser_control) so read-only actions like screenshot don't invalidate cache.
+# Requires dispatcher.py logic to route on the `action` argument.
 # ---------------------------------------------------------------------------
 
 WRITE_TOOLS: frozenset[str] = frozenset({
+    # Filesystem / shell / code execution
     ToolName.WRITE_FILE,
     ToolName.RUN_COMMAND,
     ToolName.PYTHON_EXEC,
     ToolName.EXECUTE_CODE,
+
+    # Memory persistence (SQLite mutations)
+    ToolName.MEMORY_STORE,
+    ToolName.MEMORY_DELETE,
+    ToolName.MEMORY_BULK_INDEX,
+
+    # Secrets / identity / journal — write to ~/.predacore/*
+    ToolName.SECRET_SET,
+    ToolName.IDENTITY_UPDATE,
+    ToolName.JOURNAL_APPEND,
+
+    # Scheduling — registers future side effects
+    ToolName.CRON_TASK,
+
+    # Channel + adapter management
+    ToolName.CHANNEL_CONFIGURE,
+    ToolName.CHANNEL_INSTALL,
+
+    # Skill marketplace — install mutates registry; invoke is transitive
+    ToolName.MARKETPLACE_INSTALL,
+    ToolName.MARKETPLACE_INVOKE,
+
+    # MCP server registry mutations
+    ToolName.MCP_ADD,
+    ToolName.MCP_REMOVE,
+    ToolName.MCP_RESTART,
+
+    # REST API registry mutations + transitive HTTP call
+    ToolName.API_ADD,
+    ToolName.API_REMOVE,
+    ToolName.API_CALL,
+
+    # Skill evolution / collective state mutations
+    ToolName.SKILL_EVOLVE,
+    ToolName.SKILL_ENDORSE,
+    ToolName.COLLECTIVE_INTELLIGENCE_SYNC,
+
+    # Creative outputs (write files to disk)
+    ToolName.IMAGE_GEN,
+    ToolName.DIAGRAM,
+
+    # Voice — captures audio to disk
+    ToolName.VOICE_NOTE,
+
+    # Transitive — sub-agents / pipelines / external delegates may do anything
+    ToolName.MULTI_AGENT,
+    ToolName.TOOL_PIPELINE,
+    ToolName.OPENCLAW_DELEGATE,
+
+    # Mixed-action (conservative include; TODO: split on action)
+    ToolName.DESKTOP_CONTROL,
+    ToolName.ANDROID_CONTROL,
+    ToolName.BROWSER_CONTROL,
 })
 
 # ---------------------------------------------------------------------------
@@ -192,6 +262,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     ToolName.GIT_FIND_FILES,
     ToolName.GIT_SEMANTIC_SEARCH,
     ToolName.MEMORY_RECALL,
+    ToolName.MEMORY_SCAN_DIRECTORY,
+    ToolName.MEMORY_INDEX_STATUS,
     ToolName.IDENTITY_READ,
     ToolName.SCREEN_VISION,
     ToolName.PDF_READER,

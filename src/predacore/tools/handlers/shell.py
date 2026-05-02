@@ -303,9 +303,20 @@ async def handle_python_exec(args: dict[str, Any], ctx: ToolContext) -> str:
 
     import tempfile
 
-    _MEM_LIMIT_BYTES = 1024 * 1024 * 1024     # 1 GB (was 256 MB)
-    _MAX_STDOUT_BYTES = 1_000_000              # 1 MB (was 50 KB)
-    _MAX_STDERR_BYTES = 200_000                # 200 KB (was 10 KB)
+    # Trust-tiered resource caps. yolo keeps the wide 1 GB / 1 MB ceilings
+    # for genuine large data work; ask_everytime drops to 256 MB / 50 KB so
+    # a runaway python_exec can't OOM the daemon or flood the agent's
+    # context with megabytes of stdout. A single shared cap = global blast
+    # radius if any one agent leaks memory.
+    _trust = getattr(ctx.config.security, "trust_level", "ask_everytime")
+    if _trust == "yolo":
+        _MEM_LIMIT_BYTES = 1024 * 1024 * 1024     # 1 GB
+        _MAX_STDOUT_BYTES = 1_000_000              # 1 MB
+        _MAX_STDERR_BYTES = 200_000                # 200 KB
+    else:
+        _MEM_LIMIT_BYTES = 256 * 1024 * 1024       # 256 MB
+        _MAX_STDOUT_BYTES = 50_000                 # 50 KB
+        _MAX_STDERR_BYTES = 10_000                 # 10 KB
 
     wrapper_prefix = (
         "import resource, sys\n"
