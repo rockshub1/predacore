@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predacore"
-version = "1.4.1"
+version = "1.4.2"
 description = "PredaCore — the apex autonomous agent. Hybrid Rust memory kernel, topped LongMemEval R@5 = 0.9574."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,7 +49,7 @@ classifiers = [
 # pre-built wheels for macos-universal2, manylinux-x86_64, manylinux-aarch64,
 # and win-amd64. Source fallback via `maturin develop --release`.
 dependencies = [
-    "predacore_core>=1.1.1",        # Rust kernel + BGE embeddings + HNSW (pre-built wheels)
+    "predacore_core>=1.2.0",        # Rust kernel + BGE batched embed (T5c) + HNSW (pre-built wheels)
     "httpx>=0.27",                   # Async HTTP client for API/tools/LLM SDK
     "aiohttp>=3.9",                  # WebSocket server (webchat) + CLI chat client
     "jsonschema>=4.18",              # Tool parameter validation
