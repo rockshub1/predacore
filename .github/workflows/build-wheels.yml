@@ -32,10 +32,37 @@ defaults:
     working-directory: src/predacore_core_crate
 
 jobs:
+  # ── Sanity guard ─────────────────────────────────────────────────────
+  # v1.4.0 shipped with src/predacore_core_crate/pyproject.toml still at
+  # 1.1.1 even though Cargo.toml had been bumped to 1.2.0. Maturin uses
+  # pyproject.toml's [project] version for the wheel filename — so the
+  # build produced predacore_core-1.1.1.tar.gz and 1.2.0 never landed on
+  # PyPI. This job fails fast (before any wheel build) if Cargo.toml and
+  # pyproject.toml ever disagree on the version again.
+  verify-versions:
+    name: Verify Cargo.toml ↔ pyproject.toml versions match
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare versions
+        run: |
+          set -euo pipefail
+          cargo_ver=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          pyproj_ver=$(awk -F'"' '/^version = /{print $2; exit}' pyproject.toml)
+          echo "Cargo.toml      : $cargo_ver"
+          echo "pyproject.toml  : $pyproj_ver"
+          if [ "$cargo_ver" != "$pyproj_ver" ]; then
+            echo "::error::Cargo.toml ($cargo_ver) and pyproject.toml ($pyproj_ver) versions diverge."
+            echo "::error::Maturin uses pyproject.toml's version for the wheel filename — bump BOTH files to the same value, then re-tag."
+            exit 1
+          fi
+          echo "✓ versions in sync ($cargo_ver)"
+
   # ── Linux x86_64 (aarch64 dropped for v0.1.0 — ring crate cross-compile
   #    issue with __ARM_ARCH in manylinux2014; restore in v0.1.1) ────
   build-linux:
     name: Build wheels · ${{ matrix.target }}
+    needs: verify-versions
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -63,6 +90,7 @@ jobs:
   # ── macOS (universal2: Intel + Apple Silicon in one wheel) ────────
   build-macos:
     name: Build wheels · macos-universal2
+    needs: verify-versions
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +114,7 @@ jobs:
   # ── Windows x86_64 ────────────────────────────────────────────────
   build-windows:
     name: Build wheels · windows-x86_64
+    needs: verify-versions
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +135,7 @@ jobs:
   # ── sdist (source fallback) ───────────────────────────────────────
   build-sdist:
     name: Build sdist
+    needs: verify-versions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

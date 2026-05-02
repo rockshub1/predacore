@@ -335,6 +335,24 @@ def _symbol_defined_in(source: str, symbol: str) -> bool:
     return re.search(pattern, source) is not None
 
 
+# T11.5 — tier-hit counter for benchmark instrumentation. Production code
+# never touches this; the benchmark sets it via
+# ``_verifier_tier_counter.set({...})`` before a pass and reads the dict
+# after to see which tier verified each chunk. Default ``None`` = no-op.
+import contextvars as _contextvars
+
+_verifier_tier_counter: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
+    "predacore_verifier_tier_counter", default=None,
+)
+
+
+def _bump_tier(key: str) -> None:
+    """Increment the tier counter if the benchmark has armed one."""
+    counters = _verifier_tier_counter.get()
+    if counters is not None:
+        counters[key] = counters.get(key, 0) + 1
+
+
 def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | None:
     """Real-time verification: is this chunk's content still trustworthy?
 
@@ -372,17 +390,21 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
     """
     src = _row_field(mem, "source_path", None)
     if not src:
+        _bump_tier("not_applicable")
         return None
 
     try:
         path = Path(str(src))
     except (TypeError, ValueError):
+        _bump_tier("file_unreadable")
         return False
     if not path.exists() or not path.is_file():
+        _bump_tier("file_unreadable")
         return False
 
     chunk = (_row_field(mem, "content", "") or "").strip()
     if not chunk:
+        _bump_tier("empty_chunk")
         return False
 
     # ── Tier 0: git-blob equality (T7) ────────────────────────────────
@@ -390,6 +412,7 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
     if stored_sha:
         current_sha = _cached_blob_sha_for_path(path)
         if current_sha is not None and current_sha == stored_sha:
+            _bump_tier("tier_0_blob_sha")
             return True
         # Mismatch / unhashable: fall through to disk-content tiers.
 
@@ -398,10 +421,12 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             current = f.read()
     except OSError:
+        _bump_tier("file_unreadable")
         return False
 
     # ── Tier 1: full substring match ──────────────────────────────────
     if chunk in current:
+        _bump_tier("tier_1_substring")
         return True
 
     # ── Tier 1.5: AST-symbol presence (T7) ────────────────────────────
@@ -420,6 +445,7 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
             )
             symbol = _extract_symbol_name(anchor_text or "")
             if symbol and _symbol_defined_in(current, symbol):
+                _bump_tier("tier_1_5_ast_symbol")
                 return True
 
     # ── Tier 2: first-line anchor ─────────────────────────────────────
@@ -427,9 +453,11 @@ def _verify_chunk_against_source(mem: dict[str, Any] | sqlite3.Row) -> bool | No
         line = line.strip()
         if line:
             if line in current:
+                _bump_tier("tier_2_line_anchor")
                 return True
             break
 
+    _bump_tier("failed_all_tiers")
     return False
 
 
