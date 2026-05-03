@@ -2,6 +2,43 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.2] - 2026-05-03
+
+**Patch — Codex requests now actually return 200, not 401.**
+
+v1.5.1 fixed the OAuth dance (login completes, grant saved). But every
+subsequent `/v1/responses` call returned HTTP 401 because we sent only
+`Authorization: Bearer` and OpenAI's Codex backend requires more.
+
+### Fixed
+- **Codex 401 on every request** — Codex's `/v1/responses` requires three
+  additional headers alongside the bearer token:
+    * `chatgpt-account-id: <id>` — the workspace this OAuth token is
+      bound to. Comes from the JWT's `https://api.openai.com/auth`
+      claim (`chatgpt_account_id` field).
+    * `OpenAI-Beta: chatgpt-codex` — routes to the Codex-tuned endpoint
+      that ChatGPT-OAuth tokens are authorized for (vs the regular API
+      tier endpoint, which they aren't).
+    * `Originator: predacore_cli` — telemetry/rate-limit bucket marker
+      that mirrors what the official Codex CLI emits.
+  Without these, the strict matcher 401s. v1.5.0/1.5.1 hit this on every
+  Codex chat — the `unknown_error` from v1.5.0 was OAuth, the 401 from
+  v1.5.1 was post-auth API.
+- **JWT account_id extraction at login time** —
+  `OAuthFlow._grant_from_token_response` now decodes the access_token
+  JWT and pulls `chatgpt_account_id` out of the auth claim, saving it
+  to `OAuthGrant.account_id`. Future logins show the correct id in the
+  "Authorized as ..." message instead of "(account_id unavailable)".
+- **Backward-compat for v1.5.1 grants** — if the on-disk grant has
+  `account_id=""` (saved before this fix), `chat()` re-derives it on
+  the fly by decoding the JWT. **No re-login required after upgrade.**
+
+### Known followups
+- Codex tokens still come back without a refresh_token at the current
+  empty-scopes setting. Adding `offline_access` to the scope list might
+  fix it; v1.5.3 will probe. For now, re-run `predacore login
+  openai-codex` every ~10 days.
+
 ## [1.5.1] - 2026-05-02
 
 **Patch — fix Codex OAuth redirect_uri so `predacore login openai-codex`

@@ -39,6 +39,7 @@ from typing import Any
 
 from . import predacore_sdk as psdk
 from .oauth import OAuthFlowConfig, with_auto_refresh
+from .oauth.flow import _extract_chatgpt_account_id
 from .openai_responses import (
     RESPONSES_API_BASE_URL,
     RESPONSES_API_PATH,
@@ -109,6 +110,33 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
 
     name = "openai_codex"
 
+    @staticmethod
+    def _build_codex_headers(
+        access_token: str,
+        account_id: str,
+    ) -> dict[str, str]:
+        """Build the headers Codex's /v1/responses requires.
+
+        OpenAI's strict matcher rejects a Bearer-only request from a
+        Codex-OAuth token; the `chatgpt-account-id` header tells the
+        backend which workspace this token belongs to (the JWT contains
+        the user_id but the API needs the account_id). The `OpenAI-Beta`
+        header puts the request on the Codex-tuned routing path that the
+        OAuth token is authorized for.
+        """
+        h = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "OpenAI-Beta": "chatgpt-codex",
+            # The originator string mirrors what the official Codex CLI
+            # emits — some upstream rate limits + telemetry slot us into
+            # the right bucket only when this is set.
+            "Originator": "predacore_cli",
+        }
+        if account_id:
+            h["chatgpt-account-id"] = account_id
+        return h
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -134,12 +162,19 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
             client_id=flow_cfg.client_id,
         ) as grant:
             access_token = grant.access_token
+            account_id = grant.account_id
 
         if not access_token:
             raise psdk.AuthenticationError(
                 "openai_codex: stored grant has no access_token. "
                 "Run `predacore login openai-codex` to re-authorize."
             )
+
+        # Older grants (pre-v1.5.2) were saved without account_id because
+        # the JWT-claim extraction landed later. Re-derive on the fly so
+        # users don't have to re-login just to pick up the header fix.
+        if not account_id:
+            account_id = _extract_chatgpt_account_id(access_token)
 
         # Codex routes through the Responses API. The model id must be one
         # the user's subscription has access to — Codex CLI uses GPT-5-Codex
@@ -148,7 +183,7 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
         model = self.config.model or "gpt-5-codex"
         base_url = (self.config.api_base or RESPONSES_API_BASE_URL).rstrip("/")
         url = f"{base_url}{RESPONSES_API_PATH}"
-        headers = self._build_headers(access_token)
+        headers = self._build_codex_headers(access_token, account_id)
         max_retries = int(os.getenv("PREDACORE_API_MAX_RETRIES", "3"))
 
         wire_input = self._serialize_messages_for_responses(list(messages))
@@ -212,7 +247,13 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
                     client_id=flow_cfg.client_id,
                 )
                 save_grant(grant)
-                headers = self._build_headers(grant.access_token)
+                refreshed_account_id = (
+                    grant.account_id
+                    or _extract_chatgpt_account_id(grant.access_token)
+                )
+                headers = self._build_codex_headers(
+                    grant.access_token, refreshed_account_id
+                )
                 resp = await psdk.request_with_retry(
                     client, "POST", url,
                     headers=headers, json=body, max_retries=max_retries,
