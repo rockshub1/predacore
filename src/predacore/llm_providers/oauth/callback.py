@@ -84,6 +84,7 @@ async def wait_for_authorization_code(
     port: int = 0,
     path: str = "/callback",
     timeout_seconds: float = 300.0,
+    bind_host: str = "127.0.0.1",
 ) -> CallbackResult:
     """Run the listener and return as soon as the redirect arrives.
 
@@ -160,9 +161,9 @@ async def wait_for_authorization_code(
     app.router.add_get(path, _handler)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
+    site = web.TCPSite(runner, bind_host, port)
     await site.start()
-    logger.info("oauth callback listener: http://127.0.0.1:%d%s", port, path)
+    logger.info("oauth callback listener: http://%s:%d%s", bind_host, port, path)
 
     try:
         return await asyncio.wait_for(future, timeout=timeout_seconds)

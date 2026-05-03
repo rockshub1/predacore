@@ -2,6 +2,33 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.1] - 2026-05-02
+
+**Patch — fix Codex OAuth redirect_uri so `predacore login openai-codex`
+actually completes against OpenAI's strict matcher.**
+
+### Fixed
+- **Codex OAuth `unknown_error`** — v1.5.0 picked an ephemeral free port
+  and sent `redirect_uri=http://127.0.0.1:<random>/callback`. OpenAI's
+  strict OAuth matcher requires the EXACT redirect_uri registered for the
+  client_id. OpenCode's public PKCE client `app_EMoamEEZ73f0CkXaXp7hrann`
+  registered `http://localhost:1455/auth/callback` — so OpenAI was
+  rejecting our flow with a generic `unknown_error` (despite the user being
+  signed in to ChatGPT correctly).
+  Fix: pin Codex's redirect_uri to `http://localhost:1455/auth/callback`
+  via new `OAuthFlowConfig.redirect_{host,bind_host,port,path}` fields.
+  Other providers' flows are unchanged (they keep the ephemeral-port
+  default for clients that allow loopback flexibility).
+
+### Known issues / followups
+- Codex tokens come back **without a refresh_token** with our current scope
+  set. v1.5.2 will add `offline_access` to the scopes — meanwhile, tokens
+  expire after ~10 days and require re-running `predacore login openai-codex`.
+
+### Tests
+- All 23 OAuth tests still pass; the fix is plumbing through
+  `OAuthFlowConfig` with backward-compatible defaults.
+
 ## [1.5.0] - 2026-05-02
 
 **Unified native tool calling across every provider — fixes a confirmed
