@@ -19,6 +19,8 @@ prints them verbatim.
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import secrets
 import time
@@ -28,6 +30,22 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+
+
+def _extract_chatgpt_account_id(jwt_access_token: str) -> str:
+    """Pull `chatgpt_account_id` out of an OpenAI JWT's auth claim.
+
+    Returns "" on any decode failure — this is best-effort metadata
+    extraction; the OAuth flow itself never depends on the result.
+    """
+    try:
+        payload_segment = jwt_access_token.split(".")[1]
+        payload_segment += "=" * (-len(payload_segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_segment))
+        auth = payload.get("https://api.openai.com/auth") or {}
+        return str(auth.get("chatgpt_account_id") or "")
+    except Exception:  # noqa: BLE001 — JWT decoding is best-effort
+        return ""
 
 from .. import predacore_sdk as psdk
 from .callback import build_redirect_uri, wait_for_authorization_code
@@ -207,10 +225,15 @@ class OAuthFlow:
                 "scope", "token_type",
             }
         }
-        # Some providers (Codex specifically) embed an account_id in the
-        # access_token JWT or in the response body. Try the body field
-        # first; a more thorough subclass can decode the JWT if needed.
-        account_id = str(data.get("account_id") or data.get("sub") or "")
+        # Account-id resolution — body field first (some providers put it
+        # there), then decode the access_token JWT if it's a JWT and look
+        # for the OpenAI-specific `chatgpt_account_id` claim that Codex's
+        # /v1/responses requires as the `chatgpt-account-id` header.
+        account_id = str(data.get("account_id") or "")
+        if not account_id and access.count(".") == 2:
+            account_id = _extract_chatgpt_account_id(access) or str(data.get("sub") or "")
+        elif not account_id:
+            account_id = str(data.get("sub") or "")
 
         return OAuthGrant(
             provider=self.config.provider,
