@@ -21,11 +21,6 @@ from .circuit_breaker import CircuitBreaker
 from .gemini import GeminiProvider
 from .gemini_cli import GeminiCLIProvider
 from .openai import OpenAIProvider
-from .text_tool_adapter import (
-    build_full_text_prompt,
-    build_tool_prompt,
-    parse_tool_calls,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +44,6 @@ class LLMInterface:
       3. Rate limit throttling (Adaptive delay)
       4. Delegation to provider plugins
     """
-
-    # Static delegates for external consumers (codex_proxy, tests)
-    _build_tool_prompt = staticmethod(build_tool_prompt)
-    _build_cli_prompt = staticmethod(build_full_text_prompt)
-    _parse_tool_calls = staticmethod(parse_tool_calls)
 
     # Circuit breaker settings
     CB_FAILURE_THRESHOLD = 3
@@ -155,6 +145,14 @@ class LLMInterface:
             instance = GeminiCLIProvider(p_config)
         elif name in ("anthropic", "claude"):
             instance = AnthropicProvider(p_config)
+        elif name in ("openai-codex", "openai_codex", "codex"):
+            # OpenAI subscription auth via PKCE OAuth — uses the
+            # ChatGPT Plus/Pro plan instead of an API key. Tokens stored
+            # at ~/.predacore/oauth/openai_codex.json after a one-time
+            # `predacore login openai-codex` flow. See openai_codex.py
+            # for the policy notes (currently tolerated by OpenAI).
+            from .openai_codex import OpenAICodexProvider
+            instance = OpenAICodexProvider(p_config)
         elif name in PROVIDER_ENDPOINTS or name in ("azure",):
             instance = OpenAIProvider(p_config)
         else:

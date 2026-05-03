@@ -16,11 +16,20 @@ Credentials via ``google-auth``; that path was removed as part of the
 in-house SDK migration (vendor SDKs dropped). If you need ADC, export
 an API key from Google AI Studio instead.
 
-Tool use + text-based fallback follow the same pattern as the other
-providers.
+v1.5.0 changes:
+  * thoughtSignature preservation hardened — refuses to emit bare
+    functionCall parts without the signature (Gemini-3 / 2.5-thinking
+    return HTTP 400 otherwise).
+  * Tool-call IDs derived deterministically from
+    (turn_index, position, name, args) so re-serialization is idempotent.
+  * Text-tool fallback removed — modern Gemini models all support native
+    tool calls; if a model rejects tools we surface a clear error
+    naming the model.
+  * gemini_validator runs on every request as defense-in-depth.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -28,9 +37,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import gemini_validator
 from . import predacore_sdk as psdk
 from .base import LLMProvider
-from .text_tool_adapter import build_tool_prompt, parse_tool_calls
 from .types import AssistantResponse, Message, ToolCallRef, ToolResultRef
 
 logger = logging.getLogger(__name__)
@@ -64,8 +73,6 @@ class GeminiProvider(LLMProvider):
         messages: list["Message"],
         response: "AssistantResponse",
     ) -> None:
-        import uuid
-
         # When the parser stashed the raw ``parts[]`` from the Gemini response
         # under provider_extras["content_parts"], replay them verbatim. This
         # preserves ``thoughtSignature`` (required on functionCall parts for
@@ -74,34 +81,37 @@ class GeminiProvider(LLMProvider):
         # per-part metadata Google may add later. Mirrors the Anthropic
         # ``content_blocks`` round-trip pattern.
         raw_parts = response.provider_extras.get("content_parts")
-        use_raw = (
-            isinstance(raw_parts, list)
-            and any(
-                isinstance(p, dict) and "functionCall" in p
-                for p in raw_parts
-            )
-        )
+        use_raw = isinstance(raw_parts, list) and len(raw_parts) > 0
 
         if use_raw:
             parts = list(raw_parts)
+        elif response.tool_calls:
+            # No content_parts means we'd emit bare functionCall parts
+            # without thoughtSignature — Gemini-3 / 2.5-thinking returns
+            # HTTP 400 ("Function call is missing a thought_signature").
+            # Refuse rather than corrupt the conversation. This branch
+            # should be unreachable in production: ``_parse_response``
+            # always stashes the parts list when candidates exist.
+            raise psdk.BadRequestError(
+                "gemini: cannot reconstruct functionCall parts without "
+                "content_parts (lost thoughtSignature). Only call "
+                "append_assistant_turn on responses returned by chat()."
+            )
         else:
-            # Fallback path — rebuild parts from typed fields. Used when the
-            # response came via the text-tool fallback (no native functionCall
-            # parts) or when a caller constructs AssistantResponse manually.
-            # Loses thoughtSignature, but that only matters on the native path.
-            parts = []
-            if response.content:
-                parts.append({"text": response.content})
-            for tc in response.tool_calls:
-                parts.append(
-                    {"functionCall": {"name": tc.name, "args": tc.arguments}}
-                )
+            # Pure text response — no functionCall, no signature concern.
+            parts = [{"text": response.content}] if response.content else []
 
+        # Deterministic ID synthesis for Gemini (no native IDs on the wire).
+        # Derived from (turn_index, position, name, args) so re-serialization
+        # is idempotent — same response → same id, every time. This matters
+        # because tool_results synthesized later from (name, position) need
+        # the call_id to match the call that produced them.
+        turn_idx = len(messages)
         normalized_tool_calls: list[ToolCallRef] = []
         for i, tc in enumerate(response.tool_calls):
-            # Gemini doesn't emit IDs — synthesize stable one if absent so the
-            # downstream ``ToolResultRef.call_id`` has something to match.
-            tc_id = tc.id or f"gemini_{i}_{uuid.uuid4().hex[:8]}"
+            tc_id = tc.id or _derive_gemini_call_id(
+                turn_idx, i, tc.name, tc.arguments
+            )
             normalized_tool_calls.append(
                 ToolCallRef(id=tc_id, name=tc.name, arguments=tc.arguments)
             )
@@ -184,6 +194,8 @@ class GeminiProvider(LLMProvider):
             temperature=temp,
             max_tokens=max_tok,
         )
+        # v1.5.0: validate + auto-repair tool flow on the wire shape.
+        payload["contents"] = self.repair_messages(payload.get("contents", []))
 
         endpoint, headers = _build_request_target(
             model_name=model_name,
@@ -204,19 +216,38 @@ class GeminiProvider(LLMProvider):
                 )
                 return _parse_response(resp.json(), model_name)
             except psdk.BadRequestError as exc:
+                # v1.5.0: text-tool fallback removed. If a Gemini model
+                # rejects native tools, surface a clear error naming the
+                # model. (In practice no current Gemini model rejects
+                # tools — this branch only fires on misconfigured custom
+                # endpoints / wrong model id.)
                 err_msg = str(exc).lower()
-                is_tool_error = tools and ("tool" in err_msg or "function" in err_msg)
-                if is_tool_error:
-                    logger.warning(
-                        "gemini: native tools rejected — text-tool fallback"
-                    )
-                    return await _fallback_text_tools(
-                        client, endpoint, headers, payload, tools, model_name, max_retries,
-                    )
+                if tools and ("tool" in err_msg or "function" in err_msg):
+                    raise psdk.BadRequestError(
+                        f"gemini: model '{model_name}' rejected native "
+                        "tool calling. Pick a tool-tuned Gemini model "
+                        "(gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro).",
+                        status_code=exc.status_code,
+                        request_id=exc.request_id,
+                        response_body=exc.response_body,
+                    ) from exc
                 raise
             except psdk.LLMError as exc:
                 logger.error("gemini error: %s", exc)
                 raise
+
+    # ------------------------------------------------------------------
+    # repair_messages — Gemini's wire validator (v1.5.0).
+    #
+    # Operates on the wire-shape ``contents[]`` array. Enforces:
+    #   * functionCall ↔ functionResponse linkage by name+position
+    #   * orphan functionResponse parts dropped
+    #   * thoughtSignature preserved verbatim (validator never reconstructs
+    #     functionCall parts during repair)
+    # ------------------------------------------------------------------
+
+    def repair_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return gemini_validator.repair_wire(messages)
 
 
 # ---------------------------------------------------------------------------
@@ -339,36 +370,18 @@ def _build_payload(
     return payload
 
 
-async def _fallback_text_tools(
-    client: Any,
-    endpoint: str,
-    headers: dict[str, str],
-    payload: dict[str, Any],
-    tools: list[dict],
-    model_name: str,
-    max_retries: int,
-) -> dict[str, Any]:
-    """Strip native tools, embed them in systemInstruction as text, retry."""
-    payload = dict(payload)
-    payload.pop("tools", None)
+def _derive_gemini_call_id(turn_idx: int, position: int, name: str, args: dict) -> str:
+    """Synthesize a deterministic ID for a Gemini functionCall.
 
-    tool_prompt = build_tool_prompt(tools)
-    if "systemInstruction" in payload:
-        existing_text = payload["systemInstruction"]["parts"][0].get("text", "")
-        payload["systemInstruction"]["parts"][0]["text"] = existing_text + tool_prompt
-    else:
-        payload["systemInstruction"] = {"parts": [{"text": tool_prompt}]}
-
-    resp = await psdk.request_with_retry(
-        client, "POST", endpoint, headers=headers, json=payload, max_retries=max_retries,
+    Same inputs always produce the same id, so re-serializing a
+    conversation yields stable ``ToolCallRef.id`` values — required for
+    the abstract ``ToolResultRef.call_id`` to match.
+    """
+    payload = json.dumps(
+        {"t": turn_idx, "i": position, "n": name, "a": args}, sort_keys=True
     )
-    result = _parse_response(resp.json(), model_name)
-    clean_text, text_tool_calls = parse_tool_calls(result["content"])
-    if text_tool_calls:
-        result["content"] = clean_text
-        result["tool_calls"] = text_tool_calls
-        result["finish_reason"] = "tool_calls"
-    return result
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+    return f"gemini_{turn_idx}_{position}_{digest}"
 
 
 def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
@@ -442,13 +455,7 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
             # treats empty as a silent success, so the user sees a blank turn).
             content_text = "[Empty response from Gemini — no candidates and no feedback. This usually means a transient API issue; try again.]"
 
-    # Parse text-based tool calls if no native ones found
-    if not tool_calls_out and content_text:
-        clean_text, text_calls = parse_tool_calls(content_text)
-        if text_calls:
-            content_text = clean_text
-            tool_calls_out = text_calls
-            finish_reason = "tool_calls"
+    # v1.5.0: text-tool fallback removed — native tool_calls only.
 
     usage = data.get("usageMetadata") or {}
     # Gemini 2.5+ and 3.x automatically cache repeated prefixes server-side
@@ -480,21 +487,16 @@ def _parse_response(data: dict, model_name: str) -> dict[str, Any]:
         "model": model_name,
     }
 
-    # Preserve the raw ``parts[]`` from the response when it contains native
-    # functionCall parts. Gemini 2.5+/3.x reasoning models attach a
-    # ``thoughtSignature`` as a sibling field on each functionCall part; the
-    # next request must echo that signature back verbatim or Gemini rejects
-    # with HTTP 400 ("Function call is missing a thought_signature"). Rather
-    # than thread thoughtSignature through the neutral type system, we stash
-    # the whole parts list and let ``append_assistant_turn`` replay it.
-    # Skipped for text-only responses and for the text-tool fallback path
-    # (tool_calls_out would be empty from the native parse since the server
-    # never emitted a functionCall part in that case).
-    if tool_calls_out and candidates:
+    # v1.5.0: ALWAYS stash the raw ``parts[]`` when candidates exist —
+    # not just when functionCall parts are present. Gemini 2.5+/3.x
+    # reasoning models attach a ``thoughtSignature`` to functionCall parts
+    # AND can emit thinking-only turns whose signatures we still need to
+    # round-trip on subsequent requests. Stashing universally also means
+    # the next-turn validator never has to reconstruct a missing signature
+    # — the parts arrive with the signature intact and pass through verbatim.
+    if candidates:
         raw_parts = candidates[0].get("content", {}).get("parts", [])
-        if isinstance(raw_parts, list) and any(
-            isinstance(p, dict) and "functionCall" in p for p in raw_parts
-        ):
+        if isinstance(raw_parts, list) and raw_parts:
             result["content_parts"] = list(raw_parts)
 
     return result

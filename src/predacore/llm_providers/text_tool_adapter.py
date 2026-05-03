@@ -1,10 +1,22 @@
 """
-Shared text-based tool calling adapter.
+Text-based tool calling helpers — used by ``gemini_cli`` ONLY.
 
-Single source of truth for injecting tool definitions into text prompts
-and parsing <tool_call> blocks from LLM responses. Used as a fallback
-when providers don't support native function calling, or when a model
-rejects native tool schemas.
+Originally a shared adapter for the silent text-fallback path on every
+provider. v1.5.0 (2026-05-02) removed that fallback from the API
+providers (Anthropic / OpenAI / Gemini / Codex) — modern provider APIs
+all support native tool calls, so a "model rejected native tools, retry
+with XML in prompt" mode just papered over real misconfigurations.
+
+This module survives because :mod:`gemini_cli` shells out to the
+``gemini`` CLI binary, which speaks plain text only. Tool calls are
+inherently text-based for that provider — not a fallback, the only
+possible mode. ``build_full_text_prompt`` flattens the conversation
+plus tool defs into one prompt; ``parse_tool_calls`` extracts
+``<tool_call>{...}</tool_call>`` JSON blocks from the response.
+
+DO NOT import these helpers from any other provider. The API providers
+all use native ``tools`` parameters; reaching for the text path is
+always a regression.
 """
 from __future__ import annotations
 

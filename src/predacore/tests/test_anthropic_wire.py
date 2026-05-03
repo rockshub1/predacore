@@ -288,6 +288,22 @@ class TestBuildRequestBody:
         assert body["thinking"] == {"type": "adaptive"}
         assert body["temperature"] == 1.0
 
+    def test_opus_47_adaptive_no_temperature(self):
+        """Opus 4.7+ rejects temperature/top_p/top_k with HTTP 400.
+        adaptive thinking is mandatory; no sampling params."""
+        body = self._call(model="claude-opus-4-7")
+        assert body["thinking"] == {"type": "adaptive"}
+        # Critical: these MUST be absent for Opus 4.7+
+        assert "temperature" not in body
+        assert "top_p" not in body
+        assert "top_k" not in body
+
+    def test_opus_47_ignores_explicit_temperature(self):
+        """Even if caller passes temperature=0.3, we must not send it on
+        Opus 4.7 — would cause 400."""
+        body = self._call(model="claude-opus-4-7", temperature=0.3)
+        assert "temperature" not in body
+
     def test_sonnet_46_gets_adaptive_thinking_on_medium(self):
         body = self._call(model="claude-sonnet-4-6", reasoning_effort="medium")
         assert body["thinking"] == {"type": "adaptive"}

@@ -242,7 +242,9 @@ chmod 600 ~/.predacore/.env
 predacore stop && predacore start --daemon   # restart to reload
 ```
 
-Supported keys: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`. Or run `predacore setup` to re-enter them with the wizard.
+Supported keys: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`. v1.5.0 adds: `MOONSHOT_API_KEY` (Kimi K2), `DASHSCOPE_API_KEY` (Qwen 3), `HYPERBOLIC_API_KEY`, `PERPLEXITY_API_KEY`. Or run `predacore setup` to re-enter them with the wizard.
+
+> **OpenRouter fidelity caveat (v1.5.0)** — OpenRouter normalizes every underlying provider's response to OpenAI Chat Completions, which means picking `anthropic/claude-opus-4-7` via OpenRouter *loses* Anthropic's thinking signatures, and picking `google/gemini-3-pro` *loses* `thoughtSignature`. For maximum fidelity (thinking-block preservation, native tool-use validators), use direct providers (`--model anthropic`, `--model gemini`). For breadth + one API key, OpenRouter is great — predacore can't recover signatures the aggregator strips.
 
 ---
 

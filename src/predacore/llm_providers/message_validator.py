@@ -23,13 +23,36 @@ After that was fixed, this validator remains as a structural safety net
 so the same class of bug can never silently re-enter the codebase
 without either tripping an Anthropic 400 or a visible warning in the
 logs.
+
+Env toggle ``PREDACORE_REPAIR_TOOL_FLOW`` (2026-05-02 — v1.5.0):
+  ``repair`` (default) — auto-fix violations, log a warning per fix
+  ``strict``           — raise ``ToolFlowInvariantError`` on any violation
+  ``off``              — skip both validation and repair (debug / legacy)
+
+Same env var also controls the per-provider validators
+(:mod:`openai_validator`, :mod:`gemini_validator`), so toggling it affects
+every provider uniformly.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ToolFlowInvariantError(Exception):
+    """Raised by ``repair_tool_flow`` in strict mode when invariants fail."""
+
+    def __init__(self, issues: list[str]) -> None:
+        self.issues = issues
+        super().__init__("; ".join(issues))
+
+
+def _repair_mode() -> str:
+    """Return the active repair mode: ``repair`` / ``strict`` / ``off``."""
+    return (os.getenv("PREDACORE_REPAIR_TOOL_FLOW", "repair") or "repair").lower().strip()
 
 
 def _is_tool_use(block: Any) -> bool:
@@ -113,7 +136,21 @@ def repair_tool_flow(messages: list[dict]) -> list[dict]:
 
     Every repair emits a logger.warning so regressions are visible without
     burning a user-visible error.
+
+    Honors ``PREDACORE_REPAIR_TOOL_FLOW``:
+      ``off``    — return ``messages`` unchanged
+      ``strict`` — raise :class:`ToolFlowInvariantError` if violations exist
+      ``repair`` — auto-fix (default)
     """
+    mode = _repair_mode()
+    if mode == "off":
+        return messages
+    if mode == "strict":
+        issues = validate_tool_flow(messages)
+        if issues:
+            raise ToolFlowInvariantError(issues)
+        return messages
+
     out: list[dict] = []
     i = 0
     while i < len(messages):

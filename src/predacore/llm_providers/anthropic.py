@@ -19,7 +19,8 @@ Features:
   - Prompt caching (top-level ephemeral + system breakpoint)
   - Server-side context compaction (``compact-2026-01-12`` beta)
   - Content-blocks round-trip (thinking signatures + tool_use ids survive)
-  - Native tool use with text-based fallback
+  - Native tool use only (v1.5.0+: text fallback removed; pick a different
+    model if your Anthropic deployment doesn't support tool calls)
   - Retry with exponential backoff on 429/5xx/529 via PredaCore SDK
 """
 from __future__ import annotations
@@ -34,7 +35,6 @@ from . import predacore_sdk as psdk
 from .base import LLMProvider
 from .claude_models import DEFAULT_CLAUDE_MODEL, resolve_claude_model
 from .message_validator import repair_tool_flow
-from .text_tool_adapter import build_tool_prompt, parse_tool_calls
 from .types import Message, ToolResultRef
 
 logger = logging.getLogger(__name__)
@@ -127,8 +127,7 @@ class AnthropicProvider(LLMProvider):
         )
 
         conv_messages = wire.build_conv_messages(messages)
-        if any(isinstance(m.get("content"), list) for m in conv_messages):
-            conv_messages = repair_tool_flow(conv_messages)
+        conv_messages = self.repair_messages(conv_messages)
 
         system_blocks = wire.build_system_blocks(wire.extract_system_text(messages))
 
@@ -161,54 +160,38 @@ class AnthropicProvider(LLMProvider):
                 )
                 return wire.parse_response(resp.json())
             except psdk.BadRequestError as exc:
+                # v1.5.0: text-tool fallback removed. If a Claude model
+                # rejects native tools, surface a clear error instead of
+                # silently degrading. (In practice no current Claude model
+                # rejects tools — this branch only fires on misconfigured
+                # custom-deployments / wrong model id.)
                 err_msg = str(exc).lower()
-                is_tool_error = tools and ("tool" in err_msg or "function" in err_msg)
-                if is_tool_error:
-                    return await self._fallback_to_text_tools(
-                        client, endpoint, headers, body, tools, max_retries,
-                    )
+                if tools and ("tool" in err_msg or "function" in err_msg):
+                    raise psdk.BadRequestError(
+                        f"anthropic: model '{model}' rejected native tool use. "
+                        "Pick a Claude model that supports tools "
+                        "(claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5).",
+                        status_code=exc.status_code,
+                        request_id=exc.request_id,
+                        response_body=exc.response_body,
+                    ) from exc
                 raise
             except psdk.LLMError as exc:
                 logger.error("anthropic error: %s", exc)
                 raise
 
-    async def _fallback_to_text_tools(
-        self,
-        client: Any,
-        endpoint: str,
-        headers: dict[str, str],
-        body: dict,
-        tools: list[dict],
-        max_retries: int,
-    ) -> dict[str, Any]:
-        """Native tool API rejected — retry with text-based tools in the prompt."""
-        logger.warning("anthropic: native tools rejected — falling back to text tools")
+    # ------------------------------------------------------------------
+    # repair_messages — Anthropic's wire validator (v1.5.0).
+    #
+    # Runs ``message_validator.repair_tool_flow`` only when the input has
+    # structured (block-list) content. Flat-string conversations skip the
+    # check (they have no tool_use blocks to validate).
+    # ------------------------------------------------------------------
 
-        body = dict(body)
-        body.pop("tools", None)
-        body.pop("tool_choice", None)
-
-        tool_prompt = build_tool_prompt(tools)
-        system = body.get("system", [])
-        if isinstance(system, list) and system:
-            last = system[-1]
-            if isinstance(last, dict) and last.get("type") == "text":
-                last["text"] = last.get("text", "") + tool_prompt
-            else:
-                system.append({"type": "text", "text": tool_prompt})
-        else:
-            body["system"] = [{"type": "text", "text": tool_prompt}]
-
-        resp = await psdk.request_with_retry(
-            client, "POST", endpoint, headers=headers, json=body, max_retries=max_retries,
-        )
-        result = wire.parse_response(resp.json())
-        clean_text, text_tool_calls = parse_tool_calls(result["content"])
-        if text_tool_calls:
-            result["content"] = clean_text
-            result["tool_calls"] = text_tool_calls
-            result["finish_reason"] = "tool_calls"
-        return result
+    def repair_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if any(isinstance(m.get("content"), list) for m in messages):
+            return repair_tool_flow(messages)
+        return messages
 
 
 def _build_headers(api_key: str) -> dict[str, str]:

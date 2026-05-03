@@ -3,16 +3,20 @@ Shared Claude model alias normalization for providers that talk to Anthropic.
 """
 from __future__ import annotations
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
 
 # Anthropic accepts the full API aliases below. Keep short nicknames here so
 # config values like "opus" work across Anthropic-backed providers.
 MODEL_ALIASES = {
-    "opus": "claude-opus-4-6",
+    # Short nicknames map to the latest in each family
+    "opus": "claude-opus-4-7",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",
+    # Pinned aliases — explicit version selection
+    "opus-4.7": "claude-opus-4-7",
     "opus-4.6": "claude-opus-4-6",
     "sonnet-4.6": "claude-sonnet-4-6",
+    "sonnet-3.7": "claude-sonnet-3-7",
     "haiku-4.5": "claude-haiku-4-5",
 }
 

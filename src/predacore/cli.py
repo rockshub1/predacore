@@ -1140,6 +1140,49 @@ async def _run_setup() -> None:
     else:
         detected["openrouter"] = {"status": "no_key", "detail": "Get a free key at openrouter.ai/keys"}
 
+    # ── v1.5.0 new providers ──
+    # Kimi K2 (Moonshot)
+    kimi_key = os.getenv("MOONSHOT_API_KEY", "") or os.getenv("KIMI_API_KEY", "")
+    detected["kimi"] = (
+        {"status": "ready", "detail": "MOONSHOT_API_KEY=****configured"}
+        if kimi_key
+        else {"status": "no_key", "detail": "Free tier at platform.moonshot.cn"}
+    )
+    # Qwen 3 (Alibaba DashScope, international endpoint)
+    qwen_key = os.getenv("DASHSCOPE_API_KEY", "") or os.getenv("QWEN_API_KEY", "")
+    detected["qwen"] = (
+        {"status": "ready", "detail": "DASHSCOPE_API_KEY=****configured"}
+        if qwen_key
+        else {"status": "no_key", "detail": "Sign up at dashscope.console.aliyun.com"}
+    )
+    # Hyperbolic (cheap Llama / DeepSeek / Qwen hosting)
+    hyp_key = os.getenv("HYPERBOLIC_API_KEY", "")
+    detected["hyperbolic"] = (
+        {"status": "ready", "detail": "HYPERBOLIC_API_KEY=****configured"}
+        if hyp_key
+        else {"status": "no_key", "detail": "Sign up at app.hyperbolic.xyz"}
+    )
+    # Perplexity Sonar (built-in web search)
+    pplx_key = os.getenv("PERPLEXITY_API_KEY", "")
+    detected["perplexity"] = (
+        {"status": "ready", "detail": "PERPLEXITY_API_KEY=****configured"}
+        if pplx_key
+        else {"status": "no_key", "detail": "Sign up at perplexity.ai/api"}
+    )
+    # OpenAI Codex (ChatGPT-OAuth, separate from regular OpenAI)
+    from pathlib import Path as _Path
+    codex_grant = _Path.home() / ".predacore" / "oauth" / "openai_codex.json"
+    if codex_grant.exists():
+        detected["openai-codex"] = {
+            "status": "ready",
+            "detail": "ChatGPT subscription auth saved",
+        }
+    else:
+        detected["openai-codex"] = {
+            "status": "no_key",
+            "detail": "Run `predacore login openai-codex` to authorize",
+        }
+
     # Check Ollama
     ollama_bin = shutil.which("ollama")
     ollama_running = False
@@ -1175,14 +1218,22 @@ async def _run_setup() -> None:
     else:
         detected["ollama"] = {"status": "missing", "detail": "Install: brew install ollama"}
 
-    # Display detected providers (ordered by recommendation priority)
+    # Display detected providers (ordered by recommendation priority).
+    # v1.5.0: 11 providers covered. Order = first-time-friendly → premium →
+    # specialty/enterprise. Anyone unconfigured shows as "missing" but can
+    # still be picked (we'll prompt for the key inline).
     provider_labels = {
-        "gemini-cli":  ("Gemini CLI",  "Free, no API key — uses the gemini CLI binary"),
-        "gemini":      ("Gemini API",  "Google AI Studio, generous free tier"),
-        "openrouter":  ("OpenRouter",  "One key → 100+ models (Claude, GPT, Gemini, Llama). Free tier available."),
-        "anthropic":   ("Anthropic",   "Claude Opus 4.6, Claude Sonnet — highest quality"),
-        "openai":      ("OpenAI",      "GPT-4o, GPT-5"),
-        "ollama":      ("Ollama",      "Local models, fully private, no internet needed"),
+        "gemini-cli":   ("Gemini CLI",   "Free, no API key — uses the gemini CLI binary"),
+        "gemini":       ("Gemini API",   "Google AI Studio — Gemini 3 Pro, generous free tier"),
+        "openrouter":   ("OpenRouter",   "One key → 100+ models (Claude, GPT, Gemini, Llama)"),
+        "anthropic":    ("Anthropic",    "Claude Opus 4.7, Sonnet 4.6 — top reasoning"),
+        "openai":       ("OpenAI",       "GPT-5, GPT-4o — flagship Western models"),
+        "openai-codex": ("OpenAI Codex", "ChatGPT Plus/Pro subscription auth (no API key)"),
+        "kimi":         ("Kimi K2",      "Moonshot AI — open-weight reasoning, free tier"),
+        "qwen":         ("Qwen 3",       "Alibaba — 235B MoE, top multilingual"),
+        "perplexity":   ("Perplexity",   "Sonar — built-in web search"),
+        "hyperbolic":   ("Hyperbolic",   "Cheap hosting for Llama / DeepSeek / Qwen"),
+        "ollama":       ("Ollama",       "Local models, fully private, no internet needed"),
     }
 
     ready_providers: list[str] = []
@@ -1230,7 +1281,10 @@ async def _run_setup() -> None:
     console.print()
 
     # Recommend the best ready provider — free/no-setup first, then meta, then paid, then local
-    preference_order = ["gemini-cli", "gemini", "openrouter", "anthropic", "openai", "ollama"]
+    preference_order = [
+        "gemini-cli", "gemini", "openrouter", "anthropic", "openai", "openai-codex",
+        "kimi", "qwen", "perplexity", "hyperbolic", "ollama",
+    ]
     default_provider = "gemini-cli"
     for p in preference_order:
         if p in ready_providers:
@@ -1247,47 +1301,16 @@ async def _run_setup() -> None:
     provider_display = provider_labels.get(provider, (provider,))[0]
 
     # ── Model picker ──────────────────────────────────────────────
-    # Curated model list per provider. First entry is the recommended default.
-    # Users can also type a custom model name or "auto" to let the provider choose.
-    PROVIDER_MODELS: dict[str, list[tuple[str, str]]] = {
-        "gemini-cli": [
-            ("gemini-2.5-flash",       "fast, cheap (default)"),
-            ("gemini-2.5-pro",         "highest quality, slower"),
-            ("gemini-2.5-flash-lite",  "fastest"),
-        ],
-        "gemini": [
-            ("gemini-flash-latest",    "newest Flash alias (default)"),
-            ("gemini-pro-latest",      "newest Pro alias, highest quality"),
-            ("gemini-3-pro-preview",   "Gemini 3 Pro (preview)"),
-            ("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview, thinking)"),
-            ("gemini-2.5-flash",       "Gemini 2.5 Flash (stable)"),
-            ("gemini-2.5-pro",         "Gemini 2.5 Pro (stable)"),
-        ],
-        "anthropic": [
-            ("claude-sonnet-4-6",      "balanced speed/quality (default)"),
-            ("claude-opus-4-6",        "max quality, expensive"),
-            ("claude-haiku-4-5",       "fastest, cheapest"),
-        ],
-        "openai": [
-            ("gpt-5",                  "latest flagship (default)"),
-            ("gpt-5-mini",             "faster, cheaper"),
-            ("gpt-4o",                 "previous gen, stable"),
-        ],
-        "openrouter": [
-            ("anthropic/claude-sonnet-4-6",   "Claude via OpenRouter (default)"),
-            ("openai/gpt-5",                  "GPT-5 via OpenRouter"),
-            ("google/gemini-2.5-pro",         "Gemini Pro via OpenRouter"),
-            ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
-        ],
-        "ollama": [
-            ("qwen2.5:3b",             "3B params, fast, runs anywhere (default)"),
-            ("llama3.2:3b",            "Meta's small model"),
-            ("qwen2.5:7b",             "7B, better quality"),
-            ("mistral:7b",             "7B, balanced"),
-        ],
-    }
+    # Single source of truth: predacore.llm_providers.model_registry.
+    # First entry per provider is the recommended default. Users can also
+    # type a custom model name or "0" to let the provider choose.
+    from .llm_providers.model_registry import models_for as _models_for
+
+    _registry_entries = _models_for(provider)
+    model_options: list[tuple[str, str]] = [
+        (mi.id, mi.description) for mi in _registry_entries
+    ]
     model = ""
-    model_options = PROVIDER_MODELS.get(provider, [])
     if model_options:
         console.print()
         model_table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
@@ -1322,6 +1345,14 @@ async def _run_setup() -> None:
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
+        # v1.5.0 new providers
+        "kimi": "MOONSHOT_API_KEY",
+        "qwen": "DASHSCOPE_API_KEY",
+        "hyperbolic": "HYPERBOLIC_API_KEY",
+        "perplexity": "PERPLEXITY_API_KEY",
+        # NOTE: openai-codex uses OAuth, not env keys — it's NOT in this map.
+        # The wizard prints a follow-up hint pointing at `predacore login
+        # openai-codex` instead of asking for an API key inline.
     }
     if provider in key_env_map and detected[provider]["status"] == "no_key":
         env_var = key_env_map[provider]
@@ -1339,6 +1370,20 @@ async def _run_setup() -> None:
         ).strip()
         if not api_key:
             console.print("    [glass.text.dim]Skipped. Set the env var later to enable this provider.[/glass.text.dim]")
+    elif provider == "openai-codex" and detected[provider]["status"] == "no_key":
+        # Codex uses OAuth + PKCE, not an env-var API key. Direct the user
+        # to the dedicated login subcommand instead of asking for a key.
+        console.print()
+        console.print(Padding(
+            Text.from_markup(
+                "  [glass.amber]⚠[/glass.amber]  [glass.text]OpenAI Codex needs a one-time browser login.[/glass.text]\n"
+                "     [glass.text.dim]Finish setup, then run:[/glass.text.dim]  "
+                "[glass.cyan]predacore login openai-codex[/glass.cyan]\n"
+                "     [glass.text.dim]A browser window will open for ChatGPT auth; tokens are\n"
+                "     saved to ~/.predacore/oauth/openai_codex.json (chmod 600).[/glass.text.dim]"
+            ),
+            (0, 1),
+        ))
 
     # ── Step 3: Mode ──
     console.print()
@@ -1876,6 +1921,38 @@ Commands:
     restart_parser = subparsers.add_parser("restart", help="Restart the PredaCore daemon")
     restart_parser.add_argument("--config", "-c", help="Path to config file")
 
+    # Login / logout — OAuth-based auth for LLM providers that support it
+    # (subscription-based access for users who'd rather use their ChatGPT
+    # Plus/Pro plan than burn API-key credits). See predacore/llm_providers/
+    # openai_codex.py for the current policy notes.
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Authorize via OAuth (e.g. ChatGPT subscription for Codex)",
+    )
+    login_parser.add_argument(
+        "provider",
+        nargs="?",
+        choices=("openai-codex",),
+        help="Provider to authorize (default: openai-codex)",
+        default="openai-codex",
+    )
+    login_parser.add_argument(
+        "--status", action="store_true",
+        help="Show stored OAuth grants instead of starting a new flow",
+    )
+
+    logout_parser = subparsers.add_parser(
+        "logout",
+        help="Revoke a stored OAuth grant",
+    )
+    logout_parser.add_argument(
+        "provider",
+        nargs="?",
+        choices=("openai-codex",),
+        default="openai-codex",
+        help="Provider to log out from (default: openai-codex)",
+    )
+
     # Upgrade command — pulls latest predacore + predacore_core into THIS
     # Python environment. Solves the pipx-upgrade quirk where transitive
     # deps (predacore_core) don't get re-resolved when the floor still
@@ -2010,6 +2087,13 @@ Commands:
             allow_pre=getattr(args, "pre", False),
             dry_run=getattr(args, "dry_run", False),
         )
+    elif args.command == "login":
+        if getattr(args, "status", False):
+            _run_login_status()
+        else:
+            asyncio.run(_run_login(provider=args.provider))
+    elif args.command == "logout":
+        _run_logout(provider=args.provider)
     elif args.command == "install":
         _run_install(config_path=getattr(args, "config", None))
     elif args.command == "logs":
@@ -2609,6 +2693,106 @@ def _run_stop(config_path: str | None = None) -> None:
                 f"   [muted]PID {current_pid} is still running. "
                 "Stop it manually and remove ~/.predacore/predacore.pid if needed.[/muted]"
             )
+
+
+async def _run_login(*, provider: str = "openai-codex") -> None:
+    """Run the OAuth PKCE flow for ``provider`` and persist the grant.
+
+    Uses the predacore-local PKCE flow (no dependency on the official
+    Codex CLI being installed). One ``predacore login openai-codex`` =
+    one browser pop + one user click + a stored grant under
+    ``~/.predacore/oauth/openai_codex.json``.
+    """
+    from .llm_providers.oauth import OAuthFlow
+
+    if provider in ("openai-codex", "openai_codex", "codex"):
+        from .llm_providers.openai_codex import codex_oauth_config
+        flow_cfg = codex_oauth_config()
+        provider_label = "openai-codex"
+    else:
+        print(f"❌ Unknown OAuth provider: {provider!r}")
+        sys.exit(2)
+
+    print()
+    print(f"🔐 Authorizing PredaCore with {provider_label}...")
+    print()
+    print(
+        "  Note: this uses your ChatGPT Plus/Pro/Team/Enterprise subscription.\n"
+        "  OpenAI currently allows third-party tools to use Codex OAuth, but\n"
+        "  could revoke that at any time (Anthropic did so for Claude in\n"
+        "  April 2026). For guaranteed-stable access, set OPENAI_API_KEY\n"
+        "  and use the standard `openai` provider.\n"
+    )
+
+    flow = OAuthFlow(flow_cfg)
+    try:
+        grant = await flow.run()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n⚠ Login cancelled.")
+        sys.exit(130)
+
+    print()
+    print(f"✓ Authorized as {grant.account_id or '(account_id unavailable)'}")
+    if grant.expires_at > 0:
+        import time as _time
+        ttl = grant.expires_at - _time.time()
+        print(f"  Access token expires in ~{int(ttl // 60)}m (auto-refreshed before then)")
+    print(f"  Stored at ~/.predacore/oauth/{flow_cfg.provider}.json (chmod 600)")
+    print()
+    print("To use: set llm.provider = \"openai-codex\" in ~/.predacore/config.yaml,")
+    print("        OR run: predacore --provider openai-codex chat")
+    print()
+
+
+def _run_logout(*, provider: str = "openai-codex") -> None:
+    """Delete the stored OAuth grant for ``provider``."""
+    from .llm_providers.oauth import OAuthGrantStore
+
+    canonical = (
+        "openai_codex"
+        if provider in ("openai-codex", "openai_codex", "codex")
+        else provider
+    )
+    store = OAuthGrantStore()
+    if store.delete(canonical):
+        print(f"✓ Removed stored grant for {provider}.")
+    else:
+        print(f"  No stored grant for {provider}.")
+
+
+def _run_login_status() -> None:
+    """List all stored OAuth grants with their expiry status."""
+    from .llm_providers.oauth import OAuthGrantStore
+    import time as _time
+
+    store = OAuthGrantStore()
+    providers = store.list_providers()
+    if not providers:
+        print("No stored OAuth grants. Run `predacore login openai-codex` to authorize.")
+        return
+    print(f"Stored OAuth grants ({len(providers)}):")
+    for name in providers:
+        grant = store.load(name)
+        if grant is None:
+            print(f"  {name:20s}  (corrupt — re-run login)")
+            continue
+        if grant.expires_at <= 0:
+            ttl_str = "no expiry"
+        else:
+            secs = grant.expires_at - _time.time()
+            if secs <= 0:
+                ttl_str = "EXPIRED (refresh on next call)"
+            else:
+                mins, ss = divmod(int(secs), 60)
+                hrs, mins = divmod(mins, 60)
+                ttl_str = (
+                    f"{hrs}h {mins}m" if hrs else f"{mins}m {ss}s"
+                )
+        account = grant.account_id or "(account unknown)"
+        print(f"  {name:20s}  account={account}  expires_in={ttl_str}")
 
 
 def _run_upgrade(*, allow_pre: bool = False, dry_run: bool = False) -> None:

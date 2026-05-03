@@ -9,9 +9,11 @@ Handles:
   - Standard OpenAI Chat Completions
   - Azure OpenAI deployment routing
   - Groq, xAI/Grok, DeepSeek, Cerebras, Together, OpenRouter, SambaNova,
-    Mistral, Fireworks, NVIDIA NIM, Zhipu — all OpenAI-compatible
+    Mistral, Fireworks, NVIDIA NIM, Zhipu, Kimi K2, Qwen 3, Hyperbolic,
+    Perplexity Sonar — all OpenAI-compatible
   - Streaming (SSE via httpx.aiter_lines)
-  - Native tool use + text-based fallback for models that lack it
+  - Native tool use only (v1.5.0+: text fallback removed; pick a tool-tuned
+    model — modern OpenAI-compatible providers all support native tools)
   - ``<think>...</think>`` stripping for reasoning models (DeepSeek R1,
     Qwen3, etc.)
 """
@@ -24,9 +26,9 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from . import openai_validator
 from . import predacore_sdk as psdk
 from .base import LLMProvider
-from .text_tool_adapter import build_tool_prompt, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -35,71 +37,119 @@ logger = logging.getLogger(__name__)
 # and default model. All use the OpenAI chat/completions wire format.
 # ``env_key`` may be None for providers that don't require auth (e.g. local
 # Ollama); such providers skip the Authorization header and the no-key check.
+# Default model per provider is sourced from
+# :mod:`predacore.llm_providers.model_registry` so the latest-models catalog
+# stays in one place. This dict only owns base URL + env-key wiring.
+from .model_registry import default_model as _default_model_for
+
 PROVIDER_ENDPOINTS: dict[str, dict[str, Any]] = {
     "openai": {
         "base_url": "https://api.openai.com/v1",
         "env_key": "OPENAI_API_KEY",
-        "default_model": "gpt-4o",
+        "default_model": _default_model_for("openai") or "gpt-5",
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
         "env_key": None,  # Ollama is local, no auth required
-        "default_model": "llama3.2:3b",
+        "default_model": _default_model_for("ollama") or "qwen2.5:3b",
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "env_key": "GROQ_API_KEY",
-        "default_model": "llama-3.3-70b-versatile",
+        "default_model": _default_model_for("groq") or "llama-3.3-70b-versatile",
     },
     "xai": {
         "base_url": "https://api.x.ai/v1",
         "env_key": "XAI_API_KEY",
-        "default_model": "grok-3-mini",
+        "default_model": _default_model_for("xai") or "grok-4",
     },
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
         "env_key": "DEEPSEEK_API_KEY",
-        "default_model": "deepseek-chat",
+        "default_model": _default_model_for("deepseek") or "deepseek-v3.1",
     },
     "cerebras": {
         "base_url": "https://api.cerebras.ai/v1",
         "env_key": "CEREBRAS_API_KEY",
-        "default_model": "llama-3.3-70b",
+        "default_model": _default_model_for("cerebras") or "llama-3.3-70b",
     },
     "together": {
         "base_url": "https://api.together.xyz/v1",
         "env_key": "TOGETHER_API_KEY",
-        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "default_model": (
+            _default_model_for("together")
+            or "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        ),
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "env_key": "OPENROUTER_API_KEY",
-        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "default_model": (
+            _default_model_for("openrouter") or "anthropic/claude-sonnet-4-6"
+        ),
     },
     "sambanova": {
         "base_url": "https://api.sambanova.ai/v1",
         "env_key": "SAMBANOVA_API_KEY",
-        "default_model": "DeepSeek-V3.1",
+        "default_model": _default_model_for("sambanova") or "DeepSeek-V3.1",
     },
     "mistral": {
         "base_url": "https://api.mistral.ai/v1",
         "env_key": "MISTRAL_API_KEY",
-        "default_model": "mistral-large-latest",
+        "default_model": _default_model_for("mistral") or "mistral-large-latest",
     },
     "fireworks": {
         "base_url": "https://api.fireworks.ai/inference/v1",
         "env_key": "FIREWORKS_API_KEY",
-        "default_model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+        "default_model": (
+            _default_model_for("fireworks")
+            or "accounts/fireworks/models/llama-v3p3-70b-instruct"
+        ),
     },
     "nvidia": {
         "base_url": "https://integrate.api.nvidia.com/v1",
         "env_key": "NVIDIA_API_KEY",
-        "default_model": "meta/llama-3.3-70b-instruct",
+        "default_model": (
+            _default_model_for("nvidia") or "meta/llama-3.3-70b-instruct"
+        ),
     },
     "zhipu": {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "env_key": "ZHIPU_API_KEY",
-        "default_model": "glm-4-plus",
+        "default_model": _default_model_for("zhipu") or "glm-4-plus",
+    },
+    # ── New providers added in v1.5.0 (2026-05-02) ─────────────────────
+    "kimi": {
+        # Moonshot AI's Kimi K2 — strong open-weight reasoning + tool use.
+        # Free tier available at platform.moonshot.cn/console/api-keys.
+        "base_url": "https://api.moonshot.cn/v1",
+        "env_key": "MOONSHOT_API_KEY",
+        "default_model": _default_model_for("kimi") or "kimi-k2-0905-preview",
+    },
+    "qwen": {
+        # Alibaba DashScope (Qwen 3) — 235B MoE, top-tier multilingual.
+        # International endpoint; the China-only endpoint is at
+        # dashscope.aliyuncs.com (not used here).
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "env_key": "DASHSCOPE_API_KEY",
+        "default_model": (
+            _default_model_for("qwen") or "qwen3-235b-a22b-instruct-2507"
+        ),
+    },
+    "hyperbolic": {
+        # Hyperbolic — cheap hosting for Llama / DeepSeek / Qwen / Mistral.
+        "base_url": "https://api.hyperbolic.xyz/v1",
+        "env_key": "HYPERBOLIC_API_KEY",
+        "default_model": (
+            _default_model_for("hyperbolic")
+            or "meta-llama/Llama-3.3-70B-Instruct"
+        ),
+    },
+    "perplexity": {
+        # Perplexity Sonar — built-in web search via the Sonar models.
+        "base_url": "https://api.perplexity.ai",
+        "env_key": "PERPLEXITY_API_KEY",
+        "default_model": _default_model_for("perplexity") or "sonar-pro",
     },
 }
 
@@ -269,9 +319,12 @@ class OpenAIProvider(LLMProvider):
         headers = _build_headers(api_key)
         max_retries = int(os.getenv("PREDACORE_API_MAX_RETRIES", "3"))
 
+        wire_messages = self._serialize_messages_for_wire(list(messages))
+        wire_messages = self.repair_messages(wire_messages)
+
         body: dict[str, Any] = {
             "model": model,
-            "messages": self._serialize_messages_for_wire(list(messages)),
+            "messages": wire_messages,
             "temperature": (
                 temperature if temperature is not None else self.config.temperature
             ),
@@ -312,6 +365,9 @@ class OpenAIProvider(LLMProvider):
                 )
                 return _parse_response(resp.json())
             except psdk.BadRequestError as exc:
+                # v1.5.0: text-tool fallback removed. Surface a clear error
+                # naming the model so users pick a tool-tuned alternative
+                # instead of silently degrading to XML-in-prompt.
                 err_msg = str(exc).lower()
                 is_tool_unsupported = (
                     tools
@@ -322,14 +378,27 @@ class OpenAIProvider(LLMProvider):
                     )
                 )
                 if is_tool_unsupported:
-                    logger.warning(
-                        "Model '%s' doesn't support native tool use — text-tool fallback",
-                        model,
-                    )
-                    return await _fallback_text_tools(
-                        client, url, headers, body, tools, max_retries,
-                    )
+                    raise psdk.BadRequestError(
+                        f"openai-compatible: model '{model}' does not support "
+                        "native tool calling. Pick a tool-tuned model (e.g. "
+                        "gpt-4o, gpt-5, claude-opus-4-7, gemini-3-pro, "
+                        "kimi-k2, qwen3-235b).",
+                        status_code=exc.status_code,
+                        request_id=exc.request_id,
+                        response_body=exc.response_body,
+                    ) from exc
                 raise
+
+    # ------------------------------------------------------------------
+    # repair_messages — OpenAI's wire validator (v1.5.0).
+    #
+    # Runs ``openai_validator.repair_wire`` on the post-serialization
+    # message list. Strips empty tool_calls arrays, injects synthetic
+    # tool messages for orphan calls, drops orphan tool messages.
+    # ------------------------------------------------------------------
+
+    def repair_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return openai_validator.repair_wire(messages)
 
 
 # ---------------------------------------------------------------------------
@@ -430,42 +499,6 @@ async def _stream_chat(
     }
 
 
-async def _fallback_text_tools(
-    client: Any,
-    url: str,
-    headers: dict[str, str],
-    body: dict[str, Any],
-    tools: list[dict],
-    max_retries: int,
-) -> dict[str, Any]:
-    """Strip native tools, embed them as text in the system prompt, retry."""
-    body = dict(body)
-    body.pop("tools", None)
-    body.pop("tool_choice", None)
-
-    tool_prompt = build_tool_prompt(tools)
-    if tool_prompt:
-        msgs = list(body["messages"])
-        for i, m in enumerate(msgs):
-            if m.get("role") == "system":
-                msgs[i] = {**m, "content": (m.get("content") or "") + tool_prompt}
-                break
-        else:
-            msgs.insert(0, {"role": "system", "content": tool_prompt})
-        body["messages"] = msgs
-
-    resp = await psdk.request_with_retry(
-        client, "POST", url, headers=headers, json=body, max_retries=max_retries,
-    )
-    result = _parse_response(resp.json())
-    clean_text, text_tool_calls = parse_tool_calls(result["content"])
-    if text_tool_calls:
-        result["content"] = clean_text
-        result["tool_calls"] = text_tool_calls
-        result["finish_reason"] = "tool_calls"
-    return result
-
-
 def _parse_response(data: dict) -> dict[str, Any]:
     """Parse OpenAI /chat/completions response into the router's standard shape."""
     choices = data.get("choices") or [{}]
@@ -492,13 +525,6 @@ def _parse_response(data: dict) -> dict[str, Any]:
                 "arguments": args,
             }
         )
-
-    # If no native tool_calls but content has <tool_call> text, parse that
-    if not tool_calls:
-        clean_text, text_tool_calls = parse_tool_calls(content)
-        if text_tool_calls:
-            content = clean_text
-            tool_calls = text_tool_calls
 
     usage = data.get("usage") or {}
     return {
