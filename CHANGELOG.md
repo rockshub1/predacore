@@ -2,6 +2,109 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.0] - 2026-05-02
+
+**Unified native tool calling across every provider — fixes a confirmed
+HTTP-400 bug in Gemini-3 / 2.5-thinking, migrates Codex to the OpenAI
+Responses API, removes the silent text-tool fallback path, and adds 4
+new OpenAI-compatible providers (Kimi K2, Qwen 3, Hyperbolic,
+Perplexity Sonar).**
+
+### Fixed (the load-bearing bug)
+- **Gemini ``thoughtSignature`` loss** — ``gemini.py:append_assistant_turn``
+  used to rebuild ``functionCall`` parts from typed fields when
+  ``provider_extras["content_parts"]`` was missing, dropping the
+  ``thoughtSignature`` field. Gemini-3 and 2.5-thinking models then
+  returned HTTP 400 (*"Function call is missing a thought_signature"*)
+  on the next turn. The fix: refuse rather than reconstruct, and stash
+  ``parts[]`` from every parsed response (not just functionCall-bearing
+  ones) so the signature always survives.
+- **Gemini non-deterministic tool-call IDs** — was
+  ``f"gemini_{i}_{uuid.uuid4().hex[:8]}"`` (regenerated every call).
+  Now derived from a SHA-1 of ``(turn_idx, position, name, args)``,
+  so re-serialization is idempotent. Tool results synthesized later
+  by ``(name, position)`` reliably link back to their call.
+
+### Added
+- **Per-provider wire validators** (``openai_validator``,
+  ``gemini_validator``) mirror the existing
+  ``message_validator.repair_tool_flow`` pattern. Each ``LLMProvider``
+  now has a ``repair_messages(messages)`` hook that runs before
+  serialization. Auto-repairs orphan tool calls/results, drops
+  invalid links, strips empty ``tool_calls: []`` arrays.
+- **``PREDACORE_REPAIR_TOOL_FLOW`` env toggle** (LiteLLM-style):
+  ``repair`` (default) auto-fixes; ``strict`` raises
+  ``ToolFlowInvariantError``; ``off`` skips validation entirely.
+  Same env var controls all three validators uniformly.
+- **OpenAI Responses API adapter** (``openai_responses.py``) — POST
+  ``/v1/responses`` with typed ``input[]`` / ``output[]`` items
+  (``function_call`` + ``function_call_output``). Closer to Anthropic
+  content-blocks structurally; reasoning items are surfaced.
+- **4 new OpenAI-compatible providers**:
+  - **Kimi K2 (Moonshot)** — ``MOONSHOT_API_KEY``,
+    ``api.moonshot.cn/v1``. Strong open-weight reasoning + tool use.
+  - **Qwen 3 (Alibaba DashScope, international)** —
+    ``DASHSCOPE_API_KEY``, ``dashscope-intl.aliyuncs.com``. 235B MoE.
+  - **Hyperbolic** — ``HYPERBOLIC_API_KEY``,
+    ``api.hyperbolic.xyz/v1``. Cheap Llama / DeepSeek / Qwen hosting.
+  - **Perplexity Sonar** — ``PERPLEXITY_API_KEY``,
+    ``api.perplexity.ai``. Built-in web search.
+
+### Changed
+- **OpenAI Codex migrated to the Responses API.** The provider now
+  POSTs to ``/v1/responses`` instead of ``/v1/chat/completions``
+  (Chat Completions is being phased out for ChatGPT-OAuth tokens).
+  Inherits ``OpenAIResponsesProvider`` for the wire format; only
+  overrides ``chat()`` for OAuth bearer auth + 401 refresh-and-retry +
+  403 "subscription revoked" message.
+- **Anthropic ``repair_tool_flow`` call site** — moved into the new
+  ``repair_messages`` override on ``AnthropicProvider``. No behavior
+  change for users; uniform across providers now.
+
+### Removed
+- **Silent text-tool fallback path on every API provider.** When a
+  model rejected native tools, predacore used to embed tool definitions
+  as text in the system prompt and parse ``<tool_call>`` XML out of the
+  response. v1.5.0 surfaces a clear ``BadRequestError`` instead — naming
+  the model and pointing at tool-tuned alternatives. Modern provider
+  models all support native tools; the fallback was papering over
+  misconfigurations more often than it was useful. ``text_tool_adapter.py``
+  remains as a private helper for ``gemini_cli`` (which speaks plain
+  text only — text tool calling is its inherent mode, not a fallback).
+
+### OpenRouter fidelity caveat (newly documented)
+OpenRouter normalizes every underlying provider's response to OpenAI
+Chat Completions, which means picking ``anthropic/claude-opus-4-7`` via
+OpenRouter *loses* Anthropic's thinking signatures, and picking
+``google/gemini-3-pro`` *loses* ``thoughtSignature``. For maximum
+fidelity (thinking-block preservation, native tool-use validators per
+provider), use direct providers (``--model anthropic``,
+``--model gemini``). For breadth + one API key, OpenRouter is great —
+predacore can't recover signatures the aggregator strips.
+
+### Tests
+- 18 new ``test_gemini_validator.py`` tests
+- 16 new ``test_openai_validator.py`` tests
+- 13 new ``test_openai_responses.py`` tests
+- 8 new ``test_router_new_providers.py`` tests
+- 4 new tests in ``test_message_validator.py`` for the env toggle
+- 3 new tests in ``test_phase_a_tool_turns.py`` covering signature
+  preservation, ID stability, and the missing-signature refusal
+- ~62 new tests total. Full suite: 2080 passing (39 environment skips).
+
+### Migration impact
+- **No external API changes.** ``LLMProvider.repair_messages()`` is
+  additive with a no-op default; ``Message.provider_extras`` keys are
+  opaque and forward-compatible.
+- **If you depended on the silent text fallback** for an old model
+  without native tools: switch to a tool-tuned model. The 4 new
+  providers (Kimi, Qwen, Hyperbolic, Perplexity) all support native
+  tools; so do every current Anthropic / OpenAI / Gemini model.
+- **Codex tokens that predate Responses-API support**: the existing
+  refresh-and-retry path covers token-refresh edge cases. If a Codex
+  request returns persistent 4xx after refresh, run ``predacore login
+  openai-codex`` to re-authorize.
+
 ## [1.4.2] - 2026-05-02
 
 **Patch — adds the ``predacore upgrade`` CLI command + tightens the

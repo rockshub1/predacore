@@ -463,3 +463,65 @@ class TestRepairToolFlow:
         # repair injects a synthetic user turn with the correct tool_use_id.
         validation = mv.validate_tool_flow(repaired)
         assert validation == [], f"still invalid after repair: {validation}"
+
+
+# ---------------------------------------------------------------------------
+# PREDACORE_REPAIR_TOOL_FLOW env toggle (v1.5.0)
+# ---------------------------------------------------------------------------
+
+
+class TestRepairModeEnvToggle:
+    """Verify ``PREDACORE_REPAIR_TOOL_FLOW`` switches behavior between
+    ``repair`` (default), ``strict``, and ``off``."""
+
+    def _orphaned(self) -> list[dict]:
+        """A message list with an orphan tool_use that needs repair."""
+        return [
+            {"role": "user", "content": "do thing"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "x", "input": {}}
+                ],
+            },
+            # No following user turn — orphan
+        ]
+
+    def test_default_mode_is_repair(self, monkeypatch):
+        monkeypatch.delenv("PREDACORE_REPAIR_TOOL_FLOW", raising=False)
+        out = mv.repair_tool_flow(self._orphaned())
+        # Should have injected a synthetic user turn after the assistant
+        assert len(out) == 3
+        assert out[2]["role"] == "user"
+        assert any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in out[2]["content"]
+        )
+
+    def test_strict_mode_raises_on_violation(self, monkeypatch):
+        monkeypatch.setenv("PREDACORE_REPAIR_TOOL_FLOW", "strict")
+        try:
+            mv.repair_tool_flow(self._orphaned())
+        except mv.ToolFlowInvariantError as exc:
+            assert exc.issues  # at least one issue reported
+            return
+        raise AssertionError("expected ToolFlowInvariantError in strict mode")
+
+    def test_strict_mode_passes_clean_input(self, monkeypatch):
+        """Strict mode must NOT raise on already-valid input."""
+        monkeypatch.setenv("PREDACORE_REPAIR_TOOL_FLOW", "strict")
+        clean = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        # Should pass through unchanged
+        assert mv.repair_tool_flow(clean) == clean
+
+    def test_off_mode_skips_repair(self, monkeypatch):
+        """Off mode returns input unchanged even when broken."""
+        monkeypatch.setenv("PREDACORE_REPAIR_TOOL_FLOW", "off")
+        broken = self._orphaned()
+        out = mv.repair_tool_flow(broken)
+        # Same list reference, no synthetic injection
+        assert out is broken
+        assert len(out) == 2  # unchanged

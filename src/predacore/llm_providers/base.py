@@ -173,3 +173,28 @@ class LLMProvider(ABC):
         """
         del messages, tools  # default is no-op; silence "unused" linters
         return None
+
+    # ------------------------------------------------------------------
+    # Wire-format invariant repair (Phase 1.5 — 2026-05-02).
+    #
+    # Mirrors Anthropic's ``message_validator.repair_tool_flow``: each
+    # provider scans the message list before serialization and auto-fixes
+    # invariant violations (orphan tool_use → synthetic tool_result, etc.)
+    # so a malformed conversation never reaches the wire. The default is
+    # a no-op; Anthropic / OpenAI / Gemini override to call their
+    # respective validator.
+    #
+    # Env toggle ``PREDACORE_REPAIR_TOOL_FLOW``:
+    #   ``repair`` (default) — fix violations in-place, log a warning per fix
+    #   ``strict``           — raise on any violation (CI / debug)
+    #   ``off``              — skip validation entirely (legacy / debug)
+    # ------------------------------------------------------------------
+
+    def repair_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Validate and auto-repair tool-flow invariants. Default: pass-through.
+
+        Subclasses override to call their provider-specific validator. The
+        signature accepts dict-shaped messages (post-serialize) so each
+        provider can validate against its own wire format.
+        """
+        return messages

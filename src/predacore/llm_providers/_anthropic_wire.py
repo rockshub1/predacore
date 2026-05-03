@@ -158,8 +158,20 @@ def build_request_body(
     is_opus = "opus" in model_lower
     is_sonnet_46 = "sonnet" in model_lower and ("4-6" in model_lower or "4.6" in model_lower)
     is_sonnet_37 = "sonnet" in model_lower and "3-7" in model_lower
+    # Opus 4.7+ rejects non-default temperature / top_p / top_k with HTTP 400.
+    # Detect by version suffix; future opus-4-8 / opus-5-* will inherit the
+    # same restriction per Anthropic's migration guide.
+    is_opus_47_or_later = is_opus and (
+        "opus-4-7" in model_lower or "opus-4.7" in model_lower
+        or "opus-4-8" in model_lower or "opus-4.8" in model_lower
+        or "opus-5" in model_lower
+    )
 
-    if is_opus or (is_sonnet_46 and reasoning_effort in ("high", "medium", "max")):
+    if is_opus_47_or_later:
+        # Opus 4.7+: adaptive-only, no sampling params.
+        body["thinking"] = {"type": "adaptive"}
+        # Deliberately do NOT set temperature/top_p/top_k — those 400.
+    elif is_opus or (is_sonnet_46 and reasoning_effort in ("high", "medium", "max")):
         body["thinking"] = {"type": "adaptive"}
         body["temperature"] = 1.0  # adaptive thinking requires temp=1.0
     elif is_sonnet_37 and reasoning_effort in ("high", "medium"):

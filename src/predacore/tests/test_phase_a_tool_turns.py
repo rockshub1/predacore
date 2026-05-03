@@ -257,14 +257,42 @@ class TestGeminiToolTurn:
     def _provider(self) -> GeminiProvider:
         return GeminiProvider(config=ProviderConfig(model="gemini-3-pro-preview"))
 
+    @staticmethod
+    def _make_resp(
+        tool_calls: list[ToolCallRef],
+        content: str = "",
+        with_signature: bool = True,
+    ) -> AssistantResponse:
+        """Build an AssistantResponse mirroring what _parse_response would
+        produce — including content_parts so append_assistant_turn doesn't
+        raise on the missing-signature guard.
+        """
+        parts: list[dict] = []
+        if content:
+            parts.append({"text": content})
+        for i, tc in enumerate(tool_calls):
+            part: dict = {
+                "functionCall": {"name": tc.name, "args": tc.arguments}
+            }
+            # Per Google docs: signature on first functionCall part on parallel
+            # calls. Tests using this helper get realistic shape by default.
+            if with_signature and i == 0:
+                part["thoughtSignature"] = "sig_" + tc.name
+            parts.append(part)
+        return AssistantResponse(
+            content=content,
+            tool_calls=tool_calls,
+            provider_extras={"content_parts": parts},
+        )
+
     def test_tool_call_ids_synthesized(self):
         prov = self._provider()
-        resp = AssistantResponse(
-            content="searching",
-            tool_calls=[
+        resp = self._make_resp(
+            [
                 ToolCallRef(id="", name="grep", arguments={"p": "x"}),  # no id
                 ToolCallRef(id="", name="read", arguments={"f": "a"}),  # no id
             ],
+            content="searching",
         )
         msgs = _build_round_trip_messages(prov, resp, [])
         asst = msgs[0]
@@ -275,9 +303,9 @@ class TestGeminiToolTurn:
 
     def test_function_call_parts_built(self):
         prov = self._provider()
-        resp = AssistantResponse(
+        resp = self._make_resp(
+            [ToolCallRef(id="g_0", name="grep", arguments={"p": "x"})],
             content="searching",
-            tool_calls=[ToolCallRef(id="g_0", name="grep", arguments={"p": "x"})],
         )
         msgs = _build_round_trip_messages(prov, resp, [])
         parts = msgs[0].provider_extras.get("parts", [])
@@ -302,9 +330,9 @@ class TestGeminiToolTurn:
 
     def test_wire_payload_maps_roles_correctly(self):
         prov = self._provider()
-        resp = AssistantResponse(
+        resp = self._make_resp(
+            [ToolCallRef(id="g_0", name="grep", arguments={})],
             content="ok",
-            tool_calls=[ToolCallRef(id="g_0", name="grep", arguments={})],
         )
         msgs = _build_round_trip_messages(prov, resp, [
             ToolResultRef(call_id="g_0", name="grep", result="hit"),
@@ -329,14 +357,77 @@ class TestGeminiToolTurn:
 
     def test_no_poison_stubs(self):
         prov = self._provider()
-        resp = AssistantResponse(
+        resp = self._make_resp(
+            [ToolCallRef(id="g_0", name="grep", arguments={})],
             content="ok",
-            tool_calls=[ToolCallRef(id="g_0", name="grep", arguments={})],
         )
         msgs = _build_round_trip_messages(prov, resp, [
             ToolResultRef(call_id="g_0", name="grep", result="hit"),
         ])
         _assert_no_poison(msgs)
+
+    # ── v1.5.0 — new tests for the bug fixes ────────────────────────────
+
+    def test_thought_signature_preserved_through_round_trip(self):
+        """Critical: signature on functionCall must survive append_assistant_turn
+        and reappear in the wire payload. This is the core fix for the
+        'HTTP 400 missing thought_signature' bug."""
+        prov = self._provider()
+        resp = self._make_resp(
+            [ToolCallRef(id="g_0", name="grep", arguments={"p": "x"})],
+            content="searching",
+            with_signature=True,
+        )
+        msgs = _build_round_trip_messages(prov, resp, [
+            ToolResultRef(call_id="g_0", name="grep", result="hit"),
+        ])
+        dict_msgs = [message_to_dict(m) for m in msgs]
+        payload = _build_payload(
+            messages=[{"role": "user", "content": "q"}] + dict_msgs,
+            tools=None,
+            temperature=0.0,
+            max_tokens=100,
+        )
+        # Find the model turn and verify functionCall part has thoughtSignature
+        model_turn = next(c for c in payload["contents"] if c["role"] == "model")
+        fc_part = next(p for p in model_turn["parts"] if "functionCall" in p)
+        assert "thoughtSignature" in fc_part
+        assert fc_part["thoughtSignature"] == "sig_grep"
+
+    def test_id_stability_across_serializations(self):
+        """Same response should produce same id every time — IDs are derived
+        deterministically, not via uuid4."""
+        prov = self._provider()
+        resp1 = self._make_resp(
+            [ToolCallRef(id="", name="grep", arguments={"p": "x"})],
+        )
+        resp2 = self._make_resp(
+            [ToolCallRef(id="", name="grep", arguments={"p": "x"})],
+        )
+        msgs1: list[Message] = []
+        prov.append_assistant_turn(msgs1, resp1)
+        msgs2: list[Message] = []
+        prov.append_assistant_turn(msgs2, resp2)
+        # Same turn_idx (0), same name, same args → same id
+        assert msgs1[0].tool_calls[0].id == msgs2[0].tool_calls[0].id
+
+    def test_no_signature_raises_when_tool_calls_present(self):
+        """If a caller constructs AssistantResponse with tool_calls but no
+        content_parts, append_assistant_turn must REFUSE rather than emit
+        a bare functionCall (which would cause HTTP 400 on the next turn)."""
+        from predacore.llm_providers import predacore_sdk as psdk
+        prov = self._provider()
+        bad_resp = AssistantResponse(
+            content="searching",
+            tool_calls=[ToolCallRef(id="x", name="grep", arguments={})],
+            # Deliberately NO provider_extras / content_parts
+        )
+        try:
+            prov.append_assistant_turn([], bad_resp)
+        except psdk.BadRequestError as exc:
+            assert "thoughtSignature" in str(exc) or "content_parts" in str(exc)
+            return
+        raise AssertionError("expected BadRequestError on missing content_parts")
 
 
 # ---------------------------------------------------------------------------
@@ -425,12 +516,28 @@ def test_no_legacy_stubs_any_provider(provider_factory):
     zero '[Calling tool: X]' or '[Tool Result: X]' stubs. If this fails,
     context poisoning regressed."""
     prov = provider_factory()
+    tool_calls = [
+        ToolCallRef(id="id_1", name="grep", arguments={"pattern": "foo"}),
+        ToolCallRef(id="id_2", name="read_file", arguments={"path": "/tmp"}),
+    ]
+    extras: dict[str, object] = {}
+    # Gemini's append_assistant_turn (v1.5.0+) refuses to emit functionCall
+    # parts without thoughtSignature — supply a realistic content_parts to
+    # mirror what _parse_response would produce.
+    if isinstance(prov, GeminiProvider):
+        extras["content_parts"] = [
+            {"text": "Let me help."},
+            # Per Google docs: signature on first functionCall part on parallel
+            {
+                "functionCall": {"name": "grep", "args": {"pattern": "foo"}},
+                "thoughtSignature": "sig_grep",
+            },
+            {"functionCall": {"name": "read_file", "args": {"path": "/tmp"}}},
+        ]
     resp = AssistantResponse(
         content="Let me help.",
-        tool_calls=[
-            ToolCallRef(id="id_1", name="grep", arguments={"pattern": "foo"}),
-            ToolCallRef(id="id_2", name="read_file", arguments={"path": "/tmp"}),
-        ],
+        tool_calls=tool_calls,
+        provider_extras=extras,
     )
     msgs = _build_round_trip_messages(prov, resp, [
         ToolResultRef(call_id="id_1", name="grep", result="match"),
