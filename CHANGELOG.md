@@ -2,6 +2,26 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.3] - 2026-05-03
+
+**Patch — Codex finally routes to the right host. ChatGPT-OAuth chats
+now actually work end-to-end.**
+
+### Fixed
+- **Codex endpoint** — v1.5.0/1/2 sent Codex requests to
+  `https://api.openai.com/v1/responses`. That endpoint expects API-tier
+  billing keys and 401s ChatGPT-OAuth subscription tokens regardless of
+  headers. The official Codex CLI hits a different host:
+    `https://chatgpt.com/backend-api/codex/responses`
+  which is the only endpoint that accepts subscription OAuth tokens.
+  v1.5.3 switches Codex to that URL.
+  (The token's JWT `aud` claim says `api.openai.com/v1` — that's
+  misleading; the actual server-side acceptance is at chatgpt.com.)
+
+This release bundles the v1.5.1 (OAuth redirect_uri) and v1.5.2
+(JWT account_id + headers) fixes — none of those landed on PyPI.
+v1.5.0 → v1.5.3 is the minimum upgrade users need to actually use Codex.
+
 ## [1.5.2] - 2026-05-03
 
 **Patch — Codex requests now actually return 200, not 401.**

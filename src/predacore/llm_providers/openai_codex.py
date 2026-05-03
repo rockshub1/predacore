@@ -32,6 +32,8 @@ overrides auth (OAuth bearer + refresh-once-and-retry on 401).
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -41,12 +43,44 @@ from . import predacore_sdk as psdk
 from .oauth import OAuthFlowConfig, with_auto_refresh
 from .oauth.flow import _extract_chatgpt_account_id
 from .openai_responses import (
-    RESPONSES_API_BASE_URL,
-    RESPONSES_API_PATH,
     OpenAIResponsesProvider,
     _parse_responses,
-    _stream_responses,
 )
+
+
+# Codex OAuth tokens route through chatgpt.com's backend, NOT through
+# api.openai.com. The official Codex CLI hits this exact path; the JWT
+# we get from auth.openai.com/oauth/token has audience
+# `api.openai.com/v1` but only the chatgpt.com codex endpoint actually
+# accepts subscription-OAuth tokens. api.openai.com endpoints expect
+# API-tier billing keys, not OAuth.
+CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+
+
+def _split_system_instructions(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Pull system messages out into a single ``instructions`` string.
+
+    chatgpt.com's codex backend wants the system prompt at the top level
+    of the request body (as ``instructions``), not as a ``role:"system"``
+    item inside ``input[]``. Sending a system-role item returns
+    HTTP 400 ``"Instructions are required"``.
+
+    Concatenates every system message in order (rare to have more than
+    one, but supported) and returns the conversation messages without
+    them.
+    """
+    sys_parts: list[str] = []
+    rest: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "system":
+            content = m.get("content", "")
+            if isinstance(content, str) and content.strip():
+                sys_parts.append(content)
+            continue
+        rest.append(m)
+    return "\n\n".join(sys_parts), rest
 
 logger = logging.getLogger(__name__)
 
@@ -176,55 +210,66 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
         if not account_id:
             account_id = _extract_chatgpt_account_id(access_token)
 
-        # Codex routes through the Responses API. The model id must be one
-        # the user's subscription has access to — Codex CLI uses GPT-5-Codex
-        # by default; older subscriptions may not have that. Fall back to
-        # gpt-5 so first-time users get something working out of the box.
+        # Codex routes through chatgpt.com's backend. The model id must be
+        # one the user's subscription has access to — Codex CLI uses
+        # GPT-5-Codex by default; older subscriptions may not have that.
+        # Fall back to gpt-5 so first-time users get something working
+        # out of the box.
         model = self.config.model or "gpt-5-codex"
-        base_url = (self.config.api_base or RESPONSES_API_BASE_URL).rstrip("/")
-        url = f"{base_url}{RESPONSES_API_PATH}"
+        url = self.config.api_base.rstrip("/") if self.config.api_base else CODEX_RESPONSES_URL
         headers = self._build_codex_headers(access_token, account_id)
         max_retries = int(os.getenv("PREDACORE_API_MAX_RETRIES", "3"))
 
-        wire_input = self._serialize_messages_for_responses(list(messages))
+        # chatgpt.com/backend-api/codex/responses diverges from
+        # api.openai.com/v1/responses: system prompts go in a top-level
+        # `instructions` string, NOT as role:"system" items in input[].
+        # Sending a system-typed message item returns:
+        #   400 {"detail":"Instructions are required"}
+        # So we split here.
+        instructions, conv_messages = _split_system_instructions(list(messages))
+        wire_input = self._serialize_messages_for_responses(conv_messages)
         wire_input = self.repair_messages(wire_input)
 
+        # chatgpt.com Codex backend is opinionated about which knobs callers
+        # are allowed to set — it 400s on `temperature`, `top_p`, and
+        # similar sampling params (the model picks its own). API-tier
+        # OpenAI Responses accepts them; Codex doesn't. We deliberately
+        # omit them here rather than attempt to pass through.
         body: dict[str, Any] = {
             "model": model,
+            "instructions": instructions or "You are a helpful coding assistant.",
             "input": wire_input,
-            "temperature": (
-                temperature if temperature is not None else self.config.temperature
-            ),
-            "max_output_tokens": (
-                max_tokens if max_tokens is not None else self.config.max_tokens
-            ),
+            # Codex/ChatGPT-OAuth tier doesn't permit server-side response
+            # storage. Backend returns 400 ``"Store must be set to false"``
+            # if this is omitted (default true on api.openai.com) or set
+            # to true. API-tier callers via OpenAIResponsesProvider can
+            # still set store=true themselves.
+            "store": False,
+            # Without truncation:"auto" the backend 400s on contexts that
+            # exceed the model's window instead of silently dropping
+            # middle items. Codex CLI always sends this. No downside.
+            "truncation": "auto",
         }
+        # max_output_tokens is accepted only on some Codex models; passing
+        # it on others 400s. Send only when the caller explicitly asked.
+        if max_tokens is not None:
+            body["max_output_tokens"] = max_tokens
         wire_tools = self._serialize_tools_for_responses(tools)
         if wire_tools:
             body["tools"] = wire_tools
             body["tool_choice"] = "auto"
 
-        async with psdk.make_client() as client:
-            # ── Streaming path (text-only, no tools) ──
-            if stream_fn and not tools:
-                try:
-                    return await _stream_responses(client, url, headers, body, stream_fn)
-                except psdk.BadRequestError as stream_err:
-                    if stream_err.status_code not in (400, 422):
-                        raise
-                    logger.info(
-                        "openai_codex: stream rejected (%d) — non-streaming retry",
-                        stream_err.status_code,
-                    )
-                    body.pop("stream", None)
+        # chatgpt.com/backend-api/codex/responses requires `stream: true`
+        # ALWAYS — even when the caller didn't ask for streaming. Backend
+        # returns 400 ``"Stream must be set to true"`` otherwise. We
+        # stream regardless and aggregate the SSE events into the same
+        # dict shape ``_parse_responses`` would have returned for the
+        # non-streamed case.
+        body["stream"] = True
 
-            # ── Non-streaming path ──
+        async with psdk.make_client() as client:
             try:
-                resp = await psdk.request_with_retry(
-                    client, "POST", url,
-                    headers=headers, json=body, max_retries=max_retries,
-                )
-                return _parse_responses(resp.json())
+                return await _codex_stream_chat(client, url, headers, body, stream_fn)
             except psdk.AuthenticationError as exc:
                 # 401 typically means the access_token expired BETWEEN
                 # ``with_auto_refresh`` checking and this request landing
@@ -254,11 +299,9 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
                 headers = self._build_codex_headers(
                     grant.access_token, refreshed_account_id
                 )
-                resp = await psdk.request_with_retry(
-                    client, "POST", url,
-                    headers=headers, json=body, max_retries=max_retries,
+                return await _codex_stream_chat(
+                    client, url, headers, body, stream_fn,
                 )
-                return _parse_responses(resp.json())
             except psdk.PermissionDeniedError as exc:
                 # 403 from /responses on a Codex token usually means OpenAI
                 # has revoked subscription-OAuth use for our client_id
@@ -287,3 +330,144 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
                         response_body=exc.response_body,
                     ) from exc
                 raise
+
+
+# ---------------------------------------------------------------------------
+# Codex SSE stream consumer
+# ---------------------------------------------------------------------------
+
+
+async def _codex_stream_chat(
+    client: Any,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    stream_fn: Callable | None,
+) -> dict[str, Any]:
+    """Stream Codex's /responses endpoint and aggregate the result.
+
+    Codex's chatgpt.com backend mandates ``stream: true`` on every
+    request, so we always stream regardless of whether the caller
+    provided a ``stream_fn`` callback. We listen for these SSE events:
+
+      response.created             — initial response object
+      response.output_item.added   — new output item (message / function_call / reasoning)
+      response.output_text.delta   — text delta inside a message item
+      response.function_call_arguments.delta — partial JSON args for a function_call
+      response.completed           — final response with full output[]
+      response.failed / .incomplete — terminal error states
+
+    On ``response.completed`` we hand the final output[] off to the
+    same ``_parse_responses`` that the non-streaming path uses, so the
+    return shape (content / tool_calls / usage / finish_reason) is
+    identical to every other provider. If ``stream_fn`` is given, we
+    invoke it on each text delta as it arrives.
+    """
+    final_response: dict[str, Any] | None = None
+    error_detail: dict[str, Any] | None = None
+    full_text = ""
+    # Accumulate function-call args by output index — Codex streams
+    # function_call_arguments as small deltas before emitting the full
+    # call. We collect here so the final aggregation has them even if
+    # final_response.output[] is sparse.
+    fn_args_accum: dict[int, dict[str, str]] = {}
+
+    async with client.stream("POST", url, json=body, headers=headers) as resp:
+        if resp.status_code >= 400:
+            await resp.aread()
+            psdk.raise_for_status(resp)
+
+        async for line in resp.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                if data_str == "[DONE]":
+                    break
+                continue
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type") or ""
+
+            if etype == "response.output_text.delta":
+                delta = event.get("delta") or ""
+                if delta:
+                    full_text += delta
+                    if stream_fn:
+                        try:
+                            r = stream_fn(delta)
+                            if asyncio.iscoroutine(r):
+                                await r
+                        except (TypeError, ValueError, OSError):
+                            pass  # callback errors don't kill the stream
+
+            elif etype == "response.output_item.added":
+                # New output item — capture function_call name + call_id
+                # so the aggregator below has them even if the final
+                # response.output[] doesn't.
+                item = event.get("item") or {}
+                idx = event.get("output_index", 0)
+                if item.get("type") == "function_call":
+                    fn_args_accum[idx] = {
+                        "name": str(item.get("name", "")),
+                        "call_id": str(item.get("call_id", "")),
+                        "arguments": str(item.get("arguments", "") or ""),
+                    }
+
+            elif etype == "response.function_call_arguments.delta":
+                idx = event.get("output_index", 0)
+                slot = fn_args_accum.setdefault(idx, {"name": "", "call_id": "", "arguments": ""})
+                slot["arguments"] += str(event.get("delta") or "")
+
+            elif etype == "response.completed":
+                final_response = event.get("response") or {}
+
+            elif etype in ("response.failed", "response.incomplete"):
+                resp_obj = event.get("response") or {}
+                err = resp_obj.get("error") or {}
+                error_detail = {
+                    "type": etype,
+                    "message": err.get("message")
+                              or resp_obj.get("incomplete_details", {}).get("reason")
+                              or "unknown",
+                    "code": err.get("code"),
+                }
+
+    if error_detail is not None:
+        raise psdk.APIStatusError(
+            f"openai_codex: {error_detail['type']} — {error_detail['message']}",
+            status_code=500,
+            response_body=json.dumps(error_detail),
+        )
+
+    if final_response is None:
+        # No completion event arrived. Treat as a connection-level failure
+        # so the upstream retry logic kicks in.
+        raise psdk.APIConnectionError(
+            "openai_codex: stream ended without response.completed event"
+        )
+
+    # Aggregate. Prefer the final response's output[] when populated; fall
+    # back to deltas accumulated mid-stream for content + function calls
+    # (Codex sometimes ships the final response with output:[] because all
+    # the substance was already streamed via delta events).
+    parsed = _parse_responses(final_response)
+    if not parsed.get("content") and full_text:
+        parsed["content"] = full_text
+    if not parsed.get("tool_calls") and fn_args_accum:
+        tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(fn_args_accum.keys()):
+            slot = fn_args_accum[idx]
+            try:
+                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(
+                {"id": slot["call_id"], "name": slot["name"], "arguments": args}
+            )
+        parsed["tool_calls"] = tool_calls
+        parsed["finish_reason"] = "tool_calls"
+    return parsed
