@@ -47,6 +47,16 @@ class OAuthFlowConfig:
     scopes: tuple[str, ...] = ()            # requested permissions; "" if N/A
     extra_auth_params: dict[str, str] = None  # type: ignore[assignment]
 
+    # Redirect URI controls — most public PKCE clients allow any localhost
+    # port, but some (Codex's app_EMoamEEZ73f0CkXaXp7hrann included)
+    # registered fixed values that the strict OAuth matcher requires.
+    # Defaults below pick a free ephemeral port at /callback. Override
+    # per-provider when the client_id requires it.
+    redirect_host: str = "127.0.0.1"        # what we ADVERTISE in the redirect_uri
+    redirect_bind_host: str = "127.0.0.1"   # what we actually bind the listener to
+    redirect_port: int = 0                  # 0 = pick free; non-zero = pinned
+    redirect_path: str = "/callback"        # path the provider redirects to
+
 
 class OAuthFlow:
     """One-shot orchestrator for a provider's PKCE-based login flow."""
@@ -74,13 +84,13 @@ class OAuthFlow:
         pkce = generate_pkce_pair()
         state = secrets.token_urlsafe(24)
 
-        # We let the callback module pick an ephemeral free port unless
-        # the caller pinned one. Codex's PKCE-public client accepts any
-        # localhost port so we don't need a registered redirect_uri.
-        # Build the URL after we know the port.
+        # Resolve the redirect URI. If config pins a port (Codex needs
+        # 1455 for the OpenCode public client), use that; else pick free.
         from .callback import _pick_free_port  # local import — not exported
-        port = _pick_free_port()
-        redirect_uri = build_redirect_uri(port)
+        port = self.config.redirect_port or _pick_free_port()
+        redirect_uri = (
+            f"http://{self.config.redirect_host}:{port}{self.config.redirect_path}"
+        )
 
         auth_url = self._build_authorization_url(
             pkce_challenge=pkce.challenge,
@@ -102,6 +112,8 @@ class OAuthFlow:
         result = await wait_for_authorization_code(
             expected_state=state,
             port=port,
+            path=self.config.redirect_path,
+            bind_host=self.config.redirect_bind_host,
             timeout_seconds=callback_timeout_seconds,
         )
         if not result.ok:

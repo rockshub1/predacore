@@ -82,6 +82,19 @@ def codex_oauth_config() -> OAuthFlowConfig:
         # subscription's natural permissions apply. Leaving this empty
         # mirrors what OpenCode and OpenClaw send.
         scopes=(),
+        # OpenAI's strict OAuth matcher requires the EXACT redirect_uri
+        # registered for this client_id. OpenCode's public PKCE client
+        # `app_EMoamEEZ73f0CkXaXp7hrann` registered:
+        #   http://localhost:1455/auth/callback
+        # We bind on 127.0.0.1 (loopback equivalent) but advertise
+        # `localhost` in the redirect_uri to match registration exactly.
+        # If port 1455 is busy on the user's box (e.g. an existing
+        # OpenCode/Codex CLI listener), the login will fail loudly with
+        # an OSError — they need to free the port and retry.
+        redirect_host="localhost",
+        redirect_bind_host="127.0.0.1",
+        redirect_port=1455,
+        redirect_path="/auth/callback",
     )
 
 
