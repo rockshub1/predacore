@@ -291,7 +291,25 @@ async def handle_browser_control(args: dict[str, Any], ctx: ToolContext) -> str:
         _browser_bridge = BrowserBridge()
         connected = await _browser_bridge.connect("chrome")
         if not connected:
-            return json.dumps({"error": "Could not connect to Chrome. Is it running with remote debugging enabled?"})
+            # ``BrowserBridge.connect`` already tries to auto-launch Chrome
+            # with the debug port. If it's still False here, every path
+            # failed: Chrome isn't installed, the auto-launch couldn't
+            # bind 9222 (port in use by something else), or the user has
+            # Chrome running WITHOUT --remote-debugging-port and macOS
+            # refused the post-launch arg injection.
+            return json.dumps({
+                "error": (
+                    "Could not connect to Chrome on port 9222. "
+                    "Predacore tried to auto-launch it but the bridge "
+                    "still couldn't establish a CDP connection. "
+                    "Manual fix: quit Chrome completely, then run: "
+                    "open -a 'Google Chrome' --args --remote-debugging-port=9222"
+                ),
+                "code": "chrome_not_reachable",
+                "suggested_command": (
+                    "open -a 'Google Chrome' --args --remote-debugging-port=9222"
+                ),
+            })
 
     bridge = _browser_bridge
 
