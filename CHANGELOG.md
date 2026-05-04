@@ -2,6 +2,35 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.5] - 2026-05-04
+
+**Patch — generic local-provider plugin hook in the router.**
+
+### Added
+- **`_try_load_local_provider(name, p_config)`** in
+  ``llm_providers/router.py`` — a small extensibility hook that lets
+  users drop a custom provider module at
+  ``src/predacore/llm_providers/<name>.py`` (in a source checkout) and
+  have it picked up at dispatch time. The module must define a class
+  whose ``.name`` class attribute matches the provider name passed to
+  ``--provider``. Returns ``None`` and falls through to the existing
+  OpenAI-compatible catch-all if no such module is installed.
+
+  Useful for:
+    * private workflows / personal-quota integrations that shouldn't
+      ship in the public wheel
+    * experiments that need a real provider class but aren't ready for
+      review
+    * custom in-house deployments
+
+  Public release of the wheel ships exactly the providers it always
+  has — the loader simply offers a clean extensibility seam without
+  forcing users to fork.
+
+### No other changes
+Single-file release. ~25 LOC. No tests change, no behavior change for
+existing providers.
+
 ## [1.5.4] - 2026-05-04
 
 **Patch — fix browser bridge resource leak + actionable error when
