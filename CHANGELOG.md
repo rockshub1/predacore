@@ -2,6 +2,35 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.4] - 2026-05-04
+
+**Patch — fix browser bridge resource leak + actionable error when
+Chrome isn't running.**
+
+### Fixed
+- **aiohttp ClientSession leak in `_ChromeCDP.connect()`** — when the
+  tool dispatcher's outer 5s adaptive timeout cancelled an in-flight
+  CDP connect attempt, `aiohttp`'s connection pool was leaking sockets
+  to localhost:9222. Symptom on shutdown:
+    `Unclosed client session ... ConnectionKey(host='localhost', port=9222 ...)`
+  Fix: wrap the entire connect flow in a `try/finally` that calls
+  `_cleanup()` on any abnormal exit including `asyncio.CancelledError`.
+  The session is only kept alive on the success path (where the
+  websocket needs it).
+- **Cryptic "browser_control timed out after 5.0s" message** — when
+  Chrome wasn't running with the debug port, the actual cause
+  ("CDP not available on :9222") was logged at INFO level (invisible
+  to users) while the dispatcher's WARNING-level timeout took the spotlight.
+  Fix: `handle_browser_control` now returns a structured error with
+  `code: "chrome_not_reachable"` and a literal `suggested_command:`
+  field showing exactly what to type:
+    `open -a 'Google Chrome' --args --remote-debugging-port=9222`
+
+### Added
+- **`ChromeNotRunningError`** — public typed exception in
+  `operators.browser_bridge` for callers that want to short-circuit
+  the auto-launch flow with a clear error.
+
 ## [1.5.3] - 2026-05-03
 
 **Patch — Codex finally routes to the right host. ChatGPT-OAuth chats

@@ -115,6 +115,27 @@ _CDP_PORT = 9222
 _NAVIGATE_TIMEOUT = 120.0         # raised from 15.0 per "remove all limits"
 _NAVIGATE_SETTLE_MS = 800
 
+# ECONNREFUSED is errno 61 on macOS, errno 111 on Linux. We catch both
+# explicitly so we can surface a clear "Chrome isn't running" message
+# rather than the generic "tool timed out" the dispatcher would log.
+_ECONNREFUSED_ERRNOS = (61, 111)
+
+
+class ChromeNotRunningError(ConnectionError):
+    """Raised when Chrome isn't listening on the CDP port.
+
+    Carries an actionable message so the tool dispatcher can surface
+    something useful instead of a vague timeout.
+    """
+
+    def __init__(self, port: int = _CDP_PORT) -> None:
+        super().__init__(
+            f"Chrome not running with CDP enabled on :{port}. "
+            f"Start it with: "
+            f"open -a 'Google Chrome' --args --remote-debugging-port={port}"
+        )
+        self.port = port
+
 # ── ChromeCDP Backend ───────────────────────────────────────────────
 
 class _ChromeCDP:
@@ -134,29 +155,51 @@ class _ChromeCDP:
         return self._ws is not None and not self._ws.closed
 
     async def connect(self, port: int = _CDP_PORT) -> bool:
+        # The whole flow is wrapped in try/finally that calls _cleanup on
+        # ANY abnormal exit — including asyncio.CancelledError raised by
+        # the tool dispatcher's outer timeout. Without this, aiohttp's
+        # connection pool leaks sockets to localhost:port whenever a
+        # connect attempt is cancelled mid-flight, producing the
+        # "Unclosed client session" warnings on shutdown.
+        #
+        # Note: we deliberately do NOT raise ChromeNotRunningError from
+        # this method. ``BrowserBridge._auto_connect`` calls us first and
+        # then attempts to launch Chrome on its own when we return False,
+        # so connection-refused needs to flow through as a soft failure.
+        # Public ``ChromeNotRunningError`` is reserved for callers that
+        # want to short-circuit the auto-launch flow.
+        ok = False
+        self._session = aiohttp.ClientSession()
         try:
-            self._session = aiohttp.ClientSession()
-            url = f"http://localhost:{port}/json"
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                targets = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, OSError) as exc:
-            await self._cleanup()
-            logger.info("CDP not available on :%d (%s)", port, exc)
-            return False
-        page = next((t for t in targets if t.get("type") == "page"), None)
-        if not page:
-            await self._cleanup()
-            return False
-        self._ws_url = page.get("webSocketDebuggerUrl", "")
-        self.browser_label = page.get("browser", "Chrome")
-        if not self._ws_url:
-            await self._cleanup()
-            return False
-        try:
-            self._ws = await self._session.ws_connect(self._ws_url)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-            await self._cleanup()
-            return False
+            try:
+                url = f"http://localhost:{port}/json"
+                async with self._session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=2)
+                ) as resp:
+                    targets = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, OSError) as exc:
+                logger.info("CDP not available on :%d (%s)", port, exc)
+                return False
+
+            page = next((t for t in targets if t.get("type") == "page"), None)
+            if not page:
+                return False
+            self._ws_url = page.get("webSocketDebuggerUrl", "")
+            self.browser_label = page.get("browser", "Chrome")
+            if not self._ws_url:
+                return False
+            try:
+                self._ws = await self._session.ws_connect(self._ws_url)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                return False
+            ok = True
+        finally:
+            # Tear down only on the unhappy paths. ws_connect success
+            # leaves the session alive (the websocket needs it); any
+            # failure or cancellation (CancelledError) hits this branch
+            # and closes the session before we propagate the exception.
+            if not ok:
+                await self._cleanup()
         # Enable CDP domains we need
         await self.send("Page.enable", timeout=2)
         await self.send("Runtime.enable", timeout=2)
