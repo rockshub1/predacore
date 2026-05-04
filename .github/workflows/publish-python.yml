@@ -1,0 +1,73 @@
+name: Publish predacore (Python pkg)
+
+# Build + publish the predacore Python package (pure Python, pulls
+# predacore_core wheels from PyPI as a dep) on a version tag. Runs
+# independently of the Rust wheel pipeline in build-wheels.yml — that
+# one is for predacore_core; this one is for predacore. Both fire on
+# the same tag push but don't block each other, so the Python package
+# lands on PyPI in ~1-2 min while the Rust wheels chug along in their
+# own ~10-15 min lane.
+#
+# Auth: PyPI Trusted Publishing via OIDC. NO API token needed once the
+# project's "pending publisher" is registered at
+#   https://pypi.org/manage/project/predacore/settings/publishing/
+# with:
+#   Owner:           rockshub1
+#   Repository:      predacore
+#   Workflow:        publish-python.yml
+#   Environment:     pypi-predacore
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to PyPI after build"
+        required: false
+        default: "false"
+
+jobs:
+  build-and-publish:
+    name: Build + publish predacore to PyPI
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload == 'true')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-predacore
+      url: https://pypi.org/p/predacore
+    permissions:
+      id-token: write   # Trusted Publishing via PyPI OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -la dist/
+
+      - name: Verify built version matches tag
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          built=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$tag" != "$built" ]; then
+            echo "Tag ($tag) doesn't match pyproject.toml version ($built) — refusing to publish"
+            exit 1
+          fi
+          echo "Version match: $tag ✓"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
