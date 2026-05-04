@@ -2,6 +2,28 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.6] - 2026-05-04
+
+**Release-mechanics: PyPI Trusted Publishing (OIDC) is live for the
+predacore Python package.**
+
+### Changed
+- **First release published via OIDC.** Previous Python releases
+  (v1.5.0–v1.5.5) used manual `twine upload` with rotating tokens.
+  v1.5.6+ publishes automatically when a `v*` tag is pushed to GitHub:
+  the new ``.github/workflows/publish-python.yml`` workflow builds
+  sdist + wheel from repo root and authenticates to PyPI via
+  GitHub's OIDC token, no API key required.
+
+  Net effect for users: identical wheel + sdist content. For
+  maintainers: `git push origin v<x.y.z>` is now the entire release
+  ritual.
+
+### No code changes
+This release is intentionally minimal — it exists to prove the OIDC
+pipeline end-to-end. The wheel/sdist content is bit-identical to v1.5.5
+modulo the version string. Upgrading from v1.5.5 → v1.5.6 is a no-op.
+
 ## [1.5.5] - 2026-05-04
 
 **Patch — generic local-provider plugin hook in the router.**
