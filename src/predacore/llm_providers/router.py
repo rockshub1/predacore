@@ -25,6 +25,37 @@ from .openai import OpenAIProvider
 logger = logging.getLogger(__name__)
 
 
+def _try_load_local_provider(
+    name: str, p_config: "ProviderConfig"
+) -> "LLMProvider | None":
+    """Load a custom provider from ``llm_providers/<name>.py`` if present.
+
+    A small extensibility hook: drop a Python module named ``<provider>.py``
+    into ``predacore/llm_providers/`` (in a source checkout — these are not
+    shipped with the public wheel) and the file will be picked up at
+    dispatch time. The module must define a class whose ``.name`` class
+    attribute matches the provider name passed to ``--provider``.
+
+    Returns the instantiated provider on success, ``None`` if the module
+    can't be imported or doesn't expose a matching class.
+    """
+    try:
+        import importlib
+        mod = importlib.import_module(
+            f".{name.replace('-', '_')}", package=__package__
+        )
+    except ImportError:
+        return None
+    for attr in vars(mod).values():
+        if (
+            isinstance(attr, type)
+            and issubclass(attr, LLMProvider)
+            and getattr(attr, "name", "") == name
+        ):
+            return attr(p_config)
+    return None
+
+
 def _normalize_provider_name(name: str | None) -> str:
     """Lowercase + strip a provider name."""
     return (name or "").strip().lower()
@@ -156,8 +187,16 @@ class LLMInterface:
         elif name in PROVIDER_ENDPOINTS or name in ("azure",):
             instance = OpenAIProvider(p_config)
         else:
-            logger.warning("Unknown provider %r, falling back to OpenAI-compatible", name)
-            instance = OpenAIProvider(p_config)
+            # Try optional local-only provider modules before the
+            # OpenAI-compatible catch-all. Lets users drop a custom
+            # ``llm_providers/<name>.py`` into a source checkout for
+            # private workflows without forking the package.
+            local = _try_load_local_provider(name, p_config)
+            if local is not None:
+                instance = local
+            else:
+                logger.warning("Unknown provider %r, falling back to OpenAI-compatible", name)
+                instance = OpenAIProvider(p_config)
 
         self._providers[name] = instance
         return instance
