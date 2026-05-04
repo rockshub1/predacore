@@ -2,6 +2,30 @@
 
 All notable changes to PredaCore will be documented in this file.
 
+## [1.5.7] - 2026-05-04
+
+**Patch — drop the ``truncation: "auto"`` body field that Codex 400'd on.**
+
+### Fixed
+- **Codex 400 ``"Unsupported parameter: truncation"``** — v1.5.3 added
+  ``truncation: "auto"`` to the Codex request body on the assumption
+  that the chatgpt.com codex endpoint mirrors the regular Responses
+  API. It doesn't: the field is rejected outright. Long-context
+  overflow on the Codex endpoint is server-side implicit — there's no
+  client-side knob to set. v1.5.7 removes the field.
+
+  Tenth quirk of chatgpt.com/backend-api/codex/responses (after the
+  nine catalogued in v1.5.3): not only does it reject knobs the
+  regular Responses API accepts, it also rejects the field that
+  *fixes* analogous overflow problems on api.openai.com.
+
+### v1.5.6 — meta release
+v1.5.6 was a no-op release-pipeline test that proved OIDC trusted
+publishing works end-to-end. Wheel/sdist content was bit-identical
+to v1.5.5. v1.5.7 is the first release that makes a real code change
+under the new pipeline — `git push origin v1.5.7` should trigger CI
+and land on PyPI in ~1-2 min, no token used.
+
 ## [1.5.6] - 2026-05-04
 
 **Release-mechanics: PyPI Trusted Publishing (OIDC) is live for the
