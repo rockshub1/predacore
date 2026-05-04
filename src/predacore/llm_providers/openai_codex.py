@@ -245,10 +245,12 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
             # to true. API-tier callers via OpenAIResponsesProvider can
             # still set store=true themselves.
             "store": False,
-            # Without truncation:"auto" the backend 400s on contexts that
-            # exceed the model's window instead of silently dropping
-            # middle items. Codex CLI always sends this. No downside.
-            "truncation": "auto",
+            # NOTE: v1.5.4 tried adding ``truncation: "auto"`` here on
+            # advice from research that Codex CLI sends it. Backend
+            # turns out to reject it: 400 ``"Unsupported parameter:
+            # truncation"``. v1.5.7 removed it. Long-context overflow
+            # behavior on the chatgpt.com codex endpoint is implicit —
+            # the server handles it without a client-side knob.
         }
         # max_output_tokens is accepted only on some Codex models; passing
         # it on others 400s. Send only when the caller explicitly asked.
