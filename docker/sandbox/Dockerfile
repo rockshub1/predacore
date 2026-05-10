@@ -57,10 +57,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js 20 LTS + TypeScript + common tools ────────────────────────
+# M60 (Wave 7) note: `curl | bash` from NodeSource pulls a setup script
+# whose contents change without versioning — supply-chain trust is
+# entirely on NodeSource's TLS. To pin tighter:
+#   1. Download a specific NodeSource setup commit by its sha:
+#      curl -fsSL https://raw.githubusercontent.com/nodesource/distributions/<commit>/scripts/setup_20.x | bash -
+#   2. Or skip NodeSource and install Node from the official tarball
+#      with a pinned sha256 (mirrors the Go install pattern below).
+# Kept as-is for now because the alternative is significantly more code
+# and NodeSource is the documented standard.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && npm install -g npm@latest typescript ts-node \
   && rm -rf /var/lib/apt/lists/*
+
+# M59 (Wave 7) follow-up: npm@latest, typescript, ts-node above are
+# unpinned — a fresh build pulls today's latest of each. To pin, replace
+# with explicit versions like:
+#   npm install -g npm@10.8.2 typescript@5.6.2 ts-node@10.9.2
+# Same applies to the Python `pip install` and `rustup` blocks below.
+# Tracked as M59 follow-up; pinning is a separate cleanup pass that
+# needs reproducibility validation (npm-check-updates or Renovate).
 
 # ── Go 1.22 ───────────────────────────────────────────────────────────
 ARG GO_VERSION=1.22.5

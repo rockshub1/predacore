@@ -149,7 +149,9 @@ class StreamingMessageBuffer:
                 self._pending_edit.cancel()
                 try:
                     await self._pending_edit
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                except asyncio.CancelledError:
+                    raise  # M27 Wave 7: re-raise to propagate parent cancellation
+                except Exception:  # noqa: BLE001
                     pass
 
             try:

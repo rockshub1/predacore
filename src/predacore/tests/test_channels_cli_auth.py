@@ -1597,12 +1597,12 @@ class TestAPIKeyStore:
 
     def test_verify_wrong_key(self):
         store = APIKeyStore()
-        store.register_key("real-key", owner="admin")
+        store.register_key("real-key", owner="admin", scopes=["read"])
         assert store.verify_key("wrong-key") is None
 
     def test_revoke_key(self):
         store = APIKeyStore()
-        key = store.register_key("key-to-revoke", owner="admin")
+        key = store.register_key("key-to-revoke", owner="admin", scopes=["read"])
         assert store.revoke_key(key.key_id) is True
         assert store.verify_key("key-to-revoke") is None
 
@@ -1612,17 +1612,28 @@ class TestAPIKeyStore:
 
     def test_expired_key(self):
         store = APIKeyStore()
-        store.register_key("expired-key", owner="admin", expires_at=1.0)
+        store.register_key("expired-key", owner="admin", scopes=["read"], expires_at=1.0)
         assert store.verify_key("expired-key") is None
 
     def test_list_keys(self):
         store = APIKeyStore()
-        store.register_key("k1", owner="alice")
-        store.register_key("k2", owner="bob")
+        store.register_key("k1", owner="alice", scopes=["read"])
+        store.register_key("k2", owner="bob", scopes=["read"])
         keys = store.list_keys()
         assert len(keys) == 2
         owners = {k["owner"] for k in keys}
         assert owners == {"alice", "bob"}
+
+    def test_register_key_rejects_default_wildcard(self):
+        """H24: register_key must require explicit non-empty scopes."""
+        import pytest as _pytest
+        store = APIKeyStore()
+        with _pytest.raises(ValueError, match="non-empty scopes"):
+            store.register_key("k1", owner="alice")
+        with _pytest.raises(ValueError, match="non-empty scopes"):
+            store.register_key("k2", owner="bob", scopes=[])
+        # Explicit wildcard still works.
+        store.register_key("k3", owner="admin", scopes=["*"])
 
 
 class TestAuthMiddleware:
@@ -1695,7 +1706,7 @@ class TestAuthMiddleware:
 
     def test_case_insensitive_headers(self):
         mw = AuthMiddleware(jwt_secret="s")
-        mw.key_store.register_key("key1", owner="admin")
+        mw.key_store.register_key("key1", owner="admin", scopes=["*"])
         ctx = mw.authenticate({"X-Api-Key": "key1"})
         assert ctx.is_authenticated is True
 

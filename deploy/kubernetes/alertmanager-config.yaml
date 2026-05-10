@@ -1,3 +1,9 @@
+# M63 (Wave 7): this file ships with PLACEHOLDER credentials below.
+# Applying it as-is deploys a non-functional Alertmanager Secret. Before
+# `kubectl apply`, replace `YOUR_SLACK_WEBHOOK_URL`, `YOUR_PAGERDUTY_*`
+# with real values. For production, use ExternalSecrets / sealed-secrets
+# / Helm values to inject the credentials at deploy time instead of
+# committing this file with placeholders. Tracked as M63 in audit BACKLOG.
 apiVersion: v1
 kind: Secret
 metadata:

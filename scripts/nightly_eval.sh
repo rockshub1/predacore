@@ -15,19 +15,25 @@ export USE_MCTS_PLANNER=1
 
 echo "[info] Starting nightly eval at $STAMP" | tee -a "$OUT"
 
-echo "[planning] Running 10 goals with AB-MCTS" | tee -a "$OUT"
-python "$ROOT_DIR/scripts/eval_harness.py" --suite planning --count 10 --mcts --metrics-port 8025 | tee -a "$OUT" || true
+# Aggregate failures explicitly so the nightly fails when any suite breaks,
+# instead of the previous `|| true` swallow that hid every failure.
+fail_count=0
+run_suite() {
+    local label="$1"; shift
+    echo "[$label] Running" | tee -a "$OUT"
+    if ! "$@" 2>&1 | tee -a "$OUT"; then
+        echo "[$label] FAILED" | tee -a "$OUT"
+        fail_count=$((fail_count + 1))
+    fi
+}
 
-echo "[sudoku] Running 20 puzzles" | tee -a "$OUT"
-python "$ROOT_DIR/scripts/eval_harness.py" --suite sudoku --count 20 --metrics-port 8026 | tee -a "$OUT" || true
+run_suite planning python "$ROOT_DIR/scripts/eval_harness.py" --suite planning --count 10 --mcts --metrics-port 8025
+run_suite sudoku   python "$ROOT_DIR/scripts/eval_harness.py" --suite sudoku --count 20 --metrics-port 8026
+run_suite ale      python "$ROOT_DIR/scripts/eval_harness.py" --suite ale --count 5 --metrics-port 8027
+run_suite ale_mini python "$ROOT_DIR/scripts/eval_harness.py" --suite ale_mini --count 2 --metrics-port 8028
 
-echo "[ale] Running 5 tasks (placeholder offline)" | tee -a "$OUT"
-python "$ROOT_DIR/scripts/eval_harness.py" --suite ale --count 5 --metrics-port 8027 | tee -a "$OUT" || true
-
-echo "[ale_mini] Running 2 mock tasks" | tee -a "$OUT"
-python "$ROOT_DIR/scripts/eval_harness.py" --suite ale_mini --count 2 --metrics-port 8028 | tee -a "$OUT" || true
-
-echo "[ale_mini_run] Simulated execution of 2 goals" | tee -a "$OUT"
-python "$ROOT_DIR/scripts/eval_ale_mini_run.py" --all | tee -a "$OUT" || true
-
-echo "[done] Results saved to $OUT" | tee -a "$OUT"
+if [ "$fail_count" -gt 0 ]; then
+    echo "[done] $fail_count suite(s) FAILED. Results: $OUT" | tee -a "$OUT"
+    exit 1
+fi
+echo "[done] All suites passed. Results: $OUT" | tee -a "$OUT"

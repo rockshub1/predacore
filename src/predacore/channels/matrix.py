@@ -129,7 +129,9 @@ class MatrixAdapter(ChannelAdapter):
             self._sync_task.cancel()
             try:
                 await self._sync_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise  # M27 Wave 7: re-raise to propagate parent cancellation
+            except Exception:  # noqa: BLE001
                 pass
         if self._client is not None:
             try:

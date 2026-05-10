@@ -293,7 +293,13 @@ class CronEngine:
         logger.info("Cron engine started")
 
     async def stop(self) -> None:
-        """Stop the cron scheduler."""
+        """Stop the cron scheduler.
+
+        M19 (Wave 7): also cancels any in-flight `_job_tasks` and waits
+        for them with a 5s deadline. Previously a long-running cron
+        handler kept executing after `stop()` returned, racing the
+        gateway shutdown that was tearing down its dependencies.
+        """
         self._running = False
         if self._task:
             self._task.cancel()
@@ -301,6 +307,22 @@ class CronEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # M19: cancel + drain any cron-spawned job tasks. Bounded wait so
+        # a stuck job can't stall the daemon's 15s cleanup budget.
+        if self._job_tasks:
+            for t in list(self._job_tasks):
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*list(self._job_tasks), return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Cron job tasks did not stop within 5s — leaving %d running",
+                    sum(1 for t in self._job_tasks if not t.done()),
+                )
         logger.info("Cron engine stopped")
 
     async def _tick_loop(self) -> None:
@@ -357,7 +379,16 @@ class CronEngine:
             logger.error("Cron job failed: %s — %s", job.name, e, exc_info=True)
 
     async def _run_memory_consolidation(self) -> None:
-        """Run unified memory consolidation (entity extraction, linking, pruning)."""
+        """Run unified memory consolidation (entity extraction, linking, pruning).
+
+        Wave 11 fix (2026-05-09): also pass `sessions_dir` so
+        `summarize_unsummarized_sessions` can generate episode rows
+        (was producing 0 episodes in production), and `outcome_store`
+        so reward-proportional decay actually fires (was returning
+        {} silently). Without these wirings: episodes never created,
+        decay loses outcome-modulated signal, auto_link still works
+        but its result was the only thing being persisted.
+        """
         try:
             # Access unified memory from gateway's core
             core = getattr(self.gateway, "_core", None) or getattr(
@@ -376,11 +407,31 @@ class CronEngine:
             from ..memory import MemoryConsolidator
 
             llm = getattr(core, "llm", None)
-            consolidator = MemoryConsolidator(store=um, llm=llm)
+
+            # Wave 11: resolve sessions_dir from the gateway's SessionStore
+            # so summarize_unsummarized_sessions has a real source to walk.
+            sessions_dir: str | None = None
+            try:
+                sess_store = getattr(self.gateway, "session_store", None)
+                if sess_store is not None and hasattr(sess_store, "sessions_dir"):
+                    sessions_dir = str(sess_store.sessions_dir)
+            except (AttributeError, TypeError):
+                pass
+
+            outcome_store = getattr(core, "_outcome_store", None)
+
+            consolidator = MemoryConsolidator(
+                store=um,
+                llm=llm,
+                sessions_dir=sessions_dir,
+                outcome_store=outcome_store,
+            )
             stats = await consolidator.consolidate()
             logger.info(
-                "Memory consolidation complete: %s",
+                "Memory consolidation complete: %s (sessions_dir=%s, outcome_store=%s)",
                 ", ".join(f"{k}={v}" for k, v in stats.items()),
+                "wired" if sessions_dir else "missing",
+                "wired" if outcome_store else "missing",
             )
         except (OSError, ValueError, ImportError, RuntimeError) as exc:
             logger.warning("Memory consolidation failed: %s", exc, exc_info=True)

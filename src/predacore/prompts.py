@@ -272,14 +272,18 @@ def _workspace_context_block(config: PredaCoreConfig) -> str:
     cwd = os.getcwd()
     try:
         project_id = default_project(cwd, refresh=True) or ""
-    except Exception:  # noqa: BLE001 — project detection must never break prompt build
+    except Exception as exc:  # noqa: BLE001 — project detection must never break prompt build
+        # M51 (Wave 7): log at DEBUG so the operator can opt in to seeing
+        # silent prompt-truncation, instead of the previous bare swallow.
+        logger.debug("workspace block: project detection failed (%s)", exc, exc_info=True)
         return ""
     if not project_id or project_id == "all":
         return ""
 
     try:
         indexed = has_been_bulk_indexed(project_id, home_dir=config.home_dir)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("workspace block: bulk-index check failed (%s)", exc, exc_info=True)
         indexed = False
 
     enabled = list(config.channels.enabled or []) or ["cli"]
@@ -348,6 +352,17 @@ def _get_system_prompt(config: PredaCoreConfig) -> str:
     identity_prompt = engine.build_identity_prompt()
     if identity_prompt:
         sections.append(identity_prompt)
+
+    # PR2 (U2): datamarker explanation. Tells the LLM how to interpret the
+    # `‹‹∇‹‹` token interleaved through tool output (datamarking
+    # spotlighting per Hines et al. / MS Research). Lives in the
+    # semi-static section so it's cached per-session by Anthropic's prompt
+    # cache while still rebuilding when identity files mutate.
+    try:
+        from .auth.security import DATAMARKER_EXPLANATION
+        sections.append(f"\n---\n\n{DATAMARKER_EXPLANATION}")
+    except ImportError:
+        pass
 
     # Meta prompt (optional self-optimization layer)
     enable_meta_prompt = bool(
@@ -418,14 +433,25 @@ answer directly from this Runtime Context section — it's already the authorita
   first, speed ladders, common patterns). Read the description before calling — it's
   the source of truth for how to use that tool correctly.
 """
-    sections.append(runtime)
-
-    # T5d — workspace + first-touch awareness. Cheap (one stat per call);
-    # appended last so it ranks below identity but above journal/runtime
-    # context that the model treats as authoritative.
+    # PR3 (U14): cache-aware ordering. Anthropic's prompt cache rewards
+    # static-prefix → semi-static → dynamic ordering. The runtime context
+    # block contains the literal current time stamp, so it busts cache
+    # every minute by definition — push it to LAST. Workspace block goes
+    # before it: it's semi-dynamic (changes per cwd / project_id, not
+    # per turn) and benefits from cache hits across consecutive turns in
+    # the same project.
     workspace_block = _workspace_context_block(config)
     if workspace_block:
         sections.append(workspace_block)
+
+    # ── DYNAMIC TIER — must be last ──
+    # The Runtime Context block has `**Date**: {time.strftime(...)}` which
+    # mutates every minute. Putting it at the bottom means everything
+    # above (identity, datamarker explanation, meta prompt, workspace
+    # block) stays in the prompt cache across turns; only the final
+    # ~1KB needs re-fetching. At Anthropic's 5-min free-refresh tier
+    # that's effectively a 10× cost reduction on cached reads.
+    sections.append(runtime)
 
     prompt = "\n".join(sections)
     logger.info("System prompt assembled: %d chars", len(prompt))

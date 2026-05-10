@@ -48,6 +48,24 @@ logger = logging.getLogger(__name__)
 # Preferences and entities are long-lived identity-defining memories.
 _PROTECTED_MEMORY_TYPES = frozenset({"preference", "entity"})
 
+# A-MEM (NeurIPS 2025) — types that get the on-insert neighbour-update.
+# Skipped types: session_message (Tier-3 high-volume firehose), preference
+# and entity (already long-lived; clustering adds nothing), and any
+# explicitly-source-backed code chunk (their neighbour is the file itself).
+_AMEM_LINKABLE_TYPES = frozenset({
+    "fact", "decision", "note", "conversation", "task_outcome",
+    "episode", "belief", "observation",
+})
+# Default top-K + similarity floor for A-MEM linking. Conservative — we
+# only want STRONG neighbours so the cluster signal is meaningful.
+_AMEM_TOP_K = 3
+_AMEM_THRESHOLD = 0.65
+
+
+def _amem_should_link(memory_type: str) -> bool:
+    """Whether this memory_type qualifies for A-MEM neighbour update."""
+    return (memory_type or "").strip().lower() in _AMEM_LINKABLE_TYPES
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -164,7 +182,10 @@ def _compute_blob_sha_for_path(path: str | Path) -> str | None:
 # automatically. Bounded; LRU-ish via insertion order pruning.
 _BLOB_SHA_CACHE: dict[tuple[str, float], str | None] = {}
 _BLOB_SHA_CACHE_LOCK = threading.Lock()
-_BLOB_SHA_CACHE_MAX = 4000
+# Wave 11: 4,000 → 100,000. In-RAM mtime-keyed cache of git-blob shas
+# for the T7 verifier. Bigger cache = more verifier hits without re-
+# hashing files. Memory cost: ~40 bytes/entry × 100k = 4MB. Trivial.
+_BLOB_SHA_CACHE_MAX = 100_000
 
 
 def _cached_blob_sha_for_path(path: str | Path) -> str | None:
@@ -484,18 +505,10 @@ def _matches_project_filter(
     return mem_proj in project_id
 
 
-def _row_field(mem: dict[str, Any] | sqlite3.Row, key: str, default: Any = None) -> Any:
-    """Safe accessor that works on both dict and sqlite3.Row.
-
-    sqlite3.Row doesn't implement .get(), so we can't do ``mem.get(...)``
-    uniformly. This helper bridges the two types.
-    """
-    if hasattr(mem, "get") and callable(mem.get):  # dict
-        return mem.get(key, default)
-    try:
-        return mem[key] if key in mem.keys() else default  # type: ignore[union-attr]
-    except (AttributeError, TypeError, KeyError, IndexError):
-        return default
+# L27 (Wave 8): removed duplicate `_row_field` definition that used to live
+# here at line 487 — the version at line 280 is now the single source of
+# truth. Both implementations were behaviorally equivalent; deleting the
+# second avoids the "code is truth" lookup ambiguity the audit flagged.
 
 
 def _apply_ranking_weights(
@@ -1268,6 +1281,9 @@ class _HnswVectorIndex:
     DEFAULT_EF_CONSTRUCTION = 400
     DEFAULT_EF_SEARCH = 400
 
+    # Cache format version — bump when the npz layout changes.
+    CACHE_VERSION = 1
+
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
         # Rust-backed HNSW graph (thread-safe internally via its own Mutex).
@@ -1286,6 +1302,12 @@ class _HnswVectorIndex:
         self._tombstoned: set[str] = set()
         # Track insertion order for stable iteration + eviction fallback.
         self._insertion_order: list[str] = []
+        # Wave 7: keep a parallel copy of the raw vectors so the cache
+        # checkpoint can be written without re-querying SQLite. ~4 bytes ×
+        # `dimensions` × N ≈ 150 MB at 100k×384-dim, acceptable on personal
+        # hardware. Doubles HNSW memory but enables ~3× faster cold-start.
+        self._vecs: list[list[float]] = []
+        self._ids: list[str] = []
         self._lock = threading.Lock()
 
     @property
@@ -1308,8 +1330,9 @@ class _HnswVectorIndex:
         id string, dedupe in search() keeps the first = top-scored).
         """
         with self._lock:
+            vec_list = list(vector)
             try:
-                self._hnsw.insert(id, list(vector))
+                self._hnsw.insert(id, vec_list)
             except RuntimeError as exc:
                 logger.warning("HNSW insert failed for %s: %s", id[:8], exc)
                 return
@@ -1318,6 +1341,17 @@ class _HnswVectorIndex:
             self._tombstoned.discard(id)
             if id not in self._insertion_order:
                 self._insertion_order.append(id)
+                self._ids.append(id)
+                self._vecs.append(vec_list)
+            else:
+                # Re-add of an existing id: replace the cached vector so the
+                # next dump reflects the latest version.
+                try:
+                    pos = self._ids.index(id)
+                    self._vecs[pos] = vec_list
+                except ValueError:
+                    self._ids.append(id)
+                    self._vecs.append(vec_list)
 
     async def add(
         self, id: str, vector: list[float], metadata: dict | None = None
@@ -1394,16 +1428,60 @@ class _HnswVectorIndex:
     def dump_to_disk(
         self, path: Path, *, row_count: int, embedding_version: str
     ) -> bool:
-        """HNSW persistence not yet implemented — returns False so caller
-        knows to rebuild from SQLite next start. Tracked as follow-up work
-        (hnsw_rs has native file_dump; just needs PyO3 binding + Python glue).
+        """Wave 7: HNSW persistence via parallel-vec checkpoint.
+
+        Native HNSW graph dump (`hnsw_rs::hnswio::file_dump`) needs a PyO3
+        binding that doesn't exist yet — separate Rust-side follow-up. As
+        an interim, dump (ids, vecs, meta) to the same .npz format the
+        numpy backend uses; on load we re-insert into a fresh HNSW. That
+        skips SQLite blob decoding (~3× faster cold start) without
+        requiring the full graph dump.
         """
-        del path, row_count, embedding_version  # unused for now
-        logger.debug(
-            "HNSW persistence not yet implemented — skipping dump "
-            "(rebuild from SQLite on next start is O(n log n))"
-        )
-        return False
+        import json as _json
+
+        import numpy as np
+
+        with self._lock:
+            if not self._ids:
+                logger.debug("HNSW empty — skipping dump")
+                return False
+            header = {
+                "cache_version": self.CACHE_VERSION,
+                "backend": "hnsw",
+                "dimensions": self.dimensions,
+                "row_count": row_count,
+                "embedding_version": embedding_version,
+                "live_count": len(self._ids) - len(self._tombstoned),
+                "tombstones": list(self._tombstoned),
+            }
+            vecs_arr = np.asarray(self._vecs, dtype=np.float32)
+            ids_bytes = np.frombuffer(_json.dumps(self._ids).encode("utf-8"), dtype=np.uint8)
+            meta_bytes = np.frombuffer(_json.dumps(self._meta).encode("utf-8"), dtype=np.uint8)
+            header_bytes = np.frombuffer(_json.dumps(header).encode("utf-8"), dtype=np.uint8)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.parent / (path.stem + "_tmp.npz")
+        try:
+            np.savez_compressed(
+                str(tmp_path),
+                header=header_bytes,
+                ids=ids_bytes,
+                vecs=vecs_arr,
+                meta=meta_bytes,
+            )
+            tmp_path.replace(path)  # atomic
+            logger.info(
+                "HNSW vector index persisted: %d vectors → %s (row_count=%d)",
+                len(self._ids), path, row_count,
+            )
+            return True
+        except (OSError, ValueError) as exc:
+            logger.warning("HNSW persist failed: %s", exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
 
     def load_from_disk(
         self,
@@ -1412,10 +1490,76 @@ class _HnswVectorIndex:
         expected_row_count: int,
         expected_embedding_version: str,
     ) -> bool:
-        """HNSW persistence not yet implemented — always returns False,
-        forcing rebuild from SQLite."""
-        del path, expected_row_count, expected_embedding_version
-        return False
+        """Wave 7: load (ids, vecs, meta) from .npz and re-insert into HNSW.
+
+        Returns False (with INFO log) on any invariant mismatch — caller
+        falls back to SQLite rebuild. Same invariants as numpy backend
+        (cache_version / dimensions / row_count / embedding_version).
+        """
+        import json as _json
+
+        import numpy as np
+
+        if not path.exists():
+            logger.debug("HNSW cache missing at %s — will rebuild from SQLite", path)
+            return False
+        try:
+            data = np.load(str(path), allow_pickle=False)
+        except (OSError, ValueError) as exc:
+            logger.info("HNSW cache unreadable (%s) — rebuilding", exc)
+            return False
+        try:
+            header = _json.loads(bytes(data["header"]).decode("utf-8"))
+        except (KeyError, UnicodeDecodeError, _json.JSONDecodeError) as exc:
+            logger.info("HNSW cache header malformed (%s) — rebuilding", exc)
+            return False
+
+        reasons: list[str] = []
+        if header.get("cache_version") != self.CACHE_VERSION:
+            reasons.append(f"cache_version {header.get('cache_version')} != {self.CACHE_VERSION}")
+        if header.get("dimensions") != self.dimensions:
+            reasons.append(f"dimensions {header.get('dimensions')} != {self.dimensions}")
+        if int(header.get("row_count", -1)) != int(expected_row_count):
+            reasons.append(f"row_count {header.get('row_count')} != SQLite {expected_row_count}")
+        if header.get("embedding_version") != expected_embedding_version:
+            reasons.append(
+                f"embedding_version {header.get('embedding_version')} != {expected_embedding_version}",
+            )
+        if reasons:
+            logger.info("HNSW cache invariant mismatch (%s) — rebuilding", "; ".join(reasons))
+            return False
+
+        try:
+            ids = _json.loads(bytes(data["ids"]).decode("utf-8"))
+            meta = _json.loads(bytes(data["meta"]).decode("utf-8"))
+            vecs = data["vecs"]
+        except (KeyError, UnicodeDecodeError, _json.JSONDecodeError) as exc:
+            logger.info("HNSW cache payload malformed (%s) — rebuilding", exc)
+            return False
+
+        if len(ids) != len(vecs):
+            logger.info("HNSW cache id/vec length mismatch — rebuilding")
+            return False
+
+        # Re-insert into the graph. Single-threaded: caller already holds
+        # initialisation pre-yield (we're called inside the constructor
+        # path before any other coroutines are scheduled).
+        with self._lock:
+            self._ids = list(ids)
+            self._vecs = [list(v) for v in vecs.tolist()]
+            self._meta = dict(meta) if isinstance(meta, dict) else {}
+            self._tombstoned = set(header.get("tombstones") or [])
+            self._insertion_order = list(ids)
+            for id_, vec in zip(ids, self._vecs, strict=False):
+                try:
+                    self._hnsw.insert(id_, vec)
+                except RuntimeError as exc:
+                    logger.debug("HNSW re-insert skipped %s: %s", id_[:8], exc)
+        logger.info(
+            "HNSW vector index restored from cache: %d vectors (skipped SQLite rebuild)",
+            len(ids),
+        )
+        return True
 
 
 class UnifiedMemoryStore:
@@ -1497,23 +1641,52 @@ class UnifiedMemoryStore:
         #     at small/medium scale, simpler persistence, exact recall).
         if self._vec_index is None:
             dims = self._detect_embedding_dims()
-            use_hnsw = os.getenv("PREDACORE_USE_HNSW", "").strip().lower() in {
-                "1", "true", "yes", "on",
-            }
+            # Wave 7: scale-adaptive backend selection.
+            # PREDACORE_USE_HNSW=1 / 0 — explicit user override (wins).
+            # PREDACORE_USE_HNSW unset (default) → auto-pick:
+            #   - count of stored memories < 10_000 → numpy
+            #     (exact recall, instant load via _try_load_vector_index_cache)
+            #   - count >= 10_000 → HNSW
+            #     (sub-linear query — at this scale numpy's O(n) scan dominates
+            #     wall-clock; HNSW's rebuild-from-SQLite cost is amortized
+            #     across the next session's queries)
+            # HNSW persistence is still not wired (see _try_load_vector_index_cache
+            # comment) so HNSW pays a rebuild on every daemon restart — but at
+            # 10k+ rows numpy is slower at QUERY time than HNSW is at REBUILD
+            # time per typical session length, so HNSW wins net.
+            _env = os.getenv("PREDACORE_USE_HNSW", "").strip().lower()
+            if _env in {"1", "true", "yes", "on"}:
+                use_hnsw = True
+                _reason = "explicit env"
+            elif _env in {"0", "false", "no", "off"}:
+                use_hnsw = False
+                _reason = "explicit env"
+            else:
+                # Auto-pick by row count.
+                row_count = 0
+                if self._conn is not None:
+                    try:
+                        row_count = int(
+                            self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0],
+                        )
+                    except (sqlite3.Error, TypeError, ValueError):
+                        row_count = 0
+                use_hnsw = row_count >= 10_000
+                _reason = f"auto (rows={row_count})"
             if use_hnsw:
-                logger.info("Vector index backend: HNSW (PREDACORE_USE_HNSW=on)")
+                logger.info("Vector index backend: HNSW (%s)", _reason)
                 self._vec_index = _HnswVectorIndex(dimensions=dims)
             else:
+                logger.info("Vector index backend: numpy (%s)", _reason)
                 self._vec_index = _NumpyVectorIndex(dimensions=dims)
-            # Try loading the on-disk cache (only works for the numpy
-            # backend today — HNSW persistence isn't wired yet).
-            if not use_hnsw and self._try_load_vector_index_cache():
+            # Wave 7: HNSW now also persists via the same .npz cache path
+            # (parallel-vec checkpoint, see _HnswVectorIndex.dump_to_disk).
+            # Both backends try the cache first; on miss/invariant mismatch
+            # they fall through to SQLite rebuild.
+            if self._try_load_vector_index_cache():
                 logger.info("Vector index restored from cache (skipped SQLite rebuild)")
             else:
-                # Populate the already-created backend from SQLite. This
-                # preserves whichever implementation we just picked above
-                # (the old code here threw away the HNSW backend by
-                # replacing self._vec_index with a fresh numpy index).
+                # Populate the already-created backend from SQLite.
                 self._populate_vector_index_from_sqlite(self._vec_index)
 
         logger.info(
@@ -1589,16 +1762,24 @@ class UnifiedMemoryStore:
                 return 256
         return 384  # safe default: GTE-small / all-MiniLM-L6-v2
 
-    def _build_vector_index_from_sqlite(self) -> _NumpyVectorIndex:
-        """Legacy helper — creates a fresh _NumpyVectorIndex and populates it.
+    def _build_vector_index_from_sqlite(self) -> _NumpyVectorIndex | _HnswVectorIndex:
+        """Legacy helper — creates a fresh vector index and populates it.
 
-        Prefer ``_populate_vector_index_from_sqlite(target)`` for new code;
-        that one respects whatever backend (_Numpy or _Hnsw) is already in
-        use instead of hardcoding numpy. This one is kept for any external
-        caller that still expects a fresh index back.
+        Honors ``PREDACORE_USE_HNSW`` so callers using this helper instead of
+        ``_populate_vector_index_from_sqlite(target)`` don't silently downgrade
+        an HNSW-configured store to numpy. The numpy-only behavior was the
+        bug the constructor's "fixed" comment refers to.
+
+        Prefer ``_populate_vector_index_from_sqlite(target)`` for new code —
+        that path is more explicit about which backend is in use.
         """
         dims = self._detect_embedding_dims()
-        idx = _NumpyVectorIndex(dimensions=dims)
+        use_hnsw = os.getenv("PREDACORE_USE_HNSW", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        idx: _NumpyVectorIndex | _HnswVectorIndex = (
+            _HnswVectorIndex(dimensions=dims) if use_hnsw else _NumpyVectorIndex(dimensions=dims)
+        )
         if self._conn is None:
             return idx
         self._populate_vector_index_from_sqlite(idx)
@@ -1749,6 +1930,19 @@ class UnifiedMemoryStore:
         string is returned in place of the memory id. The block is logged
         at WARNING and counted in ``get_safety_stats()``.
         """
+        # M22 (Wave 7): bound content length BEFORE secret-scan regex pass to
+        # constrain ReDoS surface on the unanchored "generic_secret_assignment"
+        # pattern. Bulk-index already chunks (~4 KB per chunk) before the
+        # scan; direct `store()` callers historically passed unbounded
+        # content. 1 MB is a generous ceiling that covers any single
+        # memory we'd want to keep semantically searchable.
+        if content and len(content) > 1_000_000:
+            logger.warning(
+                "store() truncated content from %d to 1MB to bound secret-scan ReDoS surface",
+                len(content),
+            )
+            content = content[:1_000_000]
+
         # Ingress secret scan — done first so we don't embed nor insert anything.
         if content and self._safety_stats is not None:
             try:
@@ -1916,6 +2110,20 @@ class UnifiedMemoryStore:
                 )
             except (ValueError, TypeError) as exc:
                 logger.debug("Vector index add failed (will rebuild from DB): %s", exc)
+
+        # A-MEM (NeurIPS 2025, arxiv:2502.12110) Zettelkasten neighbour update.
+        # On every long-term-relevant insert, link the new memory to its top-K
+        # nearest neighbours so cluster context is available without a second
+        # vector search. Skipped for high-volume / non-semantic types
+        # (session_message tier-3 writes, preference, entity).
+        if (
+            embedding_vec
+            and self._vec_index
+            and _amem_should_link(memory_type)
+            and os.environ.get("PREDACORE_AMEM_DISABLED", "").strip() not in {"1", "true", "yes", "on"}
+        ):
+            await self._amem_link_neighbours(memory_id, embedding_vec, user_id)
+
         if supersede_ids:
             logger.info(
                 "memory.supersede: new=%s replaces %d old id(s): %s",
@@ -1931,6 +2139,104 @@ class UnifiedMemoryStore:
             len(supersede_ids),
         )
         return memory_id
+
+    async def _amem_link_neighbours(
+        self,
+        memory_id: str,
+        embedding_vec: list[float],
+        user_id: str,
+    ) -> int:
+        """A-MEM Zettelkasten — write top-K nearest-neighbour ids into the
+        new memory's metadata. Returns the count of neighbours linked.
+
+        Best-effort; never raises. Same-user neighbours only — cross-user
+        links would leak isolation. The healer's `audit_invariants` and
+        `sweep_orphans` already keep these references honest if a neighbour
+        is later deleted (the field is metadata-only, not a foreign key).
+        """
+        try:
+            hits = await self._vec_index.search(embedding_vec, top_k=_AMEM_TOP_K + 1)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            logger.debug("A-MEM neighbour search failed: %s", exc)
+            return 0
+
+        neighbours: list[dict[str, Any]] = []
+        for nid, score in hits:
+            if nid == memory_id:
+                continue
+            try:
+                s = float(score)
+            except (TypeError, ValueError):
+                continue
+            if s < _AMEM_THRESHOLD:
+                continue
+            neighbours.append({"id": str(nid), "score": round(s, 3)})
+            if len(neighbours) >= _AMEM_TOP_K:
+                break
+
+        if not neighbours:
+            return 0
+
+        # Patch metadata of the new row. Single UPDATE; we keep all the
+        # other metadata fields (scope, team_id, identity_signature, etc.).
+        def _read_meta() -> str | None:
+            row = self._conn.execute(
+                "SELECT metadata FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            return row[0] if row else None
+
+        def _write_meta(meta_json: str) -> None:
+            self._conn.execute(
+                "UPDATE memories SET metadata = ? WHERE id = ?",
+                (meta_json, memory_id),
+            )
+            self._conn.commit()
+
+        try:
+            if self._db_adapter is not None:
+                # Adapter mode (rare path): single round-trip is fine.
+                rows = await self._db_adapter.execute(
+                    self._DB_NAME,
+                    "SELECT metadata FROM memories WHERE id = ?",
+                    [memory_id],
+                )
+                raw = rows[0][0] if rows and rows[0] else None
+            else:
+                async with self._db_lock:
+                    raw = await self._in_thread(_read_meta)
+        except (sqlite3.Error, OSError) as exc:
+            logger.debug("A-MEM read-meta failed: %s", exc)
+            return 0
+
+        try:
+            meta = json.loads(raw or "{}")
+            if not isinstance(meta, dict):
+                meta = {}
+        except (ValueError, TypeError):
+            meta = {}
+        meta["neighbours"] = neighbours
+        new_meta_json = json.dumps(meta)
+
+        try:
+            if self._db_adapter is not None:
+                await self._db_adapter.execute(
+                    self._DB_NAME,
+                    "UPDATE memories SET metadata = ? WHERE id = ?",
+                    [new_meta_json, memory_id],
+                )
+            else:
+                async with self._db_write_lock:
+                    async with self._db_lock:
+                        await self._in_thread(_write_meta, new_meta_json)
+        except (sqlite3.Error, OSError) as exc:
+            logger.debug("A-MEM write-meta failed: %s", exc)
+            return 0
+
+        logger.debug(
+            "A-MEM linked %s → %d neighbours (threshold=%.2f)",
+            memory_id[:8], len(neighbours), _AMEM_THRESHOLD,
+        )
+        return len(neighbours)
 
     async def recall(
         self,
@@ -2473,6 +2779,7 @@ class UnifiedMemoryStore:
         project_id: str = "default",
         branch: str | None = None,
         user_id: str = "default",
+        root: str | Path | None = None,
     ) -> dict[str, Any]:
         """Re-index a single file's contents into memory.
 
@@ -2490,6 +2797,12 @@ class UnifiedMemoryStore:
              ``project_id``, ``branch``, plus ``line_start/end/anchor`` in
              metadata.
 
+        Optional ``root`` parameter enforces a containment check: the resolved
+        ``path`` must be inside ``root`` (after symlink resolution) or the
+        method returns ``{"error": "path_outside_root"}``. Callers that index
+        a known project tree should pass ``root`` to prevent buggy or
+        compromised tool input from ingesting files like ``~/.ssh/id_rsa.pub``.
+
         Trigger sites in predacore-public: any tool handler that writes a
         file (e.g. ``tools/handlers/file_ops.handle_write_file``) should
         ``await ctx.unified_memory.reindex_file(path)`` after the write.
@@ -2501,6 +2814,13 @@ class UnifiedMemoryStore:
         from .chunker import chunk_text, safe_read_text
 
         p = Path(path).expanduser().resolve()
+        if root is not None:
+            try:
+                root_p = Path(root).expanduser().resolve()
+                if not p.is_relative_to(root_p):
+                    return {"path": str(p), "error": "path_outside_root", "root": str(root_p)}
+            except (OSError, ValueError):
+                return {"path": str(p), "error": "invalid_root"}
         if not p.exists():
             return {"path": str(p), "error": "file_not_found"}
         if not p.is_file():
@@ -3011,8 +3331,11 @@ class UnifiedMemoryStore:
                     root=str(root_path),
                     files_total=total,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _bulk_status_exc:  # noqa: BLE001
+                logger.debug(
+                    "bulk-index status update failed (%s): %s",
+                    type(_bulk_status_exc).__name__, _bulk_status_exc,
+                )
 
         for i, p in enumerate(candidates):
             # Abort check: polled between files (cheap; one bool read).
@@ -3097,8 +3420,11 @@ class UnifiedMemoryStore:
         if status is not None and not stats["aborted"]:
             try:
                 status.finish(success=stats["files_failed"] == 0)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _bulk_status_exc:  # noqa: BLE001
+                logger.debug(
+                    "bulk-index status update failed (%s): %s",
+                    type(_bulk_status_exc).__name__, _bulk_status_exc,
+                )
 
         logger.info(
             "Bulk index of %s: %d indexed / %d skipped / %d ignored / %d failed%s (%.1fs)",

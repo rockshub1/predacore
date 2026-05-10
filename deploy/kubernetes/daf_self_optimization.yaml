@@ -144,20 +144,23 @@ spec:
   podSelector:
     matchLabels:
       app: daf-self-optimization
-  ingress:
-  - ports:
-    - protocol: TCP
-      port: 50051
   policyTypes:
   - Ingress
   - Egress
-  egress:
-  - to:
+  # H32: merged duplicate `ingress:` (was at lines 147 + 159) and consolidated
+  # so the bare-port allow + the daf-system-namespace allow both apply.
+  # Previously YAML kept only the last `ingress:` block, silently dropping
+  # the bare-port allowlist.
+  ingress:
+  - from:
     - namespaceSelector:
         matchLabels:
           name: daf-system
-  ingress:
-  - from:
+    ports:
+    - protocol: TCP
+      port: 50051
+  egress:
+  - to:
     - namespaceSelector:
         matchLabels:
           name: daf-system

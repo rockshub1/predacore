@@ -23,8 +23,8 @@ except Exception:  # Optional metrics
 
 
 async def eval_once(goal: str, use_mcts: bool) -> dict:
-    from src.core_strategic_engine.planner import HierarchicalStrategicPlannerV1
-    from src.core_strategic_engine.planner_mcts import ABMCTSPlanner
+    from predacore._vendor.core_strategic_engine.planner import HierarchicalStrategicPlannerV1
+    from predacore._vendor.core_strategic_engine.planner_mcts import ABMCTSPlanner
     planner = ABMCTSPlanner(kn_stub=None) if use_mcts else HierarchicalStrategicPlannerV1(kn_stub=None)
     t0 = time.time()
     plan = await planner.create_plan(uuid4(), goal, {})
@@ -173,7 +173,7 @@ async def main():
         for goal, require in tasks[:args.count]:
             from uuid import uuid4
 
-            from src.core_strategic_engine.planner_mcts import ABMCTSPlanner
+            from predacore._vendor.core_strategic_engine.planner_mcts import ABMCTSPlanner
             planner = ABMCTSPlanner(kn_stub=None)
             t0 = time.time()
             plan = await planner.create_plan(uuid4(), goal, {})

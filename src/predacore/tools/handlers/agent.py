@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -568,7 +569,28 @@ async def handle_multi_agent(args: dict[str, Any], ctx: ToolContext) -> str:
         except (TypeError, ValueError):
             timeout_s = None
 
+    # Phase 17 (2026-05-08): opt-in orchestrator path. When the global
+    # PREDACORE_USE_ORCHESTRATOR=1 OR per-handler PREDACORE_MULTI_AGENT_USE_ORCHESTRATOR=1
+    # flag is set, route through the new Orchestrator (auto-classifies
+    # pattern, picks runner, runs PRELUDE loop). Falls back to legacy
+    # AgentTeam path on any orchestrator failure so callers never break.
+    use_orchestrator = (
+        os.getenv("PREDACORE_MULTI_AGENT_USE_ORCHESTRATOR", "").lower() in {"1", "true", "yes", "on"}
+        or os.getenv("PREDACORE_USE_ORCHESTRATOR", "").lower() in {"1", "true", "yes", "on"}
+    )
+
     try:
+        if use_orchestrator:
+            try:
+                orch_result = await _multi_agent_via_orchestrator(args, ctx, current_depth)
+                if orch_result is not None:
+                    return orch_result
+            except Exception as exc:  # noqa: BLE001 — orchestrator boundary; fall back
+                logger.warning(
+                    "multi_agent orchestrator path failed (%s) — falling back to legacy",
+                    exc, exc_info=True,
+                )
+
         coro = _multi_agent_inner(args, ctx)
         if timeout_s is not None:
             return await asyncio.wait_for(coro, timeout=timeout_s)
@@ -581,6 +603,93 @@ async def handle_multi_agent(args: dict[str, Any], ctx: ToolContext) -> str:
         ) from None
     finally:
         _DELEGATION_DEPTH.set(current_depth)
+
+
+async def _multi_agent_via_orchestrator(
+    args: dict[str, Any],
+    ctx: ToolContext,
+    current_depth: int,
+) -> str | None:
+    """Phase 17 (2026-05-08): orchestrator-based replacement for AgentTeam.
+
+    Returns the synthesized answer string on success. Returns None on any
+    failure that the legacy path could potentially handle (caller falls
+    back). Raises ToolError only on hard validation errors (missing prompt,
+    no LLM, etc.) that would also fail the legacy path.
+    """
+    if ctx.llm_for_collab is None:
+        return None  # legacy path will report the proper subsystem-unavailable
+
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        raise missing_param("prompt", tool="multi_agent")
+
+    try:
+        from ...agents.budget import OrchestrationBudget
+        from ...agents.orchestrator import Orchestrator, OrchestratorConfig, PatternName
+    except ImportError as exc:
+        logger.debug("Orchestrator import failed in multi_agent: %s", exc)
+        return None
+
+    # Pull caller hints
+    explicit_pattern = str(args.get("pattern") or "").strip().lower()
+    pattern_override: PatternName | None = None
+    if explicit_pattern in {p.value for p in PatternName}:
+        pattern_override = PatternName(explicit_pattern)
+    elif explicit_pattern == "fan_out":
+        pattern_override = PatternName.PARALLELIZE
+    elif explicit_pattern == "consensus":
+        pattern_override = PatternName.SELF_MOA
+    elif explicit_pattern in {"pipeline", "chain"}:
+        pattern_override = PatternName.PROMPT_CHAIN
+    elif explicit_pattern == "supervise":
+        pattern_override = PatternName.ORCHESTRATOR_WORKERS
+
+    # Budget — honor caller's max_runtime_seconds if given
+    budget = OrchestrationBudget(
+        max_total_tokens=int(os.getenv("PREDACORE_ORCH_MAX_TOKENS", "200000")),
+        max_total_dollars=float(os.getenv("PREDACORE_ORCH_MAX_DOLLARS", "5.0")),
+        max_wall_seconds=int(args.get("max_runtime_seconds") or 300),
+        max_subagents=int(os.getenv("PREDACORE_ORCH_MAX_SUBAGENTS", "15")),
+    )
+
+    # Build the orchestrator with whatever ctx exposes
+    orch = Orchestrator(
+        llm=ctx.llm_for_collab,
+        memory=getattr(ctx, "unified_memory", None),
+        handler_map=getattr(ctx, "_handler_map", None) or {},
+        tool_executor=ctx,
+        outcome_store=None,
+        config=OrchestratorConfig(
+            lead_model=os.getenv("PREDACORE_ORCHESTRATOR_LEAD_MODEL"),
+        ),
+    )
+
+    user_id = str(args.get("user_id") or "default")
+    session_id = str(args.get("session_id") or "")
+
+    result = await orch.run(
+        task=prompt,
+        user_id=user_id,
+        session_id=session_id,
+        budget=budget,
+        pattern=pattern_override,
+    )
+
+    if not result.success or not result.output.strip():
+        logger.info(
+            "multi_agent orchestrator declined (pattern=%s, error=%r) — legacy fallback",
+            result.pattern, result.error,
+        )
+        return None
+
+    # Append a small footer with run metadata so callers can see what happened
+    footer = (
+        f"\n\n[orchestrator pattern={result.pattern} runner={result.runner} "
+        f"elapsed={result.elapsed_seconds:.1f}s tokens={budget.total_tokens} "
+        f"dollars=${budget.used_dollars:.3f}]"
+    )
+    return result.output + footer
 
 
 async def _multi_agent_inner(args: dict[str, Any], ctx: ToolContext) -> str:

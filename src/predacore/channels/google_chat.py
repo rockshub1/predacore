@@ -61,6 +61,19 @@ class GoogleChatAdapter(ChannelAdapter):
         self._runner: web.AppRunner | None = None
 
     async def start(self) -> None:
+        # Loud warning if no auth configured. The body-supplied
+        # `verification_token` is a leak-once-forge-forever shared secret
+        # (Google deprecated it in favor of OIDC bearer JWTs); a missing
+        # one means anyone reachable on the bind host can post fake events.
+        # Full JWT/JWKS verification is a separate larger fix; for now we
+        # surface the risk so operators don't deploy unaware.
+        if not self._verification_token:
+            logger.critical(
+                "Google Chat: no GOOGLE_CHAT_VERIFICATION_TOKEN configured. "
+                "Webhooks will be accepted from any caller — Google's modern "
+                "auth (OIDC bearer JWT against JWKS) is not yet implemented. "
+                "Bind to 127.0.0.1 only; do NOT expose this listener publicly."
+            )
         self._app = web.Application()
         self._app.router.add_post("/google_chat/webhook", self._handle_webhook)
         self._runner = web.AppRunner(self._app, access_log=None)

@@ -189,6 +189,13 @@ class ToolContext:
     openclaw_enabled: bool = False
     llm_for_collab: Any = None                            # LLMInterface | None
     unified_memory: Any = None                            # UnifiedMemoryStore | None
+    # Pre-hoc safety + ASI machinery (Phase: identity-wiring).
+    # critic_gate is consulted before high-stakes tool dispatch in the
+    # agent loop; skill_crystallizer observes execution patterns and
+    # crystallizes them into Flame skills. Both nullable so handlers
+    # work in stub-ctx tests; production runs wire them via SubsystemFactory.
+    critic_gate: Any = None                               # CriticGate | None
+    skill_crystallizer: Any = None                        # SkillCrystallizer | None
     trust_policy: dict = field(default_factory=dict)
 
     # Helpers that live on ToolExecutor but are needed by some handlers

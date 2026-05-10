@@ -1,8 +1,6 @@
 """
 Minimal task/result store abstraction for DAF.
 Supports in-memory and optional Redis-backed persistence (if redis is available).
-
-Moved from src/daf/task_store.py into dynamic_agent_fabric/ as the canonical location.
 """
 import asyncio
 import os

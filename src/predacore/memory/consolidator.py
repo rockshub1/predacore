@@ -28,9 +28,12 @@ import predacore_core  # HARD dependency — no fallback
 
 logger = logging.getLogger(__name__)
 
-# Per-user memory cap. Raised from 10K global to 25K per-user —
-# heavy users will hit the old global cap in a matter of weeks.
-MAX_MEMORIES_PER_USER = 25_000
+# Per-user memory cap. 10K global → 25K per-user (Wave 7) → 100K (Wave 11
+# initial) → 1,000,000 (Wave 11 max). At BGE-small 384-dim that's ~1.5 GB
+# on disk; HNSW supports 1M vectors at this size. Personal-instance shape:
+# 1M memories ≈ 50 turns/day × 50+ years before eviction. Effectively
+# "no eviction in any realistic lifetime."
+MAX_MEMORIES_PER_USER = 1_000_000
 
 # Memory types that never get auto-pruned. Preferences and entities are
 # long-lived identity-defining memories.
@@ -200,14 +203,29 @@ class MemoryConsolidator:
         """
         Lightweight event-driven consolidation — only processes recent memories.
         Called automatically every ~50 new memories instead of waiting 6 hours.
+
+        Wave 11 fix (2026-05-09): also runs `auto_link()` so entity
+        relations get created without waiting 6 hours for the periodic
+        full-consolidate. Production was producing 0 relations despite
+        247 entities because short-lived daemons never hit the 6h cron
+        boundary; only `consolidate_recent` fired (which previously
+        skipped auto_link entirely).
         """
-        stats = {"entities_found": 0, "merged": 0}
+        stats = {"entities_found": 0, "merged": 0, "links_created": 0}
         logger.info("Light consolidation (last %d memories)...", last_n)
 
         try:
             stats["entities_found"] = await self.extract_entities_from_recent(limit=last_n)
         except (sqlite3.Error, json.JSONDecodeError, ValueError, TypeError, asyncio.TimeoutError) as exc:
             logger.debug("Light consolidation entity extraction failed: %s", exc)
+
+        # Wave 11: auto_link is cheap (one entity + memory query, no LLM)
+        # and unblocks relation-graph building for short-lived daemons
+        # that never hit the 6h cron boundary.
+        try:
+            stats["links_created"] = await self.auto_link()
+        except (sqlite3.Error, KeyError, TypeError) as exc:
+            logger.debug("Light consolidation auto_link failed: %s", exc)
 
         try:
             stats["merged"] = await self.merge_similar()

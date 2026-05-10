@@ -1320,6 +1320,10 @@ class MacDesktopNativeService:
             name = str(app.localizedName() or "")
             bid = str(app.bundleIdentifier() or "")
             if (app_name and name.lower() == app_name.lower()) or (bundle_id and bid == bundle_id):
+                # Enforce PREDACORE_DESKTOP_ALLOWED_APPS allowlist before terminating —
+                # missing this check let force_quit kill any app even when other native
+                # actions were properly restricted.
+                self._check_allowed_app(name or app_name)
                 terminated = app.forceTerminate()
                 return {"terminated": terminated, "app_name": name, "pid": int(app.processIdentifier())}
         raise DesktopNativeError(f"App not found: {app_name or bundle_id}")

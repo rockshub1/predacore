@@ -14,6 +14,7 @@ import logging
 import logging as _logging
 import math
 import os
+import time as _time
 from collections import OrderedDict
 from typing import Any
 from uuid import UUID, uuid4
@@ -359,13 +360,25 @@ class ABMCTSPlanner:
         self, goal: str, steps_brief: list[str]
     ) -> tuple[float, str]:
         """LLM- or heuristic-scored value for a sequence of steps. Returns (score, justification)."""
-        # Memoization
+        # Memoization (M30 Wave 7: TTL eviction now actually honored).
         key = self._score_key(goal, steps_brief)
         if key in self._score_cache:
-            s, j = self._score_cache.pop(key)
-            # move to end (most-recent)
-            self._score_cache[key] = (s, j)
-            return s, j
+            # M30: respect MCTS_SCORE_TTL_SEC. 0 means "no expiry" (legacy).
+            if self._score_ttl > 0:
+                ts = self._score_cache_ts.get(key, 0.0)
+                if ts and (_time.monotonic() - ts) > self._score_ttl:
+                    # Expired — drop and recompute below.
+                    self._score_cache.pop(key, None)
+                    self._score_cache_ts.pop(key, None)
+                else:
+                    s, j = self._score_cache.pop(key)
+                    self._score_cache[key] = (s, j)  # touch
+                    self._score_cache_ts[key] = _time.monotonic()
+                    return s, j
+            else:
+                s, j = self._score_cache.pop(key)
+                self._score_cache[key] = (s, j)
+                return s, j
         if self.llm is None:
             g = goal.lower()
             score = 0.2
@@ -378,8 +391,11 @@ class ABMCTSPlanner:
             s, j = min(1.0, score), "heuristic"
             # cache
             self._score_cache[key] = (s, j)
+            if self._score_ttl > 0:
+                self._score_cache_ts[key] = _time.monotonic()
             if len(self._score_cache) > self._score_cache_max:
-                self._score_cache.popitem(last=False)
+                evicted_key, _ = self._score_cache.popitem(last=False)
+                self._score_cache_ts.pop(evicted_key, None)
             return s, j
         sys = (
             "You are an expert planning evaluator. Score the plan for the goal on a 0.0-1.0 scale; "
@@ -397,8 +413,11 @@ class ABMCTSPlanner:
             pr = _json.loads(content)
             s, j = float(pr.get("score", 0.0)), str(pr.get("justification", ""))
             self._score_cache[key] = (s, j)
+            if self._score_ttl > 0:
+                self._score_cache_ts[key] = _time.monotonic()
             if len(self._score_cache) > self._score_cache_max:
-                self._score_cache.popitem(last=False)
+                evicted_key, _ = self._score_cache.popitem(last=False)
+                self._score_cache_ts.pop(evicted_key, None)
             return s, j
         except Exception:  # noqa: BLE001
             return 0.0, "score_failed"

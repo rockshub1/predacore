@@ -106,6 +106,10 @@ class SecurityConfig:
     blocked_tools: list[str] = field(default_factory=list)
     max_concurrent_tasks: int = 50       # raised 5 → 50 per "remove all limits"
     task_timeout_seconds: int = 3600     # raised 300 → 3600 per "remove all limits"
+    # When True, the gateway rejects unauthenticated WebSocket / HTTP API requests.
+    # Default False matches local single-user dev; flip to True for any shared
+    # environment and configure either PREDACORE_JWT_SECRET or an API key.
+    require_auth: bool = False
 
 
 @dataclass
@@ -263,6 +267,21 @@ class OperatorsConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Session-store and per-turn context-window settings.
+
+    These match the constants on `Session` (sessions.py); when set, they
+    override the class-level defaults via `Session.__post_init__`. Used to
+    let operators tune session retention and context-window packing without
+    editing the source.
+    """
+
+    max_session_messages: int = 0  # 0 = use class default
+    context_max_history_tokens: int = 0
+    context_keep_recent_messages: int = 0
+
+
+@dataclass
 class PredaCoreConfig:
     """Master configuration for PredaCore."""
 
@@ -287,6 +306,7 @@ class PredaCoreConfig:
     launch: LaunchProfileConfig = field(default_factory=LaunchProfileConfig)
     openclaw: OpenClawBridgeConfig = field(default_factory=OpenClawBridgeConfig)
     operators: OperatorsConfig = field(default_factory=OperatorsConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
 
     # ── MCP (Model Context Protocol) servers ──
     # Each entry: {"name": "...", "command": [...] | "...", "env": {}, "cwd": "...", "disabled": false}
@@ -513,6 +533,7 @@ def _env_overrides() -> dict[str, Any]:
                 "retry_backoff_seconds",
                 "poll_interval_seconds",
                 "persona_drift_threshold",
+                "sleep_max_seconds",
             ):
                 current[final_key] = _safe_float(value)
             elif final_key in (
@@ -525,6 +546,13 @@ def _env_overrides() -> dict[str, Any]:
                 "timeout_seconds",
                 "max_retries",
                 "max_poll_seconds",
+                "macro_max_steps",
+                "macro_max_depth",
+                "ax_default_depth",
+                "ax_max_depth",
+                "ax_max_children",
+                "screenshot_max_b64_bytes",
+                "scroll_max_amount",
             ):
                 current[final_key] = _safe_int(value)
             elif final_key in (

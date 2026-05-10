@@ -100,9 +100,21 @@ async def scheduler_tick(daf_service, egm_stub, logger) -> None:
     instances = await daf_service.agent_instance_registry.list_instances()
     state = _fmt_state(agent_types, instances)
 
-    # Limits (basic defaults; later make configurable)
-    per_type_limit = {t["agent_type_id"]: 3 for t in agent_types}
-    total_limit = 3 * min(3, len(agent_types)) if agent_types else 3
+    # L49 (Phase 7): make limits env-configurable instead of hard-coded.
+    # Defaults preserve previous behavior (3 per type, 3*min(3,N) total).
+    try:
+        per_type_default = max(1, int(os.getenv("DAF_SCHEDULER_PER_TYPE_LIMIT", "3")))
+    except (TypeError, ValueError):
+        per_type_default = 3
+    try:
+        total_cap = int(os.getenv("DAF_SCHEDULER_TOTAL_LIMIT", "0"))
+    except (TypeError, ValueError):
+        total_cap = 0
+    per_type_limit = {t["agent_type_id"]: per_type_default for t in agent_types}
+    if total_cap > 0:
+        total_limit = total_cap
+    else:
+        total_limit = per_type_default * min(per_type_default, len(agent_types)) if agent_types else per_type_default
     limits = {"max_total": total_limit, "max_per_type": per_type_limit}
 
     plan = await propose_roster_diff(llm, state, limits)

@@ -64,6 +64,67 @@ _FORBIDDEN_KEYWORDS: frozenset[str] = frozenset({
     "format_disk",
 })
 
+# ── PR4 / CaMeL-lite: taint-flow egress tools ─────────────────────────
+#
+# Per [DeepMind CaMeL, Mar 2025, arxiv:2503.18813]: indirect prompt
+# injection exfiltrates data via the dual-purpose flow `untrusted_read →
+# trusted_sink`. CaMeL solves it provably with a Privileged Planner +
+# Quarantined Reader + capability-tracked Python interpreter. CaMeL-lite
+# (predacore-shaped) leverages PR2's datamarking — the DATA_MARKER token
+# is interleaved into every tool result the LLM sees. If the LLM later
+# emits a tool call whose args contain the marker, we know that arg
+# carries datamarked (= untrusted) provenance, and if the destination
+# tool is in the egress set below, the dispatcher blocks the flow.
+#
+# This catches the canonical exfiltration shape: `web_scrape → email_send`,
+# `read_file → channel_send`, `git_diff → memory_store`. It's not a
+# full capability tracker — a sufficiently determined LLM could
+# launder data through a paraphrase to strip the marker — but it
+# closes the obvious path with deterministic enforcement and zero LLM
+# overhead.
+_TAINT_EGRESS_TOOLS: frozenset[str] = frozenset({
+    # Disk persistence — untrusted data → durable storage
+    "write_file",
+    "memory_store",         # poisoning future recalls
+    # Code execution — untrusted data → arbitrary behavior
+    "run_command",
+    "python_exec",
+    "execute_code",
+    # Network egress — untrusted data → external systems
+    "channel_send",
+    "twilio_send", "slack_send", "discord_send", "email_send",
+    "api_call",             # arbitrary endpoint
+    "web_scrape",           # POST body or URL params can exfil
+    "openclaw_delegate",    # cross-LLM proxy
+    # Identity write — untrusted data → agent's persistent self
+    "identity_update",
+    "journal_append",
+})
+
+
+def _scan_args_for_taint(args: Any, marker: str) -> list[str]:
+    """Recursive walk of tool args; return arg-paths that contain `marker`.
+
+    Used by `_enforce_taint_check` to detect datamarked content flowing
+    into egress sinks. Path notation: `key.subkey[2].field` so the user
+    sees exactly which arg is tainted.
+    """
+    found: list[str] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            if marker in node:
+                found.append(path or "<root>")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                _walk(v, f"{path}[{i}]")
+
+    _walk(args, "")
+    return found
+
 
 def _check_ethical_compliance(
     tool_name: str, args: dict[str, Any], trust_level: str,
@@ -257,6 +318,178 @@ class ToolDispatcher:
         # Middleware stack (optional — pluggable pre/post hooks)
         self._middleware = middleware or MiddlewareStack()
 
+        # PR2 (W1): SkillCrystallizer auto-observe. Counts dispatch
+        # completions and fires the crystallizer's observe() every N=10
+        # calls. The crystallizer detects recurring tool patterns
+        # (≥3 occurrences across distinct contexts, ≥80% success rate)
+        # and surfaces them as crystallization candidates that the user
+        # can endorse via the existing skill_evolve tool. The
+        # infrastructure was wired in PR1; this is what makes it auto-fire.
+        self._dispatch_count: int = 0
+        self._observe_every_n: int = 10
+        # Track patterns we've already announced so we don't spam logs
+        # the same crystallizable pattern every time we re-observe.
+        self._announced_patterns: set[str] = set()
+
+        # Monkey-patch ExecutionHistory.record so every record completion
+        # fires _maybe_observe_skills(). One insertion vs editing the 6
+        # record() call sites scattered through dispatch(). The wrapped
+        # method preserves the original signature exactly.
+        try:
+            _original_record = self._execution_history.record
+
+            def _wrapped_record(*args: Any, **kwargs: Any) -> None:
+                _original_record(*args, **kwargs)
+                try:
+                    self._maybe_observe_skills()
+                except Exception as _obs_exc:  # noqa: BLE001 — observe is non-critical
+                    logger.debug("Skill auto-observe hook failed: %s", _obs_exc)
+
+            self._execution_history.record = _wrapped_record  # type: ignore[method-assign]
+        except (AttributeError, TypeError) as exc:
+            logger.debug("Could not install skill auto-observe hook: %s", exc)
+
+    async def _enforce_taint_check(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        confirm_fn: Callable | None,
+        mw_ctx: MiddlewareContext,
+        origin: str,
+    ) -> str | None:
+        """PR4 (CaMeL-lite): block datamarked tool output flowing into egress.
+
+        Returns:
+          - None to allow dispatch to proceed
+          - A refusal string to short-circuit dispatch (becomes the tool result)
+
+        The check is precise (substring match on `DATA_MARKER` from PR2's
+        spotlighting) and fail-open (skips silently if `auth.security`
+        isn't importable, e.g. test environments without the security
+        module). Blocked calls are recorded to `_execution_history` so
+        the user can audit them.
+        """
+        if tool_name not in _TAINT_EGRESS_TOOLS:
+            return None
+        try:
+            from predacore.auth.security import DATA_MARKER
+        except ImportError:
+            return None
+        tainted_paths = _scan_args_for_taint(arguments, DATA_MARKER)
+        if not tainted_paths:
+            return None
+
+        taint_msg = (
+            f"CaMeL-lite taint detected: tool '{tool_name}' received "
+            f"datamarked content (originally from a prior tool output) "
+            f"in arg(s): {', '.join(tainted_paths[:5])}. "
+            "This is the canonical indirect-prompt-injection exfiltration "
+            "pattern."
+        )
+        logger.warning(taint_msg)
+
+        # No confirm_fn → refuse outright. Tell the LLM exactly what to do
+        # to recover so it can re-issue the call with cleaned data.
+        if confirm_fn is None:
+            refusal = (
+                f"[CaMeL-lite refused {tool_name}] {taint_msg}\n\n"
+                "To proceed:\n"
+                "1. Strip the datamarker tokens from the args — the "
+                "intended payload should be YOUR synthesis of the tool "
+                "output, not the verbatim datamarked content.\n"
+                "2. If the verbatim content really is what you want to "
+                "send, ask the user to confirm explicitly before re-issuing."
+            )
+            mw_ctx.status = "blocked"
+            mw_ctx.result = refusal
+            self._execution_history.record(
+                tool_name, arguments, refusal,
+                "blocked", 0, origin,
+            )
+            await self._middleware.run_after(mw_ctx)
+            return refusal
+
+        # confirm_fn available → ask the user. The risk context tells
+        # them which args are tainted so they can make an informed call.
+        try:
+            approved = await confirm_fn(
+                tool_name,
+                arguments,
+                {
+                    "risk": "tainted_egress",
+                    "reason": taint_msg,
+                    "tainted_paths": tainted_paths[:5],
+                    "tool": tool_name,
+                },
+            )
+        except TypeError:
+            approved = await confirm_fn(tool_name, arguments)
+
+        if not approved:
+            refusal = (
+                f"[Tool '{tool_name}' blocked by user — tainted egress "
+                "refused. The data flowing into this tool came from a "
+                "prior tool output (datamarked) and the user did not "
+                "approve forwarding it.]"
+            )
+            mw_ctx.status = "blocked"
+            mw_ctx.result = refusal
+            self._execution_history.record(
+                tool_name, arguments, refusal,
+                "blocked", 0, origin,
+            )
+            await self._middleware.run_after(mw_ctx)
+            return refusal
+
+        # Approved — log it for audit trail and proceed.
+        logger.info(
+            "Tainted egress %s APPROVED by user (paths=%s)",
+            tool_name, tainted_paths[:3],
+        )
+        return None
+
+    def _maybe_observe_skills(self) -> None:
+        """PR2 (W1): every Nth dispatch, feed recent execution records to
+        SkillCrystallizer.observe(). Crystallizable patterns get logged
+        once (de-duplicated via `_announced_patterns`) so the user knows
+        which workflows are ready for `skill_evolve` endorsement.
+
+        No-op if the crystallizer isn't wired in ToolContext (stub-ctx
+        tests, or prod runs where the vendor module failed to import).
+        """
+        self._dispatch_count += 1
+        if self._dispatch_count % self._observe_every_n != 0:
+            return
+        crystallizer = getattr(self._tool_ctx, "skill_crystallizer", None)
+        if crystallizer is None:
+            return
+        try:
+            recent = self._execution_history.recent(20)
+            if not recent:
+                return
+            crystallizer.observe(recent)
+            crystallizable = crystallizer.find_crystallizable()
+            if not crystallizable:
+                return
+            new_announcements: list[str] = []
+            for pattern in crystallizable:
+                key = "|".join(pattern.tool_sequence)
+                if key not in self._announced_patterns:
+                    self._announced_patterns.add(key)
+                    new_announcements.append(
+                        f"{key} (×{pattern.occurrences}, "
+                        f"{pattern.success_rate:.0%} success)"
+                    )
+            if new_announcements:
+                logger.info(
+                    "SkillCrystallizer: %d new crystallizable pattern(s) — "
+                    "invoke `skill_evolve` to inspect/endorse: %s",
+                    len(new_announcements),
+                    "; ".join(new_announcements[:5]),
+                )
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            logger.debug("Skill observation cycle failed: %s", exc)
+
     # -- Public properties -------------------------------------------------
 
     @property
@@ -336,6 +569,20 @@ class ToolDispatcher:
             args=dict(arguments),  # copy so middleware can mutate safely
             origin=origin,
         )
+
+        # 1.5 — PR4 / CaMeL-lite taint check.
+        # If this tool is in `_TAINT_EGRESS_TOOLS` AND its args contain the
+        # PR2 `DATA_MARKER` token, the agent is forwarding datamarked
+        # (untrusted, externally-sourced) content into a high-stakes sink.
+        # That's the exfiltration shape. Block by default; require user
+        # confirmation if available; refuse outright if not.
+        # Method handles its own middleware after-hooks + history recording
+        # on refusal.
+        taint_refusal = await self._enforce_taint_check(
+            tool_name, arguments, confirm_fn, mw_ctx, origin,
+        )
+        if taint_refusal is not None:
+            return taint_refusal
 
         # 2. Rate limit
         rl = self._rate_backend.sliding_window_check(

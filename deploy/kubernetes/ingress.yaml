@@ -17,20 +17,6 @@ spec:
   - host: api.prometheus.ai
     http:
       paths:
-      - path: /daf
-        pathType: Prefix
-        backend:
-          service:
-            name: daf-service
-            port:
-              number: 50055
-      - path: /wil
-        pathType: Prefix
-        backend:
-          service:
-            name: wil-service
-            port:
-              number: 50054
       - path: /monitoring
         pathType: Prefix
         backend:
@@ -38,3 +24,16 @@ spec:
             name: grafana
             port:
               number: 3000
+
+# H33 + C6 cleanup notes (2026-05-07):
+# - The previous /daf and /wil rules pointed at retired services
+#   (daf-service ClusterIP and wil-service) — both removed when C6 deleted
+#   the standalone daf-service Deployment.
+# - If gRPC routes are reintroduced, do NOT put them in this Ingress: nginx
+#   ingress applies `nginx.ingress.kubernetes.io/backend-protocol: GRPC` to
+#   the WHOLE Ingress object, so mixing gRPC and HTTP backends in one
+#   Ingress is broken (the previous /daf, /wil routes were unreachable as
+#   gRPC because of this).
+# - Correct pattern: a separate Ingress (e.g. `prometheus-grpc-ingress`)
+#   with `nginx.ingress.kubernetes.io/backend-protocol: GRPC` annotation
+#   for the gRPC services, and keep this one for HTTP only.

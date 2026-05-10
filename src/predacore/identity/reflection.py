@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -21,7 +22,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Default: reflect every 20 conversations
-_DEFAULT_REFLECTION_INTERVAL = 20
+import os as _os
+# Wave 7: PREDACORE_REFLECTION_INTERVAL env override + lower default.
+# Old default was 20 — too slow for personal-use agent that should
+# learn from recent context. 10 fires reflection ~twice as often,
+# tightening the loop between observation and identity update.
+_DEFAULT_REFLECTION_INTERVAL = int(
+    _os.getenv("PREDACORE_REFLECTION_INTERVAL", "10"),
+)
 
 # Reflection prompt template — injected into an LLM call for self-assessment
 REFLECTION_PROMPT = """You are performing a periodic self-reflection on your identity and growth.
@@ -238,11 +246,39 @@ class ReflectionEngine:
         soul = self.engine.load_soul()
         user = self.engine.load_user()
         beliefs = self.engine.load_beliefs()
-        journal = self.engine.load_journal(max_entries=10)
 
+        # Wave 11 fix (2026-05-09): the reflection echo-chamber bug.
+        # JOURNAL.md is filled by reflection itself; reading its tail
+        # gives reflection only its own past summaries → "stable this
+        # cycle" perpetually even when real conversation has substance.
+        # Empirically verified in production: agent had 245 reflection
+        # cycles, 12 of them said "no session data" while DECISIONS.md
+        # had 2,943 lines of real per-turn reasoning.
+        #
+        # Fix: prefer DECISIONS.md tail (real per-turn reasoning) +
+        # recent conversation memories from UnifiedMemoryStore over
+        # JOURNAL.md alone. JOURNAL stays as a secondary signal so the
+        # agent still knows what it most recently CONCLUDED about
+        # itself, but real session content drives the core analysis.
+        journal = await self._load_real_session_content(
+            fallback_journal=self.engine.load_journal(max_entries=10),
+        )
+
+        # S5 (PR2): allow reflection on a name-less workspace. The first
+        # ~20 conversations of a fresh agent used to silently skip
+        # reflection because IDENTITY.md was empty (the seed default).
+        # That meant the agent had ZERO reflection cycles during exactly
+        # the period where the relationship is forming. Now: substitute a
+        # placeholder so the LLM reflection prompt still runs — it can
+        # propose name + first-portrait based on observed conversation
+        # patterns, which the user can accept via identity_update.
         if not identity:
-            logger.warning("No identity found — skipping reflection")
-            return False
+            identity = (
+                "(IDENTITY.md not yet written — agent is in first-cycles "
+                "stage. Reflection should focus on: have I been named yet, "
+                "what shape is this conversation taking, what should go "
+                "into my first IDENTITY.md draft based on what I've seen.)"
+            )
 
         if llm_fn is not None:
             # LLM-driven reflection
@@ -254,13 +290,96 @@ class ReflectionEngine:
                 logger.error("LLM reflection failed: %s", e)
                 # Fall through to simple reflection
 
-        # Simple reflection — just log a journal entry
-        self.engine.append_journal(
-            f"Reflection checkpoint (conversation #{self._conversation_count}). "
-            f"Identity stable. No LLM reflection available."
+        # S3 (PR2): when no LLM is available, DON'T journal a vacuous
+        # "Identity stable. No LLM available." entry — those crowd out
+        # real reflection across weeks. Just log + bump the counter
+        # silently. Real reflection resumes the next cycle when LLM
+        # is available.
+        logger.info(
+            "Reflection cycle #%d skipped — no LLM available "
+            "(not journaling vacuous entry)",
+            self._conversation_count,
         )
         self._last_reflection_time = time.time()
         return True
+
+    async def _load_real_session_content(
+        self, fallback_journal: str = "", max_chars: int = 8000,
+    ) -> str:
+        """Load REAL conversation content for reflection — NOT JOURNAL.md tail.
+
+        JOURNAL.md is filled by reflection's own summaries, so reading it
+        back creates an echo chamber: reflection sees only "stable this
+        cycle" entries and concludes "stable" again forever.
+
+        Sources, in order of authority:
+          1. UnifiedMemoryStore conversation memories (15 most recent;
+             these contain the actual `User: ... PredaCore: ...` turns)
+          2. DECISIONS.md tail (per-turn reasoning trace; legible)
+          3. JOURNAL.md tail (legacy fallback — echo-prone, last resort)
+
+        Returns a combined block. Always non-empty when any source has
+        content; falls through to ``fallback_journal`` only when all
+        primary sources are empty.
+        """
+        sections: list[str] = []
+        chars_remaining = max_chars
+
+        # Source 1: UnifiedMemoryStore conversation memories
+        store = getattr(self.engine, "unified_memory", None)
+        if store is not None and chars_remaining > 500:
+            try:
+                memories = await store.get_all_memories(
+                    memory_type="conversation",
+                    limit=20,
+                )
+                memories = sorted(
+                    memories or [],
+                    key=lambda m: str(m.get("created_at", "")),
+                    reverse=True,
+                )[:15]
+                conv_lines: list[str] = []
+                used = 0
+                for m in memories:
+                    snippet = (m.get("content") or "").strip()
+                    if not snippet:
+                        continue
+                    if used + len(snippet) > chars_remaining // 2:
+                        break
+                    conv_lines.append(snippet)
+                    used += len(snippet)
+                if conv_lines:
+                    sections.append(
+                        "## Recent conversation memories (semantic store)\n\n"
+                        + "\n\n---\n\n".join(conv_lines)
+                    )
+                    chars_remaining -= used
+            except (RuntimeError, OSError, AttributeError, ValueError) as exc:
+                logger.debug("Conversation memory recall for reflection failed: %s", exc)
+
+        # Source 2: DECISIONS.md tail (per-turn reasoning)
+        decisions_path = self.engine.workspace / "DECISIONS.md"
+        if decisions_path.exists() and chars_remaining > 500:
+            try:
+                content = decisions_path.read_text(encoding="utf-8")
+                if len(content) > chars_remaining:
+                    # Take the LAST chars_remaining worth — most recent turns
+                    content = "...\n" + content[-(chars_remaining - 100):]
+                sections.append(
+                    "## Recent decisions (DECISIONS.md tail — per-turn reasoning)\n\n"
+                    + content
+                )
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("DECISIONS.md read for reflection failed: %s", exc)
+
+        # Source 3: JOURNAL.md tail (legacy fallback — only when nothing else)
+        if not sections and fallback_journal:
+            sections.append(
+                "## Past reflection summaries (JOURNAL.md tail)\n\n"
+                + fallback_journal
+            )
+
+        return "\n\n".join(sections)
 
     async def _llm_reflection(
         self,
@@ -280,7 +399,18 @@ class ReflectionEngine:
             journal_content=journal or "(no entries yet)",
         )
 
-        response = await llm_fn(prompt)
+        # L61 (Wave 8): hard timeout on the reflection LLM call. A hanging
+        # provider would otherwise block reflection forever and (with the
+        # fixed reflection-counter) forever block the next cycle. 120s is
+        # generous — reflection prompts are ~2-5k tokens, well under most
+        # providers' p99.
+        try:
+            response = await asyncio.wait_for(llm_fn(prompt), timeout=120.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Reflection LLM call timed out after 120s — skipping this cycle",
+            )
+            return False
         if not response:
             return False
 
@@ -293,6 +423,21 @@ class ReflectionEngine:
             self._last_reflection_time = time.time()
             return True
 
+        return await self._apply_reflection_result(result, journal_response=response)
+
+    async def _apply_reflection_result(
+        self,
+        result: dict,
+        *,
+        journal_response: str = "",
+    ) -> bool:
+        """Apply a parsed reflection JSON to identity files / belief store.
+
+        ``journal_response`` is
+        the raw response text — used to fall back to journaling the raw
+        reply if the JSON is missing both ``journal_entry`` and
+        ``growth_notes``.
+        """
         # Apply SOUL / USER updates (with reason for evolution log)
         if result.get("soul_update"):
             self.engine.write_identity_file(

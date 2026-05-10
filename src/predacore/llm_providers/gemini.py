@@ -170,12 +170,22 @@ class GeminiProvider(LLMProvider):
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = max_tokens if max_tokens is not None else self.config.max_tokens
 
+        # M38 (Wave 7): the previous heuristic guessed "if config.api_key
+        # doesn't start with `sk-`, it must be Google's." That works today
+        # because Google keys are AIza-shaped, but it conflates legitimate
+        # Gemini-tier keys that happen to start with sk-. Resolution order:
+        #   1. GEMINI_API_KEY / GOOGLE_API_KEY env (explicit, most reliable)
+        #   2. config.gemini_api_key (provider-scoped — preferred over the
+        #      generic config.api_key when both are present)
+        #   3. config.api_key (legacy generic field; always trusted now —
+        #      whatever shape the user supplied is what we send)
         api_key = (
             os.getenv("GEMINI_API_KEY", "")
             or os.getenv("GOOGLE_API_KEY", "")
+            or getattr(self.config, "gemini_api_key", "")
+            or self.config.api_key
+            or ""
         )
-        if not api_key and self.config.api_key and not self.config.api_key.startswith("sk-"):
-            api_key = self.config.api_key
 
         oauth_token = None
         if not api_key:

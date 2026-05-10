@@ -131,7 +131,9 @@ class EmailAdapter(ChannelAdapter):
             self._idle_task.cancel()
             try:
                 await self._idle_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                raise  # M27 Wave 7: re-raise to propagate parent cancellation
+            except Exception:
                 pass
         logger.info("Email adapter stopped")
 

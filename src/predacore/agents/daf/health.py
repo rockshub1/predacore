@@ -1,7 +1,5 @@
 """
 Simple health/readiness checks for DAF components.
-
-Moved from src/daf/health.py into dynamic_agent_fabric/ as the canonical location.
 """
 from typing import Any
 

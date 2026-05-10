@@ -140,8 +140,10 @@ class ChannelRegistry:
             try:
                 cls = ep.load()
             except (ImportError, AttributeError, ModuleNotFoundError) as exc:
+                # M29 (Wave 7): repr() the EP value so an attacker-controlled
+                # third-party package can't inject log-forging newlines.
                 logger.warning(
-                    "Channel entry point %s=%s failed to load: %s",
+                    "Channel entry point %s=%r failed to load: %s",
                     ep.name, getattr(ep, "value", "?"), exc,
                 )
                 continue

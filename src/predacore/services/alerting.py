@@ -122,6 +122,12 @@ class SlackDispatcher:
         return self._post(payload)
 
     def _post(self, payload: dict) -> bool:
+        # M16 (Wave 7): SSRF guard — env-supplied webhook URL could point at
+        # internal hosts (cloud metadata 169.254.169.254, RFC1918, etc.) if
+        # misconfigured or compromised. Mirror WebhookDispatcher's policy.
+        if not _is_safe_url(self.webhook_url):
+            logger.error("Slack dispatch blocked — unsafe URL: %s", self.webhook_url)
+            return False
         try:
             data = json.dumps(payload).encode("utf-8")
             req = Request(
@@ -178,6 +184,12 @@ class PagerDutyDispatcher:
             },
         }
 
+        # M16 (Wave 7): EVENTS_URL is hard-coded to events.pagerduty.com so
+        # the URL itself isn't attacker-controllable, but apply _is_safe_url
+        # anyway to defend against a future config-driven override.
+        if not _is_safe_url(self.EVENTS_URL):
+            logger.error("PagerDuty dispatch blocked — unsafe URL: %s", self.EVENTS_URL)
+            return False
         try:
             data = json.dumps(payload).encode("utf-8")
             req = Request(
@@ -359,6 +371,10 @@ class DiscordDispatcher:
         return self._post(payload)
 
     def _post(self, payload: dict) -> bool:
+        # M16 (Wave 7): mirror WebhookDispatcher SSRF guard.
+        if not _is_safe_url(self.webhook_url):
+            logger.error("Discord dispatch blocked — unsafe URL: %s", self.webhook_url)
+            return False
         try:
             data = json.dumps(payload).encode("utf-8")
             req = Request(

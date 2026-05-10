@@ -74,13 +74,20 @@ class DAFTaskResult:
 
 @dataclass
 class DAFBridgeConfig:
-    """Configuration for the DAF bridge."""
+    """Configuration for the DAF bridge.
+
+    N21 (2026-05-08): documenting defaults — DAF is OFF for 1-2 agents
+    (`min_agents_for_daf=3`) and `prefer_daf=False` means in-process
+    wins unless explicitly escalated. This matches the orchestrator's
+    workload-class routing rule: in-process for I/O-bound work; DAF
+    only for untrusted skills, ≥60s background, deploy, crash isolation.
+    """
 
     enabled: bool = True
     grpc_target: str = "localhost:50051"
     timeout_seconds: float = 120.0
-    prefer_daf: bool = False  # If True, prefer DAF over in-process; if False, only use DAF for heavy tasks
-    min_agents_for_daf: int = 3  # Only use DAF when >= this many agents needed
+    prefer_daf: bool = False  # In-process is default; DAF is escalation only
+    min_agents_for_daf: int = 3  # Only batch to DAF for ≥3-agent fan-outs
 
 
 class DAFBridge:
@@ -116,17 +123,27 @@ class DAFBridge:
 
         try:
             import grpc
-            use_tls = os.getenv("GRPC_USE_TLS", "").lower() in ("1", "true")
-            if not use_tls and not self.config.grpc_target.startswith("localhost"):
-                logger.warning(
-                    "gRPC using insecure_channel to non-local target %s — "
-                    "set GRPC_USE_TLS=1 for production",
-                    self.config.grpc_target,
+            # M42 (Wave 7): mirror agent_process.py policy — auto-promote
+            # to TLS for non-local targets. The previous code only warned;
+            # now it enforces, matching the worker's behavior.
+            target = self.config.grpc_target
+            is_local = (
+                target.startswith("localhost") or
+                target.startswith("127.0.0.1") or
+                target.startswith("[::1]")
+            )
+            use_tls_env = os.getenv("GRPC_USE_TLS", "").lower() in ("1", "true")
+            use_tls = use_tls_env or not is_local
+            if use_tls and not use_tls_env:
+                logger.info(
+                    "gRPC auto-promoting to TLS for non-local target %s "
+                    "(set GRPC_USE_TLS=0 to override — only safe inside a service mesh)",
+                    target,
                 )
             if use_tls:
-                channel = grpc.secure_channel(self.config.grpc_target, grpc.ssl_channel_credentials())
+                channel = grpc.secure_channel(target, grpc.ssl_channel_credentials())
             else:
-                channel = grpc.insecure_channel(self.config.grpc_target)
+                channel = grpc.insecure_channel(target)
             # Quick connectivity check — use a short timeout to avoid blocking the event loop
             try:
                 grpc.channel_ready_future(channel).result(timeout=0.5)
@@ -205,7 +222,16 @@ class DAFBridge:
 
         results: list[DAFTaskResult] = []
 
-        # Map PredaCore roles to DAF agent types (extensible via config)
+        # Map PredaCore roles to DAF agent types.
+        # L46 (Phase 7): the static-backend table is intentional — DAF
+        # workers either run the rich-runtime branch (when agent_spec_json
+        # is supplied → full AgentEngine inside the worker; the role is
+        # honored via the spec's base_type/specialization), OR they run
+        # the static `web_searcher` backend (the only backend wired to
+        # WIL today). All roles routing to web_searcher reflects the
+        # latter path: no specialized backend exists per role yet.
+        # When operators add per-role DAF backends, override via
+        # `config.role_type_overrides`.
         role_to_type = {
             "analyst": "web_searcher",
             "researcher": "web_searcher",

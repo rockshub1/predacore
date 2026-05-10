@@ -166,6 +166,21 @@ class IdempotencyStore:
     def path(self) -> Path:
         return self._db_path
 
+    def close(self) -> None:
+        """Close the SQLite connection (M40 Wave 7).
+
+        Idempotent — safe to call repeatedly. Previously the connection
+        was opened in `__init__` and never closed; long-running daemons
+        leaked the handle. Caller chain:
+            ``OpenClawBridgeRuntime.close`` → ``IdempotencyStore.close``
+        """
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except (sqlite3.Error, OSError):
+                pass
+            self._conn = None
+
     async def init_schema(self) -> None:
         """Create the idempotency table via the adapter (call once at startup)."""
         if self._db_adapter is not None:
@@ -320,13 +335,21 @@ class OpenClawBridgeRuntime:
         self._http_client: Any = None  # lazily created httpx.AsyncClient
 
     async def close(self) -> None:
-        """Close the HTTP client to prevent connection leaks."""
+        """Close the HTTP client and idempotency store to prevent leaks."""
         if self._http_client is not None:
             try:
                 await self._http_client.aclose()
             except (OSError, RuntimeError):
                 pass
             self._http_client = None
+        # M40 (Wave 7): close the SQLite connection that IdempotencyStore
+        # opened in its __init__ (was never being closed).
+        try:
+            store = getattr(self, "_idempotency", None)
+            if store is not None:
+                store.close()
+        except (AttributeError, sqlite3.Error):
+            pass
 
     @property
     def settings(self) -> OpenClawRuntimeSettings:
@@ -672,9 +695,36 @@ class OpenClawBridgeRuntime:
         return str(value).strip() if value else ""
 
     def _normalize_url(self, maybe_relative: str, base_url: str) -> str:
+        """Resolve a polling URL.
+
+        M41 (Wave 7): absolute URLs are now constrained to the SAME HOST as
+        ``base_url``. The previous implementation accepted any absolute
+        http(s) URL the upstream returned in `status_url`/`pollUrl`, and
+        the configured `Authorization` header would be sent to that host —
+        a compromised/malicious bridge could exfiltrate the bridge token
+        by responding with `pollUrl=https://attacker.example/...`. Now:
+          - Absolute URL with matching host → accepted (same-host ack)
+          - Absolute URL with DIFFERENT host → rejected, fall back to base
+          - Relative path → joined onto base (unchanged behavior)
+        """
         value = str(maybe_relative).strip()
         if value.startswith("http://") or value.startswith("https://"):
-            return value
+            try:
+                from urllib.parse import urlparse
+                base_host = urlparse(base_url).netloc.lower()
+                value_host = urlparse(value).netloc.lower()
+                if base_host and value_host and base_host == value_host:
+                    return value
+                logger.warning(
+                    "OpenClaw polling URL host mismatch: got %r, expected base %r — "
+                    "falling back to base+relative join to prevent token exfil",
+                    value_host, base_host,
+                )
+                # Strip the attacker-supplied scheme+host, keep just the path
+                return urljoin(base_url.rstrip("/") + "/", urlparse(value).path.lstrip("/"))
+            except (ValueError, AttributeError):
+                # Malformed URL — refuse and fall back
+                return base_url.rstrip("/") + "/"
         return urljoin(base_url.rstrip("/") + "/", value.lstrip("/"))
 
     def _find_nested_value(self, payload: Any, keys: tuple[str, ...]) -> Any | None:

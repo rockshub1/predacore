@@ -36,10 +36,30 @@ spec:
       labels:
         app: api-gateway
     spec:
+      # H29: pod-level securityContext — runs as non-root with no extra caps.
+      # Aligns with Pod Security Standard 'restricted' baseline.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api-gateway
-          image: predacore/api-gateway:latest
+          # H30: image tag is ':latest' — non-reproducible builds. Pin to a
+          # specific semver / digest before any production deploy. Kept here
+          # for now because the build pipeline that produces this image is
+          # outside this repo; pinning needs coordination with that pipeline.
+          image: predacore/api-gateway:latest  # TODO(H30): pin to digest @sha256:...
           imagePullPolicy: IfNotPresent
+          # H29: container-level hardening — drop all caps, read-only root fs.
+          # /tmp is mounted writable below for processes that need scratch space.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8080
               name: http-api
@@ -67,6 +87,12 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 
 ---
 apiVersion: autoscaling/v2
@@ -97,14 +123,12 @@ spec:
   podSelector:
     matchLabels:
       app: api-gateway
-  ingress:
-    - ports:
-        - protocol: TCP
-          port: 8080
-        - protocol: TCP
-          port: 8000
   policyTypes:
     - Ingress
+  # H31: merged single `ingress:` list (previous YAML had two `ingress:` keys
+  # at the same level — YAML keeps only the last one, so the bare-port allow
+  # block was silently dropped). Combined: monitoring namespace → :8000,
+  # internal namespace → :8080.
   ingress:
     - from:
         - namespaceSelector:

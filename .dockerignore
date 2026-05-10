@@ -1,0 +1,69 @@
+# M61 (Wave 7): only allow-list what Docker actually needs to build the image.
+# Without this, a future full-repo `COPY . .` would leak `.env`, tests, dist
+# artifacts, IDE state, and the Rust target tree into image layers.
+
+# --- Always exclude ---
+.git
+.github
+.gitignore
+.gitattributes
+.dockerignore
+
+# Secrets / env
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.crt
+~/.predacore
+.predacore
+
+# Python build artifacts
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+*.egg
+build
+dist
+htmlcov
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.tox
+
+# Virtual envs
+.venv
+venv
+ENV
+env
+
+# Tests + benchmarks (not needed in runtime image)
+tests
+benchmarks
+docs
+docs/audit
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Rust build artifacts
+target
+Cargo.lock
+*.rs.bk
+
+# Node / web
+node_modules
+*.log
+
+# Local data (would be huge if accidentally COPY'd)
+data
+~/.predacore

@@ -25,7 +25,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -137,7 +137,10 @@ class AuditLog:
 
     def count_today(self) -> int:
         """Count modifications applied today (UTC to match time.time() entries)."""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        # M46 (Wave 7): datetime.utcnow() is deprecated in 3.12+.
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        ).timestamp()
         entries = self.get_recent(limit=200)
         return sum(
             1

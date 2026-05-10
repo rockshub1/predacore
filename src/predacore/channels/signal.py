@@ -138,7 +138,9 @@ class SignalAdapter(ChannelAdapter):
             self._recv_task.cancel()
             try:
                 await self._recv_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                raise  # M27 Wave 7: re-raise to propagate parent cancellation
+            except Exception:
                 pass
         if self._client is not None:
             try:

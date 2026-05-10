@@ -688,7 +688,17 @@ class ToolPipeline:
                     "elapsed_ms": (time.time() - step_t0) * 1000,
                 }
 
-        tasks = [_run_step(i, s) for i, s in enumerate(parsed_steps)]
+        # M5 (Wave 7): cap fan-out concurrency. Unbounded `gather` over up
+        # to 200 dispatch calls instantly trips the dispatcher's 120-rps
+        # rate limit and per-tool circuit breakers. 16 concurrent steps
+        # keeps the dispatcher busy without saturating any single tool.
+        sem = asyncio.Semaphore(16)
+
+        async def _run_step_bounded(i: int, s: PipelineStep) -> dict[str, Any]:
+            async with sem:
+                return await _run_step(i, s)
+
+        tasks = [_run_step_bounded(i, s) for i, s in enumerate(parsed_steps)]
         results = await asyncio.gather(*tasks)
         results = list(results)  # type: ignore
 

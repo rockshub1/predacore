@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -191,10 +192,62 @@ def create_jwt_hs256(
 
 
 class APIKeyStore:
-    """In-memory API key store (production would use Redis/DB)."""
+    """API key store — in-memory by default, optional SQLite persistence.
 
-    def __init__(self) -> None:
+    M53 (Wave 7): pass ``db_path`` to enable SQLite-backed persistence.
+    Without it, restart blanks all keys (legacy behavior). With it, keys
+    survive daemon restarts and revocations are durable on crash.
+
+    Usage:
+        # Ephemeral (test / personal-use single-session)
+        store = APIKeyStore()
+
+        # Persistent (production / shared deployment)
+        store = APIKeyStore(db_path="~/.predacore/api_keys.db")
+    """
+
+    def __init__(self, db_path: str | None = None) -> None:
         self._keys: dict[str, APIKey] = {}
+        self._db_path: str | None = db_path
+        self._conn: sqlite3.Connection | None = None
+        if db_path:
+            self._init_persistence(db_path)
+
+    def _init_persistence(self, db_path: str) -> None:
+        """Open SQLite, create schema if missing, hydrate `_keys` from disk."""
+        from pathlib import Path
+        path = Path(db_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10.0)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                key_hash TEXT PRIMARY KEY,
+                key_id TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL DEFAULT 0,
+                rate_limit INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        self._conn.commit()
+        # Hydrate in-memory map from disk
+        rows = self._conn.execute(
+            "SELECT key_hash, key_id, owner, scopes_json, created_at, "
+            "expires_at, rate_limit, enabled FROM api_keys"
+        ).fetchall()
+        for h, kid, owner, scopes_json, created_at, expires_at, rate_limit, enabled in rows:
+            try:
+                scopes = json.loads(scopes_json) if scopes_json else []
+            except json.JSONDecodeError:
+                scopes = []
+            self._keys[h] = APIKey(
+                key_id=kid, key_hash=h, owner=owner, scopes=scopes,
+                created_at=created_at, expires_at=expires_at,
+                rate_limit=rate_limit, enabled=bool(enabled),
+            )
+        logger.info("APIKeyStore: loaded %d keys from %s", len(rows), path)
 
     @staticmethod
     def hash_key(raw_key: str) -> str:
@@ -209,19 +262,43 @@ class APIKeyStore:
         expires_at: float = 0.0,
         rate_limit: int = 0,
     ) -> APIKey:
-        """Register a new API key."""
+        """Register a new API key.
+
+        ``scopes`` MUST be an explicit non-empty list. Previously a missing
+        ``scopes`` argument silently granted ``["*"]`` (god-mode), so a
+        forgotten kwarg yielded a key with full permissions. Callers who
+        actually want a wildcard key must pass ``scopes=["*"]`` explicitly.
+        """
+        if scopes is None or not scopes:
+            raise ValueError(
+                "register_key requires an explicit non-empty scopes list. "
+                "Pass scopes=['*'] only if you really want a wildcard key."
+            )
         key_hash = self.hash_key(raw_key)
         key_id = key_hash[:12]
         api_key = APIKey(
             key_id=key_id,
             key_hash=key_hash,
             owner=owner,
-            scopes=scopes or ["*"],
+            scopes=list(scopes),
             expires_at=expires_at,
             rate_limit=rate_limit,
         )
         self._keys[key_hash] = api_key
-        logger.info(f"Registered API key {key_id} for {owner}")
+        if self._conn is not None:
+            try:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO api_keys "
+                    "(key_hash, key_id, owner, scopes_json, created_at, "
+                    "expires_at, rate_limit, enabled) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (key_hash, key_id, owner, json.dumps(list(scopes)),
+                     api_key.created_at, expires_at, rate_limit, 1),
+                )
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                logger.warning("APIKeyStore: persist register_key failed: %s", exc)
+        logger.info("Registered API key %s for %s (scopes=%s)", key_id, owner, scopes)
         return api_key
 
     def verify_key(self, raw_key: str) -> APIKey | None:
@@ -237,7 +314,16 @@ class APIKeyStore:
         for _key_hash, api_key in self._keys.items():
             if api_key.key_id == key_id:
                 api_key.enabled = False
-                logger.info(f"Revoked API key {key_id}")
+                if self._conn is not None:
+                    try:
+                        self._conn.execute(
+                            "UPDATE api_keys SET enabled = 0 WHERE key_id = ?",
+                            (key_id,),
+                        )
+                        self._conn.commit()
+                    except sqlite3.Error as exc:
+                        logger.warning("APIKeyStore: persist revoke_key failed: %s", exc)
+                logger.info("Revoked API key %s", key_id)  # N25 (Wave 8): lazy formatting
                 return True
         return False
 
@@ -254,6 +340,15 @@ class APIKeyStore:
             }
             for k in self._keys.values()
         ]
+
+    def close(self) -> None:
+        """Close the SQLite connection. Idempotent."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+            self._conn = None
 
 
 # ── Auth Middleware ───────────────────────────────────────────────────
@@ -289,6 +384,20 @@ class AuthMiddleware:
         self.require_auth = require_auth
         self.allowed_scopes = allowed_scopes
         self.key_store = APIKeyStore()
+        # M55 (Wave 7): when require_auth=True the operator obviously expects
+        # auth to actually work. Empty jwt_secret + no env override means
+        # JWT auth will fail per-request rather than at startup; surface
+        # that at construction so operators learn at boot, not at request 1.
+        # API-key-only deployments are still fine — they don't need a JWT
+        # secret. The check warns rather than raises so a key-only deploy
+        # doesn't hard-fail.
+        if require_auth and not self.jwt_secret:
+            logger.warning(
+                "AuthMiddleware: require_auth=True but jwt_secret is empty. "
+                "JWT authentication will fail for every request — only API "
+                "keys (registered via key_store.register_key) will work. "
+                "Set PREDACORE_JWT_SECRET to enable JWT auth.",
+            )
         self._auth_count: int = 0
         self._failure_count: int = 0
         # Brute-force protection: per-source failure timestamps
@@ -335,12 +444,17 @@ class AuthMiddleware:
         """
         self._auth_count += 1
 
-        # Derive source identifier for per-IP rate limiting
+        # M54 (Wave 7): use the LAST hop in `X-Forwarded-For`, not the first.
+        # The first hop is whatever the client claims (attacker-controlled).
+        # The last hop is the closest trusted proxy that touched the request.
+        # An attacker rotating headers per-request can't bypass the brute-
+        # force window because the trusted-proxy IP doesn't change.
+        # Fallback chain: XFF last → X-Real-Ip → _unknown.
+        xff = headers.get("x-forwarded-for", headers.get("X-Forwarded-For", ""))
+        xff_hops = [h.strip() for h in xff.split(",") if h.strip()]
         source = (
-            headers.get("x-forwarded-for", headers.get("X-Forwarded-For", ""))
-            .split(",")[0]
-            .strip()
-            or headers.get("x-real-ip", headers.get("X-Real-Ip", ""))
+            xff_hops[-1] if xff_hops
+            else headers.get("x-real-ip", headers.get("X-Real-Ip", ""))
             or "_unknown"
         )
 

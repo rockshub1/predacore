@@ -4,7 +4,9 @@ Implementation of the Hierarchical Strategic Planner (v1).
 import logging
 import re  # Import regex module
 
-# from .service import AbstractHierarchicalPlanner # Import the abstract class if defined separately
+# N15 (Wave 8): removed dead commented-out import
+# `# from .service import AbstractHierarchicalPlanner` — `service.py` is one
+# of the deleted vendor modules (intentional per project_vendor_migration).
 from dataclasses import dataclass, field  # Added dataclasses
 from typing import Any
 from uuid import UUID
@@ -69,13 +71,25 @@ class HierarchicalStrategicPlannerV1(AbstractHierarchicalPlanner):
         # don't need to change.
         self.kn_stub = None
         self.logger = logger or logging.getLogger(__name__)
-        # --- Existing spaCy loading ---
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-            self.logger.info("spaCy English model loaded for robust goal parsing.")
-        except Exception as e:
-            self.logger.warning(f"spaCy model not available: {e}")
-            self.nlp = None
+        # --- spaCy loading ---
+        # L36 (Wave 8): try the small model first, then md, then lg before
+        # falling through to the regex-only path. Previously a deploy that
+        # shipped en_core_web_md (still a valid English model) would
+        # silently degrade to regex with no operator hint.
+        self.nlp = None
+        for _model_name in ("en_core_web_sm", "en_core_web_md", "en_core_web_lg"):
+            try:
+                self.nlp = spacy.load(_model_name)
+                self.logger.info("spaCy English model loaded: %s", _model_name)
+                break
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("spaCy %s unavailable: %s", _model_name, e)
+        if self.nlp is None:
+            self.logger.warning(
+                "No spaCy English model installed (tried sm/md/lg). "
+                "Goal parsing falls back to regex. Install with: "
+                "python -m spacy download en_core_web_sm",
+            )
 
         # --- NEW: Define Primitive Tasks (actions that can be directly executed) ---
         self.primitive_tasks = {

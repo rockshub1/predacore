@@ -66,6 +66,14 @@ class MessagebirdAdapter(ChannelAdapter):
         bind_host = os.environ.get("PREDACORE_MESSAGEBIRD_BIND_HOST", "127.0.0.1")
         site = web.TCPSite(self._runner, bind_host, self._port)
         await site.start()
+        # MessageBird signs inbound webhooks with HMAC in `MessageBird-Signature` header.
+        # We currently DON'T verify it — any caller able to POST can spoof inbound
+        # messages and trigger LLM tool calls. Default bind is loopback.
+        logger.critical(
+            "MessageBird: webhook signature verification NOT implemented — "
+            "accepting all inbound POSTs. Listener bound to %s; do not tunnel "
+            "publicly without a verifying proxy.", bind_host,
+        )
         logger.info("MessageBird adapter started — port %d", self._port)
 
     async def stop(self) -> None:

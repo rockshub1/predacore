@@ -203,12 +203,34 @@ def raise_for_status(resp: httpx.Response) -> None:
 # ---------------------------------------------------------------------------
 
 
-def make_client(*, timeout: float = 600.0, **kwargs: Any) -> httpx.AsyncClient:
+def make_client(*, timeout: float = 600.0, base_url: str = "", **kwargs: Any) -> httpx.AsyncClient:
     """Create an ``httpx.AsyncClient`` with PredaCore-standard defaults.
 
     600s leaves enough headroom for long Anthropic thinking turns before
     any visible tokens arrive, avoiding false timeout failures.
+
+    M35 (Wave 7): when ``base_url`` is provided, refuse `http://` schemes
+    against any host other than `localhost`/`127.0.0.1`/`[::1]`. Provider
+    base URLs are operator-controlled config — a compromised env var
+    redirecting to `http://attacker.example/` would leak the API key in
+    the Authorization header. Localhost stays http-OK for ollama / local
+    dev servers.
     """
+    if base_url:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            if parsed.scheme == "http":
+                host = parsed.hostname or ""
+                if host not in {"localhost", "127.0.0.1", "::1"}:
+                    raise ValueError(
+                        f"Refusing http:// base_url for non-loopback host {host!r}. "
+                        "API keys travel in the Authorization header — only https:// "
+                        "is safe for non-local providers.",
+                    )
+        except (ValueError, AttributeError):
+            raise
+
     defaults: dict[str, Any] = {
         "timeout": httpx.Timeout(timeout, connect=30.0),
         "limits": httpx.Limits(max_connections=20, max_keepalive_connections=10),

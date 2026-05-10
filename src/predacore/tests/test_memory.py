@@ -992,8 +992,10 @@ class TestHealerRateBrake:
             store._conn.commit()
             healer = Healer(store, user="t", enabled=False)
             cap = healer._current_repair_cap()
+            # Wave 11: MAX_AUTO_REPAIRS_PER_HOUR raised 1,000 → 100,000.
+            # At 8,000 rows the floor (100k) now wins over row-scaled (1,600).
             assert cap == max(MAX_AUTO_REPAIRS_PER_HOUR, 8000 // 5)
-            assert cap == 1600
+            assert cap == MAX_AUTO_REPAIRS_PER_HOUR  # was hardcoded 1600 pre-Wave-11
         finally:
             store.close()
 

@@ -182,6 +182,13 @@ class MacDesktopOperator(BaseOperator):
         self._native_fallback_enabled = True
         self._ops_cfg = operators_config
         self._smart_input: SmartInputEngine | None = None
+        # M11 (Wave 7): pre-build the legacy dispatch table here under the
+        # GIL so two concurrent `execute()` calls from different threads
+        # can never race the lazy-init pattern that used to live in
+        # `_dispatch_action` (`AttributeError` → assign-on-first-call).
+        # Empty dict on non-macOS — health_check still works, real actions
+        # raise via the native-only path.
+        self._legacy_dispatch: dict[DesktopAction, Any] = {}
 
         allow_raw = str(os.getenv("PREDACORE_DESKTOP_ALLOWED_APPS", "")).strip()
         self._allowed_apps = {
@@ -294,6 +301,10 @@ class MacDesktopOperator(BaseOperator):
             try:
                 return self._native_service.execute(action=action, params=params)
             except DesktopNativeError as exc:
+                # M14 (Wave 7): preserve original exception class via `from
+                # exc` so callers' retry policies can still distinguish
+                # native vs other errors. The DesktopNativeError chain
+                # is on `__cause__`.
                 native_error = str(exc)
                 if action in NATIVE_ONLY_ACTIONS:
                     raise DesktopControlError(native_error) from exc
@@ -304,25 +315,28 @@ class MacDesktopOperator(BaseOperator):
                 if action in NATIVE_ONLY_ACTIONS or not self._native_fallback_enabled:
                     raise DesktopControlError(native_error) from exc
 
-        # Legacy fallback dispatch (cached on instance after first call)
-        try:
-            dispatch = self._legacy_dispatch
-        except AttributeError:
-            self._legacy_dispatch = {
-                DesktopAction.OPEN_APP: self._open_app,
-                DesktopAction.FOCUS_APP: self._focus_app,
-                DesktopAction.OPEN_URL: self._open_url,
-                DesktopAction.TYPE_TEXT: self._type_text,
-                DesktopAction.PRESS_KEY: self._press_key,
-                DesktopAction.MOUSE_MOVE: self._mouse_move,
-                DesktopAction.MOUSE_SCROLL: self._mouse_scroll,
-                DesktopAction.GET_MOUSE_POSITION: lambda _: self._get_mouse_position(),
-                DesktopAction.SCREENSHOT: self._screenshot,
-                DesktopAction.FRONTMOST_APP: lambda _: self._frontmost_app(),
-                DesktopAction.HEALTH_CHECK: lambda _: self.health_check(),
-                DesktopAction.SLEEP: self._sleep,
-            }
-            dispatch = self._legacy_dispatch
+        # M11 (Wave 7): legacy dispatch table populated lazily on first hit
+        # but under the class-level pyautogui lock so concurrent first calls
+        # from different threads can't race. Pre-init `__init__` planted an
+        # empty dict; the populate-once pattern below is safe to repeat.
+        if not self._legacy_dispatch:
+            with self._pyautogui_lock:
+                if not self._legacy_dispatch:
+                    self._legacy_dispatch = {
+                        DesktopAction.OPEN_APP: self._open_app,
+                        DesktopAction.FOCUS_APP: self._focus_app,
+                        DesktopAction.OPEN_URL: self._open_url,
+                        DesktopAction.TYPE_TEXT: self._type_text,
+                        DesktopAction.PRESS_KEY: self._press_key,
+                        DesktopAction.MOUSE_MOVE: self._mouse_move,
+                        DesktopAction.MOUSE_SCROLL: self._mouse_scroll,
+                        DesktopAction.GET_MOUSE_POSITION: lambda _: self._get_mouse_position(),
+                        DesktopAction.SCREENSHOT: self._screenshot,
+                        DesktopAction.FRONTMOST_APP: lambda _: self._frontmost_app(),
+                        DesktopAction.HEALTH_CHECK: lambda _: self.health_check(),
+                        DesktopAction.SLEEP: self._sleep,
+                    }
+        dispatch = self._legacy_dispatch
 
         handler = dispatch.get(action)
         if handler is not None:

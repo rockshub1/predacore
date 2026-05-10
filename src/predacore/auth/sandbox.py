@@ -306,8 +306,25 @@ class DockerSandboxManager(AbstractSandboxManager):
             )
             try:
                 exit_status = container.wait(timeout=timeout)
-                stdout = container.logs(stdout=True, stderr=False).decode("utf-8")
-                stderr = container.logs(stdout=False, stderr=True).decode("utf-8")
+                # M57 (Wave 7): cap container output at 1 MB per stream so a
+                # misbehaving container can't fill RAM by writing endlessly
+                # to stdout. The cap matches `SessionSandbox.execute`'s
+                # `max_output_bytes`. stream=True returns a generator we can
+                # truncate without materializing the full output.
+                _MAX_OUTPUT = 1_000_000
+                def _read_stream(stdout_flag: bool, stderr_flag: bool) -> str:
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in container.logs(
+                        stdout=stdout_flag, stderr=stderr_flag, stream=True,
+                    ):
+                        if total >= _MAX_OUTPUT:
+                            break
+                        chunks.append(chunk[: _MAX_OUTPUT - total])
+                        total += len(chunks[-1])
+                    return b"".join(chunks).decode("utf-8", errors="replace")
+                stdout = _read_stream(True, False)
+                stderr = _read_stream(False, True)
             except (DockerException, ConnectionError, OSError) as e:
                 self.logger.warning("Docker execution timed out: %s", e)
                 container.kill()
@@ -569,6 +586,10 @@ class SessionSandbox:
                 cmd,
                 capture_output=True,
                 text=True,
+                # L60 (Wave 8): explicit encoding so non-UTF-8 terminals
+                # don't yield UnicodeDecodeError on container output.
+                encoding="utf-8",
+                errors="replace",
                 timeout=effective_timeout,
             )
             elapsed = time.monotonic() - start_time
