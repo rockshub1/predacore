@@ -175,7 +175,7 @@ class WebChatAdapter(ChannelAdapter):
             content_type="text/html",
         )
 
-    async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
+    async def _websocket_handler(self, request: web.Request) -> web.StreamResponse:
         """Handle WebSocket connections for real-time chat."""
         # Reject new connections if at capacity
         if len(self._connections) >= self._max_connections:
@@ -183,6 +183,23 @@ class WebChatAdapter(ChannelAdapter):
             await ws.prepare(request)
             await ws.close(code=1013, message=b"Server at capacity")
             return ws
+
+        # Auth check (when require_auth=True). Browsers can't easily set
+        # custom Authorization headers on WS, so we also accept ?token=
+        # (Bearer JWT) and ?api_key= as query params.
+        gateway = self._gateway
+        if gateway is not None and getattr(gateway, "auth", None) is not None:
+            auth_headers = dict(request.headers)
+            qtoken = request.query.get("token", "").strip()
+            if qtoken and not auth_headers.get("Authorization") and not auth_headers.get("authorization"):
+                auth_headers["Authorization"] = f"Bearer {qtoken}"
+            qapi = request.query.get("api_key", "").strip()
+            if qapi and not auth_headers.get("x-api-key") and not auth_headers.get("X-Api-Key"):
+                auth_headers["x-api-key"] = qapi
+            auth_ctx = gateway.auth.authenticate(auth_headers)
+            if gateway.auth.require_auth and not auth_ctx.is_authenticated:
+                logger.warning("WebChat: rejecting unauthenticated WS connection from %s", request.remote)
+                return web.Response(status=401, text="Unauthorized")
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)

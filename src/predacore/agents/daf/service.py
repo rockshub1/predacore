@@ -131,6 +131,14 @@ class DynamicAgentFabricControllerService(
         self._retry_multiplier = 1.0
         self._self_opt_task: asyncio.Task | None = None
         self._self_optimizer: SelfOptimizer | None = None
+        # L50 (Phase 7): periodic reaper for crashed-without-retire workers.
+        # Without this, `_agent_processes` accumulates dead processes forever.
+        # Reaper sweeps every 30s, removes processes where is_alive() is False
+        # AND unregisters them from agent_instance_registry.
+        self._reaper_task: asyncio.Task | None = None
+        self._reaper_interval_seconds = max(
+            5, int(os.getenv("DAF_REAPER_INTERVAL_SECONDS", "30"))
+        )
         try:
             enabled = str(os.getenv("DAF_SELF_OPT_ENABLED", "1")).strip().lower()
             if enabled not in {"0", "false", "no", "off"}:
@@ -167,6 +175,52 @@ class DynamicAgentFabricControllerService(
         self._self_opt_task = asyncio.create_task(
             self._self_optimizer.start_monitoring()
         )
+
+    async def start_reaper(self) -> None:
+        """L50 (Phase 7): start periodic dead-process reaper."""
+        if self._reaper_task and not self._reaper_task.done():
+            return
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
+        self.logger.info(
+            "DAF dead-process reaper started (interval=%ds)",
+            self._reaper_interval_seconds,
+        )
+
+    async def stop_reaper(self) -> None:
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._reaper_task = None
+
+    async def _reaper_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._reaper_interval_seconds)
+                dead = [
+                    inst_id for inst_id, proc in list(self._agent_processes.items())
+                    if not proc.is_alive()
+                ]
+                for inst_id in dead:
+                    proc = self._agent_processes.pop(inst_id, None)
+                    if proc is not None:
+                        try:
+                            proc.join(timeout=0.5)
+                        except (OSError, multiprocessing.ProcessError):
+                            pass
+                    try:
+                        await self.agent_instance_registry.unregister_instance(inst_id)
+                    except (RuntimeError, KeyError, AttributeError):
+                        pass
+                    self.logger.warning(
+                        "L50 reaper removed dead agent instance: %s", inst_id
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001 — reaper boundary
+                self.logger.warning("DAF reaper iteration failed: %s", exc)
         self.logger.info("Started DAF self-optimization background loop")
 
     async def stop_self_optimization(self) -> None:
@@ -1076,8 +1130,12 @@ async def serve():
     daf_pb2_grpc.add_DynamicAgentFabricControllerServiceServicer_to_server(
         service_impl, server
     )
-    listen_addr = os.getenv("DAF_LISTEN_ADDR", "[::]:50055")
-    if os.getenv("GRPC_USE_TLS", "").lower() in ("1", "true"):
+    # M39 (Wave 7): default bind changed from [::]:50055 (all interfaces)
+    # to 127.0.0.1:50055. Anyone reachable on any host interface could
+    # otherwise hit the unauth gRPC server. Override via DAF_LISTEN_ADDR.
+    listen_addr = os.getenv("DAF_LISTEN_ADDR", "127.0.0.1:50055")
+    use_tls_requested = os.getenv("GRPC_USE_TLS", "").lower() in ("1", "true")
+    if use_tls_requested:
         _tls_cert = os.getenv("GRPC_TLS_CERT_PATH", "")
         _tls_key = os.getenv("GRPC_TLS_KEY_PATH", "")
         if _tls_cert and _tls_key:
@@ -1086,8 +1144,17 @@ async def serve():
             server.add_secure_port(listen_addr, _creds)
             logger.info("gRPC server using TLS on %s", listen_addr)
         else:
-            logger.warning("GRPC_USE_TLS set but GRPC_TLS_CERT_PATH/GRPC_TLS_KEY_PATH missing; falling back to insecure port")
-            server.add_insecure_port(listen_addr)
+            # M39 (Wave 7): if TLS was REQUESTED but certs are missing, that
+            # means the operator wanted secure transport — falling back to
+            # insecure was the wrong default. Fail closed instead.
+            logger.critical(
+                "GRPC_USE_TLS=1 requested but GRPC_TLS_CERT_PATH/GRPC_TLS_KEY_PATH "
+                "missing. Refusing to start gRPC server. Either set both env vars "
+                "or unset GRPC_USE_TLS to explicitly opt into insecure transport.",
+            )
+            raise RuntimeError(
+                "TLS requested but cert/key paths missing — refusing to start insecure",
+            )
     else:
         server.add_insecure_port(listen_addr)
     logger.info(

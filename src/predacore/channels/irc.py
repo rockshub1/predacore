@@ -103,7 +103,9 @@ class IrcAdapter(ChannelAdapter):
             self._connect_task.cancel()
             try:
                 await self._connect_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise  # M27 Wave 7: re-raise to propagate parent cancellation
+            except Exception:  # noqa: BLE001
                 pass
         logger.info("IRC adapter stopped")
 

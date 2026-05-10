@@ -308,7 +308,7 @@ BUILTIN_TOOLS_RAW = [
                             "start_network_log", "get_network_log", "clear_network_log",
                             "set_geolocation", "clear_geolocation",
                             "set_dialog_handler", "get_last_dialog",
-                            "set_auth_credentials", "clear_auth_credentials",
+                            "clear_auth_credentials",  # set_auth_credentials removed in Wave 3 (credential-leak)
                             "element_screenshot", "download_image", "capture_canvas",
                             "image_to_base64", "get_background_images", "get_svgs",
                             "get_page_links", "get_page_images",

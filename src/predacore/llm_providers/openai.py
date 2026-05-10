@@ -243,10 +243,8 @@ class OpenAIProvider(LLMProvider):
 
             # Legacy or non-tool turn — pass through, but strip our abstract
             # keys so they don't leak to the API.
+            # N17 (Wave 8): removed dead `if "tool_calls" in m and not m.get("tool_calls"): pass` branch — empty-list strip already excluded by the `passthrough` dict-comp above.
             passthrough = {k: v for k, v in m.items() if k not in ("tool_calls", "tool_results", "content_blocks")}
-            # Preserve content-only assistant/tool turns from legacy callers
-            if "tool_calls" in m and not m.get("tool_calls"):
-                pass  # empty list — no-op
             out.append(passthrough)
 
         return out

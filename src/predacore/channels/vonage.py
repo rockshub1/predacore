@@ -83,6 +83,15 @@ class VonageAdapter(ChannelAdapter):
         bind_host = os.environ.get("PREDACORE_VONAGE_BIND_HOST", "127.0.0.1")
         site = web.TCPSite(self._runner, bind_host, self._port)
         await site.start()
+        # Vonage signs inbound webhooks with HS256 JWT in `Authorization: Bearer ...`
+        # signed by the application's signing-secret. We currently DON'T verify it —
+        # any caller able to POST can spoof inbound messages and trigger LLM tool
+        # calls. Bind to 127.0.0.1 (default); do not expose publicly without verification.
+        logger.critical(
+            "Vonage: webhook signature verification NOT implemented — accepting "
+            "all inbound POSTs. Listener bound to %s; do not tunnel publicly without "
+            "a verifying proxy.", bind_host,
+        )
         logger.info("Vonage adapter started — listening on %s:%d/vonage/inbound", bind_host, self._port)
 
     async def stop(self) -> None:

@@ -231,13 +231,41 @@ class ChannelHealthRecord:
 
 # ── Channel Health Monitor ──────────────────────────────────────────
 
-# Default rate limits per platform (msgs/sec)
+# Default rate limits per platform (msgs/sec). M28 (Wave 7): expanded from
+# the original 5 entries to cover all 24 registered adapters, so the new
+# adapters (slack, signal, twilio, matrix, irc, etc.) stop silently
+# inheriting the 100/sec fallback that would get a bot suspended on
+# Slack's 1/sec limit or IRC's flood protection. Values come from each
+# platform's documented rate limits, with conservative defaults where
+# the limit is "varies by tier" or unclear.
 DEFAULT_RATE_LIMITS: dict[str, float] = {
-    "telegram": 30.0,  # Telegram: 30 msgs/sec global
-    "discord": 5.0,  # Discord: 5 msgs/sec per channel
-    "whatsapp": 80.0,  # WhatsApp Business: 80 msgs/sec
-    "webchat": 100.0,  # WebSocket — no platform limit, set a sane max
-    "cli": 1000.0,  # CLI — effectively unlimited
+    # Original (kept):
+    "telegram": 30.0,   # Telegram: 30 msgs/sec global
+    "discord": 5.0,     # Discord: 5 msgs/sec per channel
+    "whatsapp": 80.0,   # WhatsApp Business: 80 msgs/sec
+    "webchat": 100.0,   # WebSocket — no platform limit, set a sane max
+    "cli": 1000.0,      # CLI — effectively unlimited
+    # M28 additions:
+    "slack": 1.0,       # Slack: 1 msg/sec per workspace (Web API tier)
+    "signal": 1.5,      # signal-cli REST: ~1.5 msg/sec safe
+    "twilio": 1.0,      # Twilio SMS: 1 msg/sec default (long codes)
+    "matrix": 3.0,      # Matrix: ~3 msg/sec for most homeservers
+    "irc": 0.5,         # IRC: strict flood protection — 1 every 2s
+    "imessage": 5.0,    # iMessage local AppleScript — Mac-bound
+    "email": 0.2,       # Email: ~12/min safe to avoid spam-filter triggers
+    "mattermost": 10.0, # Mattermost self-hosted, gentle default
+    "rocketchat": 10.0, # RocketChat self-hosted
+    "mastodon": 5.0,    # Mastodon: API rate-limit varies by instance
+    "bluesky": 5.0,     # Bluesky: chat-proxy ~5 msg/sec
+    "vonage": 30.0,     # Vonage Messages API
+    "messagebird": 10.0,
+    "line": 30.0,       # LINE Messaging
+    "viber": 30.0,
+    "google_chat": 60.0,
+    "threema": 5.0,     # Threema Gateway
+    "zalo": 10.0,
+    "kakaotalk": 10.0,
+    "xmpp": 10.0,
 }
 
 # Error rate threshold for "degraded" status

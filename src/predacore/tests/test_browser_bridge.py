@@ -624,11 +624,14 @@ class TestGeolocation:
 
 class TestAuthCredentials:
     @pytest.mark.asyncio
-    async def test_set_and_clear_auth(self, bridge):
-        result = await bridge.set_auth_credentials(username="testuser", password="testpass")
-        assert result.get("ok")
+    async def test_clear_auth_idempotent(self, bridge):
+        # `set_auth_credentials` was removed in Wave 3 because it leaked
+        # base64(user:pass) into `window.__predacore_auth` (globally
+        # readable JS) while never wiring `Fetch.authRequired`. The clear
+        # path is kept and is safe to call even when nothing was set.
         result = await bridge.clear_auth_credentials()
         assert result.get("ok")
+        assert not hasattr(bridge, "set_auth_credentials")
 
 
 class TestImageOperations:

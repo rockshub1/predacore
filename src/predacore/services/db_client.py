@@ -95,8 +95,12 @@ class DBClient:
             try:
                 self._writer.close()
                 await self._writer.wait_closed()
-            except Exception:
+            except (OSError, asyncio.IncompleteReadError):
                 pass
+            except Exception as exc:
+                # L19 (Wave 8): narrowed except — log unexpected teardown
+                # errors at debug so socket bugs aren't completely hidden.
+                log.debug("DBClient close raised unexpected: %s", exc, exc_info=True)
             self._writer = None
             self._reader = None
             log.info("DBClient disconnected")

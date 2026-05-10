@@ -95,13 +95,24 @@ def is_model_present(model_dir: Path | str | None = None) -> bool:
     return False
 
 
+# M13 (Wave 7): allowlist for repos auto-pulled without explicit confirmation.
+# Any repo NOT in this set requires `PREDACORE_VISION_REPO_ACK=1` (an explicit
+# operator opt-in) before download. Prevents a poisoned env var like
+# `PREDACORE_VISION_MODEL_REPO=evil/repo` from silently pulling adversarial
+# weights that the Rust ONNX runtime then loads.
+_VISION_REPO_ALLOWLIST: frozenset[str] = frozenset({
+    "Samsung/TinyClick",  # default — small grounding model
+    "showlab/UGround",    # legacy default kept for back-compat
+})
+
+
 def download_model(
     *,
     model_dir: Path | str | None = None,
     repo: str = DEFAULT_MODEL_REPO,
     progress_cb: Callable[[str], None] | None = None,
 ) -> Path:
-    """Download the UGround weights into ``model_dir``. Returns the path.
+    """Download the TinyClick / UGround weights into ``model_dir``. Returns the path.
 
     Uses ``huggingface_hub.snapshot_download`` if available — that's the
     standard way every transformers user pulls weights, handles resume
@@ -109,9 +120,31 @@ def download_model(
     ``huggingface_hub`` isn't installed (it's lightweight; we don't bundle
     it since not every user wants the local-vision path).
 
+    M13 (Wave 7): repos outside the built-in allowlist require explicit
+    operator opt-in via ``PREDACORE_VISION_REPO_ACK=1``. Without that ack,
+    download is refused. Protects against env-var injection flowing into
+    HuggingFace pulls.
+
     Raises:
-        RuntimeError if huggingface_hub is missing or the download fails.
+        RuntimeError if huggingface_hub is missing, the download fails,
+        or the repo is not on the allowlist and ack env var is unset.
     """
+    if repo not in _VISION_REPO_ALLOWLIST:
+        if os.environ.get("PREDACORE_VISION_REPO_ACK", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                f"Vision repo {repo!r} is not in the built-in allowlist "
+                f"({sorted(_VISION_REPO_ALLOWLIST)}). To pull it anyway, set "
+                f"PREDACORE_VISION_REPO_ACK=1 to explicitly acknowledge the "
+                f"supply-chain risk.",
+            )
+        logger.warning(
+            "Vision repo %r is OUTSIDE the built-in allowlist. "
+            "Downloading because PREDACORE_VISION_REPO_ACK=1 is set. "
+            "Verify the repo is trustworthy — its weights load via the "
+            "Rust ONNX runtime.",
+            repo,
+        )
+
     target = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
     target.mkdir(parents=True, exist_ok=True)
 
@@ -136,9 +169,9 @@ def download_model(
             ignore_patterns=["*.md", "*.gif", "*.png", ".gitattributes"],
         )
     except Exception as exc:  # noqa: BLE001 — hub raises a wide bag
-        raise RuntimeError(f"UGround download failed: {exc}") from exc
+        raise RuntimeError(f"Vision-model download failed for {repo!r}: {exc}") from exc
     if progress_cb:
-        progress_cb(f"Downloaded UGround to {downloaded}")
+        progress_cb(f"Downloaded {repo} to {downloaded}")
     return Path(downloaded)
 
 

@@ -183,18 +183,33 @@ class Gateway:
         self._user_request_times: dict[str, list[float]] = {}
         self._user_rate_limit = USER_RATE_LIMIT_PER_MINUTE
         self._rate_limit_lock = asyncio.Lock()
-        # Auth middleware (enterprise) — active when JWT_SECRET or API keys configured.
+        # Auth middleware — always constructed so adapters (e.g. WebChat) can
+        # uniformly call self.auth.authenticate(...) regardless of whether
+        # auth is enforced. Behavior is governed by SecurityConfig.require_auth:
+        #   require_auth=False (default): authenticate() returns ANONYMOUS for
+        #     credential-less requests; adapters allow the request through.
+        #   require_auth=True: authenticate() returns an empty (un-authenticated)
+        #     context unless JWT or API key is provided; adapters MUST reject.
         import os
 
         jwt_secret = os.getenv("PREDACORE_JWT_SECRET", "")
-        require_auth = bool(config.security.require_auth) if hasattr(config.security, "require_auth") else False
-        self.auth = AuthMiddleware(jwt_secret=jwt_secret) if jwt_secret else None
-        if self.auth:
-            logger.info("Gateway auth middleware enabled (JWT)")
-        elif not jwt_secret and require_auth:
+        require_auth = bool(getattr(config.security, "require_auth", False))
+        self.auth = AuthMiddleware(jwt_secret=jwt_secret, require_auth=require_auth)
+        if require_auth and not jwt_secret:
             logger.warning(
-                "SECURITY: JWT_SECRET not configured but auth is required "
-                "— API endpoints are UNPROTECTED"
+                "SECURITY: security.require_auth=True but PREDACORE_JWT_SECRET is not set. "
+                "Only API-key requests will be accepted; configure a JWT secret or register "
+                "an API key via gateway.auth.key_store.register_key().",
+            )
+        elif require_auth:
+            logger.info("Gateway auth enforced (require_auth=True)")
+        else:
+            # Default local-dev posture. Loud WARNING (not INFO) so the user
+            # sees this on every daemon start and can't accidentally ship it.
+            logger.warning(
+                "SECURITY: gateway auth NOT enforced (security.require_auth=False). "
+                "WebSocket and HTTP API are reachable without credentials. OK for local "
+                "single-user dev; set security.require_auth=true for any shared environment.",
             )
         logger.info("Gateway initialized")
 
@@ -266,6 +281,20 @@ class Gateway:
         self._running = True
         self._stats["start_time"] = time.time()
 
+        # M49 (Wave 7): warn loudly if the daemon forgot to inject the
+        # core's `OutcomeStore`. Gateway-level failures (LLM connection,
+        # unhandled exceptions) silently no-op outcome recording when this
+        # field is None, so operators never learn from those failures.
+        # Log at WARNING (not DEBUG) so it shows up at the default log
+        # level and surfaces a real wiring bug.
+        if self._outcome_store is None:
+            logger.warning(
+                "Gateway started without _outcome_store wired — gateway-level "
+                "failures (LLM connection errors, unhandled exceptions) will "
+                "NOT be recorded in outcomes.db. Daemon should inject "
+                "core._outcome_store after constructing the gateway.",
+            )
+
         # Start all channel adapters
         for name, adapter in self._channels.items():
             try:
@@ -298,29 +327,64 @@ class Gateway:
         )
 
     async def stop(self) -> None:
-        """Stop the gateway and all channels."""
+        """Stop the gateway and all channels.
+
+        Each subsystem is bounded by an individual timeout so that a single
+        hanging adapter (e.g. a browser bridge waiting on a closed CDP port)
+        cannot stall the whole shutdown past the daemon's 15s budget.
+        """
         self._running = False
 
-        # Stop health monitor
-        await self.health_monitor.stop_monitoring()
+        # Stop health monitor (bounded — should be fast)
+        try:
+            await asyncio.wait_for(self.health_monitor.stop_monitoring(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("HealthMonitor did not stop within 3s — skipping")
 
-        # Stop channels
-        for name, adapter in self._channels.items():
+        # Stop channels in parallel with a per-channel timeout. Sequential
+        # stops were unbounded, so any one hanging adapter blocked everything.
+        async def _stop_channel(name: str, adapter: ChannelAdapter) -> None:
             try:
-                await adapter.stop()
+                await asyncio.wait_for(adapter.stop(), timeout=3.0)
+                self.health_monitor.mark_stopped(name)
+            except asyncio.TimeoutError:
+                logger.warning("Channel %s did not stop within 3s — moving on", name)
                 self.health_monitor.mark_stopped(name)
             except (OSError, RuntimeError) as e:
                 logger.error("Error stopping channel %s: %s", name, e)
 
-        # Stop identity heartbeat
+        if self._channels:
+            await asyncio.gather(
+                *(_stop_channel(n, a) for n, a in list(self._channels.items())),
+                return_exceptions=True,
+            )
+
+        # Stop identity heartbeat (bounded)
         if hasattr(self, "_heartbeat"):
             try:
-                await self._heartbeat.stop()
+                await asyncio.wait_for(self._heartbeat.stop(), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning("Heartbeat did not stop within 3s — skipping")
             except (OSError, RuntimeError):
                 pass
 
-        # Shutdown lane queue
-        await self.lane_queue.shutdown()
+        # Shutdown lane queue (bounded)
+        try:
+            await asyncio.wait_for(self.lane_queue.shutdown(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("LaneQueue did not shutdown within 3s — skipping")
+
+        # H3: close any browser bridge still attached to the tool subsystem
+        # (Chrome CDP websocket + aiohttp session). Best-effort, bounded —
+        # if Chrome was killed externally the close call may dangle; we
+        # don't want it to keep gateway.stop() running past its budget.
+        try:
+            from .tools.handlers.desktop import shutdown_browser_bridge
+            await asyncio.wait_for(shutdown_browser_bridge(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("BrowserBridge did not shutdown within 3s — skipping")
+        except (ImportError, AttributeError):
+            pass
         logger.info("Gateway stopped")
 
     def _handle_model_command(

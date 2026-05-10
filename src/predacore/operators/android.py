@@ -828,12 +828,26 @@ class AndroidOperator(BaseOperator):
     _DANGEROUS_PATTERNS = (
         re.compile(r'\brm\s+(-\w+\s+)*/', re.I),
     )
+    # Shell-compound operators that let an attacker chain past the
+    # ``tokens[0] in _DANGEROUS_TOKENS`` check (which inspects only the
+    # first verb after shlex.split). Without this guard, ``echo x; reboot``
+    # or ``ls && pm uninstall com.target`` slip through and hit adb shell
+    # with full device admin. We reject any compound rather than try to
+    # split-and-recurse, which would still be brittle around quoting.
+    _SHELL_COMPOUND_RE = re.compile(r'(?:[;&|]|`|\$\(|\|\||&&)')
 
     def _shell(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a sandboxed shell command on the device."""
         cmd = str(params.get("command", "")).strip()
         if not cmd:
             raise ADBError("shell requires command")
+
+        # Reject shell-compound operators upfront — see _SHELL_COMPOUND_RE.
+        if self._SHELL_COMPOUND_RE.search(cmd):
+            raise ADBError(
+                "blocked: shell-compound operators (;, &, |, &&, ||, `, $()) "
+                "are not allowed; submit a single command per call",
+            )
 
         cmd_normalized = " ".join(cmd.split()).lower()
         try:
@@ -1396,7 +1410,7 @@ class AndroidOperator(BaseOperator):
         direction = str(params.get("direction", "down")).lower()
         size = self._screen_size({})
         w, h = size.get("width", 1080), size.get("height", 2400)
-        cx = w // 2
+        cx, cy = w // 2, h // 2
         scroll_dist = h // 3
 
         all_texts: list[str] = []
@@ -1425,11 +1439,12 @@ class AndroidOperator(BaseOperator):
             else:
                 no_new_count = 0
 
-            # Scroll
+            # L9 (Wave 8): typo fix — was using `cx` for both X and Y, so the
+            # swipe was diagonal and didn't actually scroll vertically.
             if direction == "down":
-                self._shell_cmd(f"input swipe {cx} {cx + scroll_dist} {cx} {cx} 400", timeout=5)
+                self._shell_cmd(f"input swipe {cx} {cy + scroll_dist} {cx} {cy} 400", timeout=5)
             else:
-                self._shell_cmd(f"input swipe {cx} {cx} {cx} {cx + scroll_dist} 400", timeout=5)
+                self._shell_cmd(f"input swipe {cx} {cy} {cx} {cy + scroll_dist} 400", timeout=5)
             time.sleep(0.8)
 
         return {

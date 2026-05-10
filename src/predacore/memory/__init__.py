@@ -38,6 +38,7 @@ Usage:
 from .chunker import chunk_text, safe_read_text
 from .consolidator import MemoryConsolidator
 from .healer import Healer
+from .remote_store import RemoteMemoryStore
 from .retriever import MemoryRetriever
 from .safety import MemoryIgnore, is_sensitive_path, scan_for_secrets
 from .store import UnifiedMemoryStore
@@ -56,4 +57,6 @@ __all__ = [
     "MemoryIgnore",
     # Healer
     "Healer",
+    # Remote (UDS proxy for DAF workers + multi-process callers)
+    "RemoteMemoryStore",
 ]

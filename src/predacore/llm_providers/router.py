@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
 
 from ..config import PredaCoreConfig
+from . import predacore_sdk as psdk  # M36: typed RateLimitError check
 
 # Import providers (direct API only — no vendor SDK dependencies)
 from .anthropic import AnthropicProvider
@@ -23,6 +25,9 @@ from .gemini_cli import GeminiCLIProvider
 from .openai import OpenAIProvider
 
 logger = logging.getLogger(__name__)
+
+
+_LOCAL_PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _try_load_local_provider(
@@ -36,14 +41,23 @@ def _try_load_local_provider(
     dispatch time. The module must define a class whose ``.name`` class
     attribute matches the provider name passed to ``--provider``.
 
+    M33 (Wave 7): the provider name must match ``^[a-z][a-z0-9_]*$`` —
+    rejects names starting with `_` (which would resolve to internal-only
+    modules like `_anthropic_wire` that aren't real providers) and any
+    character outside the safe set. Even though the import is restricted to
+    the package via ``package=__package__``, this guard keeps the
+    extensibility hook from regressing into arbitrary code execution if a
+    future refactor loosens the import line.
+
     Returns the instantiated provider on success, ``None`` if the module
     can't be imported or doesn't expose a matching class.
     """
+    module_stem = name.replace("-", "_")
+    if not _LOCAL_PROVIDER_NAME_RE.match(module_stem):
+        return None
     try:
         import importlib
-        mod = importlib.import_module(
-            f".{name.replace('-', '_')}", package=__package__
-        )
+        mod = importlib.import_module(f".{module_stem}", package=__package__)
     except ImportError:
         return None
     for attr in vars(mod).values():
@@ -95,6 +109,16 @@ class LLMInterface:
 
         # Initialize provider instances cache
         self._providers: dict[str, LLMProvider] = {}
+
+        # M37 (Wave 7): shared httpx client per LLMInterface, lazy-init
+        # on first use. Each `provider.chat()` call previously made its
+        # own short-lived `psdk.make_client()` — TLS handshake + HTTP/2
+        # negotiation wasn't amortized across calls (~50-200 ms tax per
+        # call in tight tool loops). Providers can read `interface.http`
+        # via the public `http` property and pass it through; legacy
+        # per-call construction still works (we don't break callers).
+        self._http_client: psdk.httpx.AsyncClient | None = None  # type: ignore[attr-defined]
+        self._http_lock = asyncio.Lock()
 
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=self.CB_FAILURE_THRESHOLD,
@@ -195,7 +219,22 @@ class LLMInterface:
             if local is not None:
                 instance = local
             else:
-                logger.warning("Unknown provider %r, falling back to OpenAI-compatible", name)
+                # M34 (Wave 7): refuse to silently route to OpenAI when
+                # the user picked an unknown provider AND auto_fallback is
+                # off — typo'd `/model openIA` must not exfiltrate the
+                # prompt to OpenAI. With auto_fallback=True we keep the
+                # legacy behavior so existing failover chains still work.
+                if not self.auto_fallback:
+                    candidates = sorted(set(PROVIDER_ENDPOINTS) | {"openai-codex", "anthropic", "claude", "gemini", "gemini-cli", "openai-responses"})
+                    raise ValueError(
+                        f"Unknown LLM provider {name!r}. Did you mean one of: "
+                        f"{', '.join(candidates)}? Set auto_fallback=True to "
+                        "fall back to OpenAI-compatible (legacy behavior).",
+                    )
+                logger.warning(
+                    "Unknown provider %r, auto_fallback=True → OpenAI-compatible",
+                    name,
+                )
                 instance = OpenAIProvider(p_config)
 
         self._providers[name] = instance
@@ -205,6 +244,27 @@ class LLMInterface:
     def auto_fallback(self) -> bool:
         """Whether to silently fall back to next provider on failure."""
         return getattr(self.config.llm, "auto_fallback", False)
+
+    async def get_http_client(self):
+        """Return the shared httpx.AsyncClient (lazy-init on first call).
+
+        M37 (Wave 7): callers in providers should grab this instead of
+        constructing fresh clients per chat(). HTTP/2 reuse + TLS
+        handshake amortization across calls.
+        """
+        if self._http_client is None or self._http_client.is_closed:
+            async with self._http_lock:
+                if self._http_client is None or self._http_client.is_closed:
+                    self._http_client = psdk.make_client()
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the shared httpx client. Idempotent. Called from gateway shutdown."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            try:
+                await self._http_client.aclose()
+            except (OSError, RuntimeError):
+                pass
 
     @property
     def active_provider(self) -> str:
@@ -335,14 +395,22 @@ class LLMInterface:
                     return result
 
                 except Exception as e:
-                    err_str = str(e).lower()
+                    # M36 (Wave 7): typed-exception check first. The SDK
+                    # raises `psdk.RateLimitError` for 429s — substring
+                    # matching is a fragile fallback for upstream wrappers
+                    # that re-string the error.
                     is_rate_limit = (
-                        "429" in err_str
-                        or "rate limit" in err_str
-                        or "rate_limit" in err_str
-                        or "too many requests" in err_str
+                        isinstance(e, psdk.RateLimitError)
                         or getattr(e, "status_code", 0) == 429
                     )
+                    if not is_rate_limit:
+                        err_str = str(e).lower()
+                        is_rate_limit = (
+                            "429" in err_str
+                            or "rate limit" in err_str
+                            or "rate_limit" in err_str
+                            or "too many requests" in err_str
+                        )
 
                     if is_rate_limit:
                         if attempt < max_retries:
@@ -409,9 +477,13 @@ class LLMInterface:
     def _provider_error_response(self, provider_name: str, error: Exception) -> dict[str, Any]:
         """Build a user-facing error message for non-rate-limit provider failures."""
         err_str = str(error)
-        # Truncate long error messages
-        if len(err_str) > 200:
-            err_str = err_str[:200] + "..."
+        # L42 (Wave 8): truncate via textwrap.shorten so we don't slice a
+        # multi-byte UTF-8 codepoint mid-sequence (the old `[:200]` slice
+        # was on the *string* not bytes, so it was actually fine in CPython,
+        # but textwrap.shorten respects word boundaries which is friendlier
+        # for the LLM/operator reading the error).
+        import textwrap as _textwrap
+        err_str = _textwrap.shorten(err_str, width=200, placeholder="...")
 
         fallbacks = [p for p in self._provider_chain if p != provider_name]
         fallback_hint = ""

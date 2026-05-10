@@ -66,6 +66,14 @@ class ZaloAdapter(ChannelAdapter):
         await self._runner.setup()
         bind_host = os.environ.get("PREDACORE_ZALO_BIND_HOST", "127.0.0.1")
         await web.TCPSite(self._runner, bind_host, self._port).start()
+        # Zalo signs inbound webhooks with `X-ZEvent-Signature` header (HMAC).
+        # We currently DON'T verify it — any caller able to POST can spoof
+        # events and trigger LLM tool calls. Default bind is loopback.
+        logger.critical(
+            "Zalo: webhook signature verification NOT implemented — accepting "
+            "all inbound POSTs. Listener bound to %s; do not tunnel publicly "
+            "without a verifying proxy.", bind_host,
+        )
         logger.info("Zalo adapter started — port %d", self._port)
 
     async def stop(self) -> None:

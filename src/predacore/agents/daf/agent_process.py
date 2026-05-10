@@ -112,7 +112,40 @@ class AgentProcess:
         self.wil_stub = wil_pb2_grpc.WorldInteractionLayerServiceStub(self.channel)
 
     def _setup_unified_memory(self):
-        """Initialize the shared unified memory store when available."""
+        """Initialize the memory store when available.
+
+        Phase 7 (2026-05-08): prefer the daemon's MemoryServer over UDS
+        when reachable — workers skip BGE warmup + HNSW rebuild + open
+        a single shared canonical store. Cold-start drops from ~5s to
+        ~500ms; per-worker RAM drops from ~330MB to ~150MB.
+
+        Falls back to a local UnifiedMemoryStore when the daemon socket
+        is unreachable (e.g. tests, CLI one-shot, daemon down).
+        """
+        # ── 1. Try remote (daemon's UDS MemoryServer) ───────────────
+        try:
+            try:
+                from predacore.memory.remote_store import RemoteMemoryStore
+                from predacore.services.memory_server import (
+                    DEFAULT_SOCKET_PATH as _DEFAULT_MEM_SOCK,
+                )
+            except ImportError:
+                # Old layout — fall through to local
+                RemoteMemoryStore = None  # type: ignore
+                _DEFAULT_MEM_SOCK = ""    # type: ignore
+
+            if RemoteMemoryStore is not None:
+                sock = os.getenv("PREDACORE_MEMORY_SOCKET", _DEFAULT_MEM_SOCK)
+                if sock and RemoteMemoryStore.can_connect(sock):
+                    self.logger.info(
+                        "DAF worker using shared MemoryServer at %s "
+                        "(skipping local HNSW + BGE warmup)", sock,
+                    )
+                    return RemoteMemoryStore(sock)
+        except (ImportError, OSError, RuntimeError) as exc:
+            self.logger.debug("Remote memory probe failed: %s", exc)
+
+        # ── 2. Fall back to local UnifiedMemoryStore ────────────────
         try:
             try:
                 from predacore.memory.store import UnifiedMemoryStore
@@ -123,7 +156,6 @@ class AgentProcess:
 
             predacore_home = Path(
                 os.getenv("PREDACORE_HOME")
-                or os.getenv("PREDACORE_HOME")
                 or (Path.home() / ".predacore")
             )
             db_path = predacore_home / "memory" / "unified_memory.db"
@@ -134,15 +166,41 @@ class AgentProcess:
             return None
 
     def _resolve_home_dir(self, context_data: dict[str, Any], params: dict[str, Any]) -> str:
+        """Resolve the home directory for this worker, defending against
+        attacker-supplied ``home_dir`` values from gRPC.
+
+        Default base is ``~/.predacore``. An ``explicit`` value is accepted
+        only when it resolves to a path strictly under the base — otherwise
+        the request is rejected and the default is used. Without this guard,
+        a reachable DAF caller could set ``home_dir="/etc"`` so the worker
+        loads ``/etc/config.yaml`` and creates ``/etc/memory/unified_memory.db``.
+        Override the base via ``PREDACORE_HOME`` if the deployment uses a
+        non-default predacore root.
+        """
+        base = Path(os.getenv("PREDACORE_HOME") or (Path.home() / ".predacore")).expanduser().resolve()
         explicit = str(
             context_data.get("home_dir")
             or params.get("home_dir")
             or self.config.get("home_dir")
             or ""
         ).strip()
-        if explicit:
-            return explicit
-        return str(Path.home() / ".predacore")
+        if not explicit:
+            return str(base)
+        try:
+            candidate = Path(explicit).expanduser().resolve()
+        except (OSError, ValueError):
+            self.logger.warning(
+                "DAF agent: rejecting unparseable home_dir=%r; using default %s",
+                explicit, base,
+            )
+            return str(base)
+        if not candidate.is_relative_to(base):
+            self.logger.warning(
+                "DAF agent: rejecting out-of-base home_dir=%s (base=%s); using default",
+                candidate, base,
+            )
+            return str(base)
+        return str(candidate)
 
     def _ensure_rich_runtime(self, home_dir: str) -> bool:
         """Bootstrap the same direct-provider collaboration runtime used by PredaCore."""
@@ -367,10 +425,38 @@ class AgentProcess:
             return None
 
     def run(self):
-        """Main process loop with signal handling"""
+        """Main process loop with signal handling.
+
+        Phase 11 (M45 fix, 2026-05-08): when PREDACORE_DAF_ASYNC_WORKER=1
+        the worker runs ONE persistent asyncio event loop for its entire
+        lifetime instead of `asyncio.run(coro)` per task. This eliminates
+        orphan-task accumulation and lets long-lived async clients
+        (httpx, gRPC channels) persist across tasks.
+
+        Legacy (sync polling + asyncio.run-per-task) path is the default
+        until the async path proves itself in real workloads.
+        """
         self.running = True
         signal.signal(signal.SIGTERM, self._handle_termination)
 
+        async_worker = os.getenv("PREDACORE_DAF_ASYNC_WORKER", "").lower() in {
+            "1", "true", "yes", "on",
+        }
+
+        if async_worker:
+            self.logger.info(
+                "Starting agent process in ASYNC mode (Type: %s, M45 path)",
+                self.type_id,
+            )
+            try:
+                asyncio.run(self.run_async())
+            except Exception as e:  # noqa: BLE001 — process boundary
+                self.logger.error("Async agent process failed: %s", e, exc_info=True)
+            finally:
+                self._cleanup()
+            return
+
+        # ── Legacy sync polling path (kept verbatim) ──────────────────
         try:
             self.logger.info(f"Starting agent process (Type: {self.type_id})")
             self._register_with_controller()
@@ -384,6 +470,461 @@ class AgentProcess:
             self.logger.error(f"Agent process failed: {e}", exc_info=True)
         finally:
             self._cleanup()
+
+    # ── Phase 11 (M45): async worker path ─────────────────────────────
+    #
+    # Single asyncio.run at process start; persistent event loop until
+    # SIGTERM. gRPC stub calls (which are sync in this codebase) are
+    # offloaded via asyncio.to_thread so they don't block the loop.
+    # Memory operations on UnifiedMemoryStore / RemoteMemoryStore are
+    # already async and become direct `await` instead of asyncio.run.
+
+    async def run_async(self) -> None:
+        """Persistent-loop main entry. ONE event loop for worker lifetime."""
+        await self._register_async()
+        while self.running:
+            await self._heartbeat_async()
+            await self._process_tasks_async()
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                self.running = False
+                break
+
+    async def _register_async(self) -> None:
+        """Async wrapper around the sync gRPC register call."""
+
+        def _do_register() -> Any:
+            req = daf_pb2.RegisterAgentInstanceRequest(
+                agent_instance=daf_pb2.AgentInstanceMessage(
+                    agent_instance_id=self.instance_id,
+                    agent_type_id=self.type_id,
+                    status=daf_pb2.AgentInstanceMessage.AgentStatus.AGENT_STATUS_IDLE,
+                )
+            )
+            return self.daf_stub.RegisterAgentInstance(req)
+
+        try:
+            response = await asyncio.to_thread(_do_register)
+            if not getattr(response, "success", False):
+                raise RuntimeError(
+                    f"Registration failed: {getattr(response, 'error_message', 'unknown')}"
+                )
+            self.logger.info("Async worker registered with DAF controller")
+        except grpc.RpcError as e:
+            raise RuntimeError(f"gRPC registration error: {e.details()}") from e
+
+    async def _heartbeat_async(self) -> None:
+        """Async wrapper for the sync gRPC heartbeat call."""
+
+        def _do_hb() -> Any:
+            return self.daf_stub.AgentHeartbeat(
+                daf_pb2.AgentHeartbeatMessage(
+                    agent_instance_id=self.instance_id,
+                    pid=os.getpid(),
+                )
+            )
+
+        try:
+            await asyncio.to_thread(_do_hb)
+        except grpc.RpcError as e:
+            self.logger.warning("Heartbeat failed: %s", e.details())
+
+    async def _process_tasks_async(self) -> None:
+        """Async equivalent of `_process_tasks` — fetches one task and
+        dispatches without spinning up a fresh event loop per task."""
+
+        def _fetch() -> Any:
+            return self.daf_stub.GetNextTask(
+                daf_pb2.GetNextTaskRequest(agent_instance_id=self.instance_id)
+            )
+
+        try:
+            resp = await asyncio.to_thread(_fetch)
+        except grpc.RpcError as e:
+            self.logger.warning("Polling failed: %s", e.details())
+            return
+
+        if not resp.has_task:
+            return
+
+        task = resp.task
+        params = _struct_to_dict(task.parameters)
+        context_data = _struct_to_dict(task.context)
+        prompt = str(params.get("prompt") or params.get("query") or "").strip()
+        role = str(context_data.get("role") or params.get("role") or self.type_id).strip()
+        pattern = str(context_data.get("pattern") or params.get("pattern") or "").strip()
+        user_id = str(context_data.get("user_id") or params.get("user_id") or "default").strip()
+        team_id = str(context_data.get("team_id") or params.get("team_id") or "").strip()
+        session_id_raw = str(context_data.get("session_id") or params.get("session_id") or "").strip()
+        session_id = session_id_raw or None
+        home_dir = self._resolve_home_dir(context_data, params)
+
+        shared_memory = await self._recall_shared_memory_async(
+            query=prompt, user_id=user_id, team_id=team_id,
+        )
+        if team_id:
+            kickoff_lines = [
+                f"DAF async worker {self.instance_id} ({role}/{self.type_id}) "
+                f"picked up task {task.task_id}."
+            ]
+            if prompt:
+                kickoff_lines.append(f"Prompt: {prompt[:500]}")
+            if shared_memory:
+                kickoff_lines.append(shared_memory)
+            await self._persist_team_memory_async(
+                user_id=user_id, team_id=team_id, session_id=session_id,
+                content="\n".join(kickoff_lines),
+                stage="task_start", role=role, pattern=pattern, importance=2,
+            )
+
+        # M4 (Phase 7) recursion-depth guard, applied to async path too
+        spec_payload: dict[str, Any] = {}
+        raw_spec = str(params.get("agent_spec_json") or "").strip()
+        if raw_spec:
+            try:
+                parsed_spec = json.loads(raw_spec)
+                if isinstance(parsed_spec, dict):
+                    spec_payload = parsed_spec
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self.logger.debug("Invalid DAF agent spec payload", exc_info=True)
+        try:
+            _depth = int(spec_payload.get("delegation_depth") or 0)
+            _max_depth = int(spec_payload.get("max_delegation_depth") or 3)
+            if _depth >= _max_depth:
+                self.logger.warning(
+                    "Async worker refusing rich-runtime spawn — "
+                    "delegation_depth=%d >= max=%d (M4 guard)",
+                    _depth, _max_depth,
+                )
+                spec_payload = {}
+        except (TypeError, ValueError):
+            pass
+
+        rich_output: str | None = None
+        if spec_payload:
+            rich_output = await self._run_rich_agent_task_async(
+                spec_payload=spec_payload,
+                original_task=str(
+                    params.get("original_task")
+                    or params.get("query")
+                    or prompt
+                    or spec_payload.get("mission")
+                    or ""
+                ),
+                shared_memory=shared_memory,
+                home_dir=home_dir,
+                role=role,
+            )
+
+        # Build the result envelope. We delegate the static-backend
+        # branches (python_sandbox / web_searcher / fallback) back to
+        # the existing sync helpers because they're tied to WIL stub
+        # calls — wrapping each via asyncio.to_thread is left as a
+        # follow-up. Rich-runtime path is the common case.
+        if rich_output:
+            result = daf_pb2.TaskResultMessage(
+                task_id=task.task_id,
+                plan_step_id=task.plan_step_id,
+                status=wil_pb2.InteractionStatus.INTERACTION_STATUS_SUCCESS,
+                output=Value(string_value=rich_output),
+                agent_type_id_used=self.type_id,
+                agent_instance_id_used=self.instance_id,
+            )
+        else:
+            # Fall back to the static-backend logic in the sync path
+            # (wrapped in to_thread). This preserves existing behavior
+            # for python_sandbox / web_searcher / fallback branches
+            # while we transition the worker to fully async.
+            result = await asyncio.to_thread(
+                self._build_static_backend_result, task, params, role, prompt, shared_memory,
+            )
+
+        result_text = _value_to_text(result.output) or str(result.error_message or "")
+        if team_id and result_text:
+            await self._persist_team_memory_async(
+                user_id=user_id, team_id=team_id, session_id=session_id,
+                content=result_text,
+                stage=(
+                    "task_error"
+                    if result.status != wil_pb2.InteractionStatus.INTERACTION_STATUS_SUCCESS
+                    else "task_result"
+                ),
+                role=role, pattern=pattern, importance=2,
+                memory_type=(
+                    "task"
+                    if result.status == wil_pb2.InteractionStatus.INTERACTION_STATUS_SUCCESS
+                    else "conversation"
+                ),
+            )
+
+        def _report() -> None:
+            self.daf_stub.ReportTaskResult(
+                daf_pb2.ReportTaskResultRequest(result=result)
+            )
+
+        try:
+            await asyncio.to_thread(_report)
+        except grpc.RpcError as e:
+            self.logger.warning("ReportTaskResult failed: %s", e.details())
+
+    def _build_static_backend_result(
+        self,
+        task: Any,
+        params: dict[str, Any],
+        role: str,
+        prompt: str,
+        shared_memory: str,
+    ) -> Any:
+        """Static-backend dispatch — runs in a thread off the main loop.
+
+        Mirrors the legacy `_process_tasks` sync branches for
+        python_sandbox / web_searcher / fallback. Kept sync because it
+        calls the sync WIL gRPC stub. A pure-async rewrite is a Phase 14
+        follow-up.
+        """
+        if "code" in params:
+            code = str(params.get("code") or "")
+            try:
+                ctx = task.context if hasattr(task, "context") else None
+                wil_resp = self.wil_stub.ExecuteCode(
+                    wil_pb2.CodeExecutionRequestMessage(
+                        request_id=task.task_id,
+                        code=code,
+                        timeout_seconds=int(params.get("timeout_seconds") or 60),
+                        context=ctx,
+                    )
+                )
+                return daf_pb2.TaskResultMessage(
+                    task_id=task.task_id,
+                    plan_step_id=task.plan_step_id,
+                    status=wil_resp.status,
+                    output=wil_resp.result,
+                    error_message=wil_resp.error_message,
+                    agent_type_id_used=self.type_id,
+                    agent_instance_id_used=self.instance_id,
+                )
+            except grpc.RpcError as e:
+                return daf_pb2.TaskResultMessage(
+                    task_id=task.task_id,
+                    plan_step_id=task.plan_step_id,
+                    status=wil_pb2.InteractionStatus.INTERACTION_STATUS_ERROR,
+                    error_message=f"WIL error: {e.details()}",
+                    agent_type_id_used=self.type_id,
+                    agent_instance_id_used=self.instance_id,
+                )
+        if self.type_id == "web_searcher":
+            query = str(params.get("query") or prompt).strip()
+            if not query:
+                return daf_pb2.TaskResultMessage(
+                    task_id=task.task_id,
+                    plan_step_id=task.plan_step_id,
+                    status=wil_pb2.InteractionStatus.INTERACTION_STATUS_ERROR,
+                    error_message="web_searcher requires a query or prompt",
+                    agent_type_id_used=self.type_id,
+                    agent_instance_id_used=self.instance_id,
+                )
+            try:
+                tool_params = Struct()
+                tool_params.update({"query": query, "role": role})
+                wil_resp = self.wil_stub.ExecuteTool(
+                    wil_pb2.InteractionRequestMessage(
+                        request_id=task.task_id,
+                        tool_id="google_search_api",
+                        parameters=tool_params,
+                        context=task.context if hasattr(task, "context") else None,
+                    )
+                )
+                return daf_pb2.TaskResultMessage(
+                    task_id=task.task_id,
+                    plan_step_id=task.plan_step_id,
+                    status=wil_resp.status,
+                    output=wil_resp.output,
+                    error_message=wil_resp.error_message,
+                    agent_type_id_used=self.type_id,
+                    agent_instance_id_used=self.instance_id,
+                )
+            except grpc.RpcError as e:
+                return daf_pb2.TaskResultMessage(
+                    task_id=task.task_id,
+                    plan_step_id=task.plan_step_id,
+                    status=wil_pb2.InteractionStatus.INTERACTION_STATUS_ERROR,
+                    error_message=f"WIL error: {e.details()}",
+                    agent_type_id_used=self.type_id,
+                    agent_instance_id_used=self.instance_id,
+                )
+        # Fallback: descriptive non-error result
+        fallback_lines = [
+            f"DAF agent {role} ({self.type_id}) received task {task.task_id}.",
+        ]
+        if prompt:
+            fallback_lines.append(f"Prompt: {prompt}")
+        if shared_memory:
+            fallback_lines.append(shared_memory)
+        fallback_lines.append(
+            "No dedicated executor is configured for this DAF agent type yet."
+        )
+        return daf_pb2.TaskResultMessage(
+            task_id=task.task_id,
+            plan_step_id=task.plan_step_id,
+            status=wil_pb2.InteractionStatus.INTERACTION_STATUS_SUCCESS,
+            output=Value(string_value="\n\n".join(fallback_lines)),
+            agent_type_id_used=self.type_id,
+            agent_instance_id_used=self.instance_id,
+        )
+
+    async def _persist_team_memory_async(
+        self,
+        *,
+        user_id: str,
+        team_id: str,
+        session_id: str | None,
+        content: str,
+        stage: str,
+        role: str,
+        pattern: str = "",
+        memory_type: str = "task",
+        importance: int = 2,
+    ) -> None:
+        """Async path — `await` UnifiedMemoryStore.store directly instead
+        of wrapping in asyncio.run (M45 fix)."""
+        if self._unified_memory is None or not team_id or not content.strip():
+            return
+        try:
+            await self._unified_memory.store(
+                content=content[:4000],
+                memory_type=memory_type,
+                importance=importance,
+                source="predacore.daf.agent_process_async",
+                tags=["daf", "team_memory", self.type_id],
+                metadata={
+                    "source": "predacore.daf.agent_process_async",
+                    "stage": stage,
+                    "role": role,
+                    "pattern": pattern,
+                    "agent_type": self.type_id,
+                },
+                user_id=user_id,
+                session_id=session_id,
+                memory_scope="team",
+                team_id=team_id,
+                agent_id=self.instance_id,
+            )
+        except (RuntimeError, OSError, ValueError, TypeError):
+            self.logger.debug("Failed to persist DAF team memory", exc_info=True)
+
+    async def _recall_shared_memory_async(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        team_id: str,
+        top_k: int = 4,
+    ) -> str:
+        """Async recall — `await` directly instead of asyncio.run-per-call."""
+        if (
+            self._unified_memory is None
+            or not query.strip()
+            or not team_id
+            or not hasattr(self._unified_memory, "recall")
+        ):
+            return ""
+        try:
+            recalls = await self._unified_memory.recall(
+                query=query,
+                user_id=user_id,
+                top_k=top_k,
+                scopes=["global", "team"],
+                team_id=team_id,
+            )
+        except (RuntimeError, OSError, ValueError, TypeError):
+            self.logger.debug("Failed to recall DAF shared memory", exc_info=True)
+            return ""
+        if not recalls:
+            return ""
+        lines = ["Shared memory:"]
+        for mem, _score in recalls:
+            meta = mem.get("metadata", {}) if isinstance(mem, dict) else {}
+            label = (
+                meta.get("stage")
+                or meta.get("key")
+                or mem.get("memory_type", "memory")
+            )
+            content = str(mem.get("content") or "").strip()
+            if content:
+                lines.append(f"- {label}: {content[:220]}")
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def _run_rich_agent_task_async(
+        self,
+        *,
+        spec_payload: dict[str, Any],
+        original_task: str,
+        shared_memory: str,
+        home_dir: str,
+        role: str,
+    ) -> str | None:
+        """Async rich-runtime task runner. The AgentEngine.run_task is
+        already async — we await it directly instead of asyncio.run()ing
+        a fresh loop per task. This is the core M45 win."""
+        if not self._ensure_rich_runtime(home_dir):
+            return None
+        if self._agent_engine is None:
+            return None
+        try:
+            try:
+                from predacore.agents.engine import (
+                    compile_dynamic_agent_prompt,
+                    create_dynamic_agent_spec,
+                )
+            except ImportError:
+                from src.predacore.agents.engine import (  # type: ignore
+                    compile_dynamic_agent_prompt,
+                    create_dynamic_agent_spec,
+                )
+
+            spec = create_dynamic_agent_spec(
+                base_type=str(spec_payload.get("base_type") or self.type_id),
+                collaboration_role=str(
+                    spec_payload.get("collaboration_role")
+                    or spec_payload.get("role")
+                    or role
+                    or self.type_id
+                ),
+                specialization=str(
+                    spec_payload.get("specialization")
+                    or spec_payload.get("collaboration_role")
+                    or role
+                    or self.type_id
+                ),
+                mission=str(spec_payload.get("mission") or original_task or role),
+                success_criteria=spec_payload.get("success_criteria") or (),
+                output_schema=spec_payload.get("output_schema") or {},
+                memory_scopes=spec_payload.get("memory_scopes") or ("global", "team"),
+                allowed_tools=spec_payload.get("allowed_tools") or (),
+                max_steps=spec_payload.get("max_steps"),
+                temperature=spec_payload.get("temperature"),
+            )
+            system_prompt, compiled_user_prompt = compile_dynamic_agent_prompt(
+                spec,
+                shared_context=shared_memory,
+                original_task=original_task,
+            )
+            result = await self._agent_engine.run_task(
+                prompt=original_task,
+                agent_type=spec.base_type,
+                dynamic_spec=spec,
+                system_prompt_override=system_prompt,
+                prompt_override=compiled_user_prompt,
+            )
+            output = str(result.get("output") or "").strip()
+            if output:
+                return output
+            error = str(result.get("error") or "").strip()
+            return error or None
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError):
+            self.logger.debug("Async rich DAF task execution failed", exc_info=True)
+            return None
 
     def _register_with_controller(self):
         """Register this process instance with the DAF controller"""
@@ -466,6 +1007,24 @@ class AgentProcess:
                         spec_payload = parsed_spec
                 except (TypeError, ValueError, json.JSONDecodeError):
                     self.logger.debug("Invalid DAF agent spec payload", exc_info=True)
+
+            # M4 (Phase 7): enforce cross-process recursion depth.
+            # Lead orchestrator passes delegation_depth in the spec; we
+            # refuse to spawn rich-runtime work if depth ≥ max ceiling.
+            # Without this, a DAF worker fans out infinitely because the
+            # in-process ContextVar guard doesn't cross processes.
+            try:
+                _depth = int(spec_payload.get("delegation_depth") or 0)
+                _max_depth = int(spec_payload.get("max_delegation_depth") or 3)
+                if _depth >= _max_depth:
+                    self.logger.warning(
+                        "DAF worker refusing rich-runtime spawn — "
+                        "delegation_depth=%d >= max=%d (M4 guard)",
+                        _depth, _max_depth,
+                    )
+                    spec_payload = {}  # forces fallback path; no infinite chain
+            except (TypeError, ValueError):
+                pass
 
             rich_output = None
             if spec_payload:

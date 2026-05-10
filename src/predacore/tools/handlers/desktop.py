@@ -237,12 +237,41 @@ async def handle_android_control(args: dict[str, Any], ctx: ToolContext) -> str:
 
     from predacore.operators.android import ADBError, AndroidOperator
 
+    # M3 (Wave 7): bounded LRU on the per-serial operator cache. Previously
+    # `setattr(ctx, _android_operator_<serial>, op)` accumulated forever —
+    # long-running daemons that talked to many ephemerally-connected
+    # devices ended up with hundreds of stale operator instances. Cap at
+    # 8 (covers every realistic multi-device session) with FIFO eviction.
+    _LRU_ATTR = "_android_operator_lru"
+    _LRU_MAX = 8
+    lru: list[str] = getattr(ctx, _LRU_ATTR, None) or []
     serial = str(args.get("device_serial", "")).strip() or None
     cache_key = f"_android_operator_{serial or 'default'}"
     operator = getattr(ctx, cache_key, None)
     if operator is None:
         operator = AndroidOperator(device_serial=serial)
         setattr(ctx, cache_key, operator)
+        if cache_key not in lru:
+            lru.append(cache_key)
+        # Evict oldest until under cap
+        while len(lru) > _LRU_MAX:
+            old_key = lru.pop(0)
+            try:
+                delattr(ctx, old_key)
+            except AttributeError:
+                pass
+        try:
+            setattr(ctx, _LRU_ATTR, lru)
+        except (AttributeError, TypeError):
+            pass
+    elif cache_key in lru:
+        # Touch — move to most-recent position
+        lru.remove(cache_key)
+        lru.append(cache_key)
+        try:
+            setattr(ctx, _LRU_ATTR, lru)
+        except (AttributeError, TypeError):
+            pass
 
     try:
         params = dict(args)
@@ -269,8 +298,39 @@ async def handle_android_control(args: dict[str, Any], ctx: ToolContext) -> str:
 
 # ── Browser Bridge ──────────────────────────────────────────────────
 
-# Singleton bridge instance (persists connection across tool calls)
-_browser_bridge = None
+# H3: bridge ownership moved onto ToolContext (ctx._browser_bridge) so it
+# can participate in shutdown via ToolExecutor. We keep a process-global
+# fallback purely for legacy callers that hand us a stub ctx; new code
+# should always have a real ctx and use the per-context bridge. The init
+# race is fixed by an asyncio.Lock so two concurrent first-time calls don't
+# both try to construct + connect.
+_browser_bridge = None  # legacy fallback; prefer ctx._browser_bridge
+_browser_bridge_lock = asyncio.Lock()
+
+
+async def shutdown_browser_bridge(ctx: ToolContext | None = None) -> None:
+    """Close any browser bridge attached to ``ctx`` and the legacy global.
+
+    Called by ``ToolExecutor.shutdown()`` (when wired) and safe to call
+    repeatedly. Closes the CDP websocket + aiohttp session for each bridge.
+    """
+    global _browser_bridge
+    candidates = []
+    if ctx is not None and getattr(ctx, "_browser_bridge", None) is not None:
+        candidates.append(ctx._browser_bridge)
+        ctx._browser_bridge = None
+    if _browser_bridge is not None:
+        candidates.append(_browser_bridge)
+        _browser_bridge = None
+    for bridge in candidates:
+        try:
+            close = getattr(bridge, "close", None)
+            if close is not None:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception:  # pragma: no cover — best-effort cleanup
+            logger.debug("browser bridge close raised", exc_info=True)
 
 
 async def handle_browser_control(args: dict[str, Any], ctx: ToolContext) -> str:
@@ -286,32 +346,54 @@ async def handle_browser_control(args: dict[str, Any], ctx: ToolContext) -> str:
     except ImportError as e:
         raise subsystem_unavailable(f"Browser Bridge: {e}") from e
 
-    # Auto-connect on first use (Chrome only — Safari support is disabled)
-    if _browser_bridge is None or not _browser_bridge.connected:
-        _browser_bridge = BrowserBridge()
-        connected = await _browser_bridge.connect("chrome")
-        if not connected:
-            # ``BrowserBridge.connect`` already tries to auto-launch Chrome
-            # with the debug port. If it's still False here, every path
-            # failed: Chrome isn't installed, the auto-launch couldn't
-            # bind 9222 (port in use by something else), or the user has
-            # Chrome running WITHOUT --remote-debugging-port and macOS
-            # refused the post-launch arg injection.
-            return json.dumps({
-                "error": (
-                    "Could not connect to Chrome on port 9222. "
-                    "Predacore tried to auto-launch it but the bridge "
-                    "still couldn't establish a CDP connection. "
-                    "Manual fix: quit Chrome completely, then run: "
-                    "open -a 'Google Chrome' --args --remote-debugging-port=9222"
-                ),
-                "code": "chrome_not_reachable",
-                "suggested_command": (
-                    "open -a 'Google Chrome' --args --remote-debugging-port=9222"
-                ),
-            })
-
-    bridge = _browser_bridge
+    # Per-context bridge (preferred). The legacy module-global fallback
+    # exists only for callers that hand us a stub-ish ctx without slots.
+    bridge = getattr(ctx, "_browser_bridge", None)
+    needs_init = bridge is None or not getattr(bridge, "connected", False)
+    if needs_init:
+        # Serialize first-time init so two concurrent browser_control calls
+        # don't both try to construct + connect. Re-check inside the lock.
+        async with _browser_bridge_lock:
+            bridge = getattr(ctx, "_browser_bridge", None)
+            needs_init = bridge is None or not getattr(bridge, "connected", False)
+            if needs_init:
+                bridge = BrowserBridge()
+                try:
+                    setattr(ctx, "_browser_bridge", bridge)
+                except (AttributeError, TypeError):
+                    # ctx may be a frozen dataclass without slots for this attr;
+                    # fall back to the module-global so we still get singleton
+                    # behavior for legacy callers.
+                    _browser_bridge = bridge
+                connected = await bridge.connect("chrome")
+                # Drop the broken bridge so the next call will retry init
+                # rather than seeing _browser_bridge truthy + not connected.
+                if not connected:
+                    if getattr(ctx, "_browser_bridge", None) is bridge:
+                        ctx._browser_bridge = None
+                    if _browser_bridge is bridge:
+                        _browser_bridge = None
+    # Resolve the live bridge — prefer ctx-attached, fall back to module-global.
+    bridge = getattr(ctx, "_browser_bridge", None) or _browser_bridge
+    if bridge is None or not getattr(bridge, "connected", False):
+        # ``BrowserBridge.connect`` already tries to auto-launch Chrome with
+        # the debug port. If we're still not connected here, every path
+        # failed: Chrome isn't installed, auto-launch couldn't bind 9222,
+        # or Chrome is running without --remote-debugging-port and macOS
+        # refused the post-launch arg injection.
+        return json.dumps({
+            "error": (
+                "Could not connect to Chrome on port 9222. "
+                "Predacore tried to auto-launch it but the bridge "
+                "still couldn't establish a CDP connection. "
+                "Manual fix: quit Chrome completely, then run: "
+                "open -a 'Google Chrome' --args --remote-debugging-port=9222"
+            ),
+            "code": "chrome_not_reachable",
+            "suggested_command": (
+                "open -a 'Google Chrome' --args --remote-debugging-port=9222"
+            ),
+        })
 
     try:
         if action == "connect":
@@ -616,10 +698,16 @@ async def handle_browser_control(args: dict[str, Any], ctx: ToolContext) -> str:
 
         # Auth
         elif action == "set_auth_credentials":
-            result = await bridge.set_auth_credentials(
-                username=str(args.get("username", "")),
-                password=str(args.get("password", "")),
-            )
+            # Removed in Wave 3: previous implementation stashed
+            # base64(user:pass) in window.__predacore_auth — globally readable
+            # JS — while never registering Fetch.authRequired. See
+            # browser_bridge.py for the comment block describing the correct
+            # CDP flow that must replace it.
+            result = {
+                "error": "set_auth_credentials removed (security): the previous "
+                "implementation leaked credentials into page DOM. Re-implement "
+                "via Fetch.authRequired before re-enabling.",
+            }
         elif action == "clear_auth_credentials":
             result = await bridge.clear_auth_credentials()
 

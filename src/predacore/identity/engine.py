@@ -36,7 +36,11 @@ logger = logging.getLogger(__name__)
 _identity_file_cache: dict[str, tuple[float, str]] = {}
 
 # Maximum allowed size for identity file writes (bytes)
-MAX_IDENTITY_FILE_SIZE = 50_000
+# Wave 11: 50KB → 100KB. Identity files load into per-turn prompt every
+# turn, so this cap actively guards prompt budget (10 files × max =
+# significant). 100KB is a moderate bump (real files stay ~2KB); going
+# higher risks runaway-rewrite bloat without real benefit.
+MAX_IDENTITY_FILE_SIZE = 100_000
 
 # Per-(home_dir, agent_name) engine instances
 _engine_instances: dict[tuple[str, str], IdentityEngine] = {}
@@ -55,18 +59,29 @@ _EVOLVING_FILES = frozenset({
     "SOUL.md", "IDENTITY.md", "USER.md", "BELIEFS.md",
 })
 
-# Maximum journal entries to include in prompt context
-_JOURNAL_TAIL_ENTRIES = 20
+# Maximum journal entries to include in prompt context.
+# Wave 11: 20 → 50. Modest bump — JOURNAL tail is in-prompt every turn,
+# and reflection now reads real session content separately, so the
+# journal tail is supplementary not primary. Bounded by byte cap below.
+_JOURNAL_TAIL_ENTRIES = 50
 
-# Maximum bytes of journal tail to include in the assembled prompt
-# (per-turn prompt-size cap so a long journal can't bloat system prompt)
-_JOURNAL_TAIL_MAX_BYTES = 10_000
+# Maximum bytes of journal tail to include in the assembled prompt.
+# Wave 11: 10KB → 30KB (~7.5k tokens). Stays in-prompt every turn — keeps
+# this conservative because it competes with chat history + tool output
+# for prompt budget.
+_JOURNAL_TAIL_MAX_BYTES = 30_000
 
-# Maximum diff lines to include in an EVOLUTION.md entry (keeps the log readable)
-_MAX_DIFF_LINES = 200
+# Maximum diff lines to include in an EVOLUTION.md entry.
+# Wave 11: 200 → 10,000. EVOLUTION.md is OUT of the prompt; this only
+# affects audit log readability + file size. Effectively no cap for
+# real diffs (most identity rewrites are <500 lines).
+_MAX_DIFF_LINES = 10_000
 
 # EVOLUTION.md keeps the most recent N entries — prevents unbounded growth.
-_MAX_EVOLUTION_ENTRIES = 200
+# Wave 11: 200 → 100,000 (out of prompt; effectively unlimited audit trail
+# for personal-use). At ~5KB per entry, a fully filled file is ~500MB —
+# well within disk budget for an agent supposed to remember its history.
+_MAX_EVOLUTION_ENTRIES = 100_000
 
 # Operational guide for the memory subsystem — engineering knowledge that
 # describes how the memory tools work and when to use them. Lives in code so
@@ -105,7 +120,11 @@ decisions, the ROOT CAUSE behind bugs, the SURPRISES worth remembering.
 storing noise. Keep it lean — every memory should earn its place."""
 
 # Maximum DECISIONS.md entries kept on disk.
-_MAX_DECISION_ENTRIES = 500
+# Wave 11: 500 → 100,000. DECISIONS.md is NOT in the per-turn prompt
+# (Wave 11 reflection reads last ~8KB tail). Effectively unlimited
+# reasoning trace history for personal-use; file growth is bounded by
+# disk, not by predacore.
+_MAX_DECISION_ENTRIES = 100_000
 
 
 def _read_cached(path: Path) -> str | None:
@@ -275,6 +294,40 @@ class IdentityEngine:
             self.workspace,
         )
 
+    @property
+    def identity_signature(self) -> str:
+        """Stable sha-8 over the immutable + semi-static identity surface.
+
+        Combines SOUL_SEED.md (built-in, never user-editable) with the
+        currently-loaded SOUL.md and IDENTITY.md from the workspace. Memories
+        store this as `metadata["identity_signature"]` so we can later
+        bisect drift: "did the model start behaving differently after the
+        identity_signature changed?".
+
+        Cached on the instance — invalidated when ``invalidate_identity_signature()``
+        is called (e.g. after a workspace SOUL.md edit).
+        """
+        sig = getattr(self, "_identity_signature_cached", None)
+        if sig:
+            return sig
+        import hashlib
+        h = hashlib.sha256()
+        for part in (
+            self.load_seed(),
+            self._load_workspace_or_builtin("SOUL.md") or "",
+            self._load_workspace_or_builtin("IDENTITY.md") or "",
+        ):
+            h.update((part or "").encode("utf-8", errors="replace"))
+            h.update(b"\x1e")  # record separator so concatenation can't collide
+        sig = h.hexdigest()[:16]  # 64-bit prefix is plenty for tagging
+        self._identity_signature_cached = sig
+        return sig
+
+    def invalidate_identity_signature(self) -> None:
+        """Clear the cached identity_signature; next read recomputes."""
+        if hasattr(self, "_identity_signature_cached"):
+            delattr(self, "_identity_signature_cached")
+
     def _seed_from_defaults(self) -> None:
         """Copy any missing default identity files into the workspace.
 
@@ -323,20 +376,61 @@ class IdentityEngine:
     def _scan_for_injection(self, content: str, filename: str) -> bool:
         """Scan identity file content for prompt injection. Returns True if safe.
 
-        Fail-open: if the security module is unavailable or its signature
-        changed, we log and allow the content. Fail-closed would make the
-        whole identity system unloadable on any auth-module regression.
+        S1 (PR2): default flipped from fail-OPEN to fail-CLOSED for ALL
+        identity files. If `auth/security.detect_injection` is unavailable
+        or its call fails, the identity file does NOT load — workspace
+        falls back to the bundled built-in. This closes the regression
+        window where an `auth.security` import-time bug silently disabled
+        identity-file injection scanning across the writable surface.
+
+        Two failure modes, both fail-closed by default:
+
+          * **Scanner module missing** (ImportError) — log CRITICAL and
+            refuse to load the workspace file. The bundled built-in
+            (which is itself scanned + tamper-protected) loads instead.
+
+          * **Scanner call failed** (AttributeError/TypeError/ValueError)
+            — log WARNING and refuse to load. Same fallback.
+
+        Escape hatch: ``PREDACORE_FAIL_OPEN=1`` restores the legacy fail-
+        open default for workspace files (still fail-closed for
+        SOUL_SEED/EVENT_HORIZON regardless — the safety floor is non-
+        negotiable). Use only on installs you trust.
         """
+        fail_open = os.environ.get("PREDACORE_FAIL_OPEN", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        critical_files = {"SOUL_SEED.md", "EVENT_HORIZON.md"}
+
         try:
             from predacore.auth.security import detect_injection
         except ImportError as e:
-            logger.debug("Injection scan module unavailable: %s", e)
+            # Scanner missing — loud critical log. Fail closed by default;
+            # PREDACORE_FAIL_OPEN restores legacy behavior for workspace
+            # files only. Critical files (SOUL_SEED/EVENT_HORIZON) ALWAYS
+            # fail closed regardless of env — safety floor is non-negotiable.
+            logger.critical(
+                "Injection scanner unavailable (%s). %s",
+                e,
+                "Failing CLOSED for %s — falling back to bundled built-in." % filename
+                if (not fail_open) or filename in critical_files
+                else "Failing OPEN for %s (PREDACORE_FAIL_OPEN=1 set)." % filename,
+            )
+            if filename in critical_files or not fail_open:
+                return False
             return True
 
         try:
             result = detect_injection(content)
         except (AttributeError, TypeError, ValueError) as e:
-            logger.warning("Injection scan call failed for %s: %s", filename, e)
+            logger.warning(
+                "Injection scan call failed for %s: %s — %s",
+                filename, e,
+                "failing CLOSED" if (not fail_open) or filename in critical_files
+                else "failing OPEN (PREDACORE_FAIL_OPEN=1)",
+            )
+            if filename in critical_files or not fail_open:
+                return False
             return True
 
         if result.detected:
@@ -675,7 +769,29 @@ class IdentityEngine:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         formatted = f"\n\n## {timestamp}\n\n{entry.strip()}\n"
 
+        # M56 (Wave 7): serialize append against the heartbeat's prune task.
+        # Previously prune held an asyncio.Lock and append acquired nothing,
+        # so a sync append racing the prune would read pre-prune content
+        # and write back the original (un-pruned) plus its new entry. Use
+        # fcntl.flock on a sibling lockfile so we serialize across both
+        # the sync and async contexts (and across daemon + helper procs).
+        lock_path = path.with_suffix(".lock")
+        lock_fd = None
         try:
+            try:
+                import fcntl
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_fd = os.open(
+                    str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600,
+                )
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError) as exc:
+                # fcntl unavailable (Windows) or open failed — fall through
+                # without the lock. Atomic-write below still preserves file
+                # integrity; only the read-modify-write window is unprotected.
+                logger.debug("Journal lock unavailable, proceeding without: %s", exc)
+                lock_fd = None
+
             if path.exists():
                 existing = path.read_text(encoding="utf-8")
             else:
@@ -700,6 +816,17 @@ class IdentityEngine:
         except OSError as e:
             logger.error("Failed to append journal: %s", e)
             return {"status": "error", "error": str(e)}
+        finally:
+            if lock_fd is not None:
+                try:
+                    import fcntl
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # Structured user profile
@@ -787,16 +914,45 @@ class IdentityEngine:
     # ------------------------------------------------------------------
 
     def build_identity_prompt(self) -> str:
-        """Assemble the full identity prompt for system-prompt injection.
+        """Assemble the identity prompt, ordered for prompt-cache wins.
 
-        One path, always the same. The defaults shipped with the workspace
-        already carry first-run instructions (IDENTITY.md tells the agent
-        to ask its name), so no bootstrap-mode branching is needed.
+        PR3 layer order (cache-aware, top-to-bottom):
 
-        Layer order (horizontal-rule separated):
-          SOUL_SEED → EVENT_HORIZON → IDENTITY → SOUL → USER
-          → structured profile → memory_guide (code) → MEMORY (workspace)
-          → TOOLS → HEARTBEAT → REFLECTION → BELIEFS → recent journal tail
+          ── STATIC PREFIX (cached forever — only changes on package update) ──
+          SOUL_SEED → EVENT_HORIZON → memory_guide (code-shipped)
+
+          ── SEMI-STATIC (cached per-session — changes when agent writes
+             identity files via identity_update) ──
+          IDENTITY → SOUL → USER → structured profile → BELIEFS → MEMORY
+
+          DROPPED FROM PROMPT (PR3 / D2 + D3):
+            - TOOLS.md          — runtime context block already provides
+                                  trust/date/channels; the file's prose was
+                                  duplicate.
+            - HEARTBEAT.md      — services/cron.py + identity/heartbeat.py
+                                  actually do this at runtime; the file
+                                  was prose narration of behavior.
+            - REFLECTION.md     — code-side prompt (identity/reflection.py
+                                  REFLECTION_PROMPT) is rigorous; the
+                                  workspace file was a duplicate.
+            - JOURNAL.md tail   — moved to memory recall on demand. Tier-3
+                                  write-through (G3, daemon.py) means
+                                  every journal entry is also a queryable
+                                  memory; the agent fetches relevant
+                                  entries via memory_recall instead of
+                                  loading 10KB into every system prompt.
+
+          All four files STAY ON DISK (still agent-writable; still version-
+          controlled in EVOLUTION.md when applicable). They just stop
+          loading into the per-turn system prompt. Net: ~13KB/turn saved
+          on top of the EVENT_HORIZON trim already shipped in PR1.
+
+        Cache hierarchy (consumed by prompts._get_system_prompt):
+          • This identity prompt is in the static + semi-static tier.
+          • The DATAMARKER_EXPLANATION (PR2 / U2) appended after this is
+            also static.
+          • Workspace block + Runtime context are appended LAST in
+            _get_system_prompt and form the dynamic tier.
         """
         sections: list[str] = []
 
@@ -809,8 +965,21 @@ class IdentityEngine:
                 else:
                     sections.append(content)
 
+        # ── STATIC PREFIX ──
+        # SOUL_SEED + EVENT_HORIZON ship with the package; only change on
+        # `pip install -U predacore`. memory_guide is a code-side string
+        # constant; same cacheability. Anthropic's prompt cache (5-min
+        # free-refresh) gets a clean prefix here that stays valid for
+        # ~every turn within a session.
         _add(self.load_seed())
         _add(self.load_event_horizon())
+        _add(self.memory_guide(), wrap="How Memory Works")
+
+        # ── SEMI-STATIC ──
+        # Agent-writable identity files. Change only when the agent calls
+        # identity_update (typically once per reflection cycle, every 10
+        # turns). Within a session these are stable; cache invalidates on
+        # write but the static prefix above stays warm.
         _add(self.load_identity())
         _add(self.load_soul())
         _add(self.load_user())
@@ -830,13 +999,8 @@ class IdentityEngine:
         if profile_parts:
             _add("\n".join(profile_parts))
 
-        _add(self.memory_guide(), wrap="How Memory Works")
-        _add(self.load_memory(), wrap="Curated Memory (MEMORY.md)")
-        _add(self.load_tools())
-        _add(self.load_heartbeat_config(), wrap="Background Discipline (HEARTBEAT.md)")
-        _add(self.load_reflection_rules(), wrap="Self-Correction Rules (REFLECTION.md)")
         _add(self.load_beliefs())
-        _add(self.load_journal(), wrap="Recent Journal")
+        _add(self.load_memory(), wrap="Curated Memory (MEMORY.md)")
 
         return "\n".join(sections)
 

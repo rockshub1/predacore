@@ -70,23 +70,31 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────
 
 DEFAULT_CADENCES = {
-    "audit_invariants":  60.0,          # seconds
-    "sweep_orphans":     5 * 60.0,
-    "reembed_skewed":    60 * 60.0,
-    "check_bm25_drift":  10 * 60.0,
-    "snapshot":          24 * 60 * 60.0,
-    "check_integrity":   7 * 24 * 60 * 60.0,
+    "audit_invariants":   60.0,          # seconds
+    "sweep_orphans":      5 * 60.0,
+    "reembed_skewed":     60 * 60.0,
+    "check_bm25_drift":   10 * 60.0,
+    # A-MEM dangling-neighbour cleanup — drop ids in metadata.neighbours
+    # whose target row no longer exists. Cheap (one SELECT + a handful of
+    # UPDATEs); runs hourly so the cruft doesn't accumulate but doesn't
+    # compete with audit/sweep cadence.
+    "sweep_dangling_neighbours": 60 * 60.0,
+    "snapshot":           24 * 60 * 60.0,
+    "check_integrity":    7 * 24 * 60 * 60.0,
 }
 
-AUDIT_SAMPLE_SIZE = 100
-ORPHAN_SWEEP_MAX = 500
-REEMBED_BATCH_MAX = 100
+# Wave 11: healer caps maxed. All out-of-prompt; bigger numbers = more
+# thorough background self-healing per cycle. Personal-instance shape
+# means only one user's data; faster/larger sweeps are fine.
+AUDIT_SAMPLE_SIZE = 1_000           # 100 → 1,000 (more thorough audit)
+ORPHAN_SWEEP_MAX = 5_000             # 500 → 5,000 (clear more cruft per cycle)
+REEMBED_BATCH_MAX = 1_000            # 100 → 1,000 (faster BGE-version migration)
 
-MAX_AUTO_REPAIRS_PER_HOUR = 1000
-MAX_HEALTHY_PCT_DROP = 5.0
-UNDO_RETENTION_DAYS = 7
+MAX_AUTO_REPAIRS_PER_HOUR = 100_000  # 1,000 → 100,000 (don't false-pause for personal use)
+MAX_HEALTHY_PCT_DROP = 5.0           # unchanged — protects against catastrophic regression
+UNDO_RETENTION_DAYS = 90             # 7 → 90 days (3 months of rollback runway)
 
-SNAPSHOT_RETENTION_DAYS = 7
+SNAPSHOT_RETENTION_DAYS = 90         # 7 → 90 days (full season of daily snapshots)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -107,6 +115,11 @@ class HealStats:
 
     orphan_sweeps:       int = 0
     rows_purged:         int = 0
+
+    # A-MEM dangling-neighbour cleanup
+    neighbour_sweeps:    int = 0
+    rows_with_neighbours_scanned: int = 0
+    dangling_refs_dropped: int = 0
 
     reembed_passes:      int = 0
     rows_reembedded:     int = 0
@@ -148,6 +161,11 @@ class HealStats:
             "orphan_sweep": {
                 "runs": self.orphan_sweeps,
                 "rows_purged": self.rows_purged,
+            },
+            "neighbour_sweep": {
+                "runs": self.neighbour_sweeps,
+                "rows_scanned": self.rows_with_neighbours_scanned,
+                "dangling_refs_dropped": self.dangling_refs_dropped,
             },
             "reembed": {
                 "runs": self.reembed_passes,
@@ -280,12 +298,13 @@ class Healer:
         now = time.monotonic()
         order = [
             # Cheap checks first so a slow expensive check doesn't starve them
-            ("audit_invariants", self.audit_invariants),
-            ("sweep_orphans",    self.sweep_orphans),
-            ("check_bm25_drift", self.check_bm25_drift),
-            ("reembed_skewed",   self.reembed_skewed),
-            ("snapshot",         self.take_snapshot),
-            ("check_integrity",  self.check_integrity),
+            ("audit_invariants",          self.audit_invariants),
+            ("sweep_orphans",             self.sweep_orphans),
+            ("sweep_dangling_neighbours", self.sweep_dangling_neighbours),
+            ("check_bm25_drift",          self.check_bm25_drift),
+            ("reembed_skewed",            self.reembed_skewed),
+            ("snapshot",                  self.take_snapshot),
+            ("check_integrity",           self.check_integrity),
         ]
         for name, fn in order:
             last = self._last_run_mono[name]
@@ -455,28 +474,38 @@ class Healer:
         return {"audited": len(rows), "updates": len(updates)}
 
     def sweep_orphans(self) -> int:
-        """Delete rows whose source_path is set but the file no longer
-        exists. Capped per run to avoid runaway deletes."""
+        """Delete rows already confirmed-orphaned by an earlier audit pass.
+
+        Two-phase to avoid destroying data on a transient ``os.path.exists``
+        false (flaky FUSE / network mount): the audit pass flips the row to
+        ``verification_state='orphaned'`` after observing the path is gone;
+        only THEN does this sweep purge it. Previously this method also
+        deleted any ``verification_state='ok'`` row whose file currently
+        didn't exist, so a single mount blip could destroy 500 code-extracted
+        rows per cycle. Now a separate audit + sweep are required.
+        """
         conn = self._store._conn
         if conn is None:
             return 0
         rows = conn.execute(
             """SELECT id, source_path FROM memories
                WHERE verification_state = 'orphaned'
-                  OR (source_path IS NOT NULL AND source_path != '' AND verification_state = 'ok')
                LIMIT ?""",
             (ORPHAN_SWEEP_MAX,),
         ).fetchall()
 
         to_delete: list[str] = []
         for mem_id, source_path in rows:
-            if not source_path:
-                continue
-            try:
-                if not os.path.exists(source_path):
-                    to_delete.append(mem_id)
-            except OSError:
-                to_delete.append(mem_id)
+            # Re-confirm at sweep time: if the file is back (mount was just
+            # transient), skip the purge so the audit pass can flip the row
+            # back to 'ok'. The audit's own re-check handles that flip.
+            if source_path:
+                try:
+                    if os.path.exists(source_path):
+                        continue
+                except OSError:
+                    pass
+            to_delete.append(mem_id)
             if len(to_delete) >= ORPHAN_SWEEP_MAX:
                 break
 
@@ -499,6 +528,114 @@ class Healer:
         logger.info("sweep_orphans: purged %d rows", len(to_delete))
         return len(to_delete)
 
+    def sweep_dangling_neighbours(self) -> int:
+        """Drop A-MEM neighbour refs that point to deleted memories.
+
+        After ``sweep_orphans`` purges rows, any memory whose metadata
+        carried ``neighbours: [{id: ..., score: ...}, ...]`` may now hold
+        ids that no longer resolve. This walks rows with a neighbours
+        field and rewrites the list to drop dangling ids.
+
+        Cheap: rare to find rows with neighbours, even rarer to find
+        dangling refs after a sweep. Bounded by SELECT LIMIT 500/run so
+        a pathological case can't dominate the tick.
+
+        Returns the count of dangling refs dropped.
+        """
+        conn = self._store._conn
+        if conn is None:
+            return 0
+        self.stats.neighbour_sweeps += 1
+
+        # Scan rows whose metadata blob is non-trivial — JSON_EXTRACT keeps
+        # this targeted to rows that actually have neighbours. SQLite's
+        # `json1` extension is built into all modern builds.
+        try:
+            rows = conn.execute(
+                """SELECT id, metadata FROM memories
+                   WHERE metadata IS NOT NULL
+                     AND metadata LIKE '%"neighbours"%'
+                   LIMIT 500"""
+            ).fetchall()
+        except sqlite3.Error as exc:
+            self.stats.last_error["sweep_dangling_neighbours"] = repr(exc)
+            return 0
+
+        if not rows:
+            return 0
+        self.stats.rows_with_neighbours_scanned += len(rows)
+
+        # Collect every referenced neighbour id into one set, then a single
+        # query confirms which still exist. Avoids N round-trips.
+        import json as _json
+        per_row_meta: list[tuple[str, dict]] = []
+        candidate_ids: set[str] = set()
+        for mem_id, raw in rows:
+            try:
+                meta = _json.loads(raw or "{}")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            neighbours = meta.get("neighbours")
+            if not isinstance(neighbours, list) or not neighbours:
+                continue
+            per_row_meta.append((mem_id, meta))
+            for n in neighbours:
+                if isinstance(n, dict):
+                    nid = n.get("id")
+                    if isinstance(nid, str) and nid:
+                        candidate_ids.add(nid)
+
+        if not candidate_ids:
+            return 0
+
+        # Bulk existence check
+        try:
+            placeholders = ",".join("?" * len(candidate_ids))
+            existing_rows = conn.execute(
+                f"SELECT id FROM memories WHERE id IN ({placeholders})",
+                tuple(candidate_ids),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            self.stats.last_error["sweep_dangling_neighbours"] = repr(exc)
+            return 0
+        existing = {r[0] for r in existing_rows}
+
+        # Rewrite metadata of any row holding dangling refs
+        dropped_total = 0
+        updates: list[tuple[str, str]] = []  # (new_meta_json, mem_id)
+        for mem_id, meta in per_row_meta:
+            neighbours = meta.get("neighbours") or []
+            kept = [
+                n for n in neighbours
+                if isinstance(n, dict) and n.get("id") in existing
+            ]
+            if len(kept) == len(neighbours):
+                continue  # Nothing to drop
+            dropped_total += (len(neighbours) - len(kept))
+            if kept:
+                meta["neighbours"] = kept
+            else:
+                meta.pop("neighbours", None)
+            updates.append((_json.dumps(meta), mem_id))
+
+        if updates:
+            conn.executemany(
+                "UPDATE memories SET metadata = ? WHERE id = ?",
+                updates,
+            )
+            conn.commit()
+            self.stats.dangling_refs_dropped += dropped_total
+            # Metadata-only rewrites — count toward the repair brake so
+            # a runaway never silently rewrites the whole DB.
+            self._record_repair(len(updates))
+            logger.info(
+                "sweep_dangling_neighbours: dropped %d refs across %d rows",
+                dropped_total, len(updates),
+            )
+        return dropped_total
+
     def reembed_skewed(self) -> int:
         """Re-embed rows whose embedding_version != current. Rate-limited
         to REEMBED_BATCH_MAX per pass to protect BGE throughput."""
@@ -519,10 +656,22 @@ class Healer:
         if not rows:
             return 0
 
-        # Batch embed
+        # Batch embed.
+        #
+        # M25 (Wave 7): use a private event loop owned by the healer thread
+        # rather than `asyncio.run(...)` per call. `asyncio.run` creates a
+        # FRESH loop every invocation, which trashes connection pools that
+        # the embedder client may hold (worst case: deadlock if the wrapped
+        # client uses `loop.call_soon_threadsafe`). The local Rust embedder
+        # is loop-agnostic so this is fine for the default config; the
+        # private loop matters when an HTTP-backed embedder is plugged in.
         contents = [r[1] or "" for r in rows]
         try:
-            vecs = asyncio.run(embedder.embed(contents))
+            loop = getattr(self, "_embed_loop", None)
+            if loop is None or loop.is_closed():
+                loop = asyncio.new_event_loop()
+                self._embed_loop = loop  # type: ignore[attr-defined]
+            vecs = loop.run_until_complete(embedder.embed(contents))
         except Exception as exc:
             logger.warning("reembed_skewed: embedder failed: %s", exc)
             self.stats.last_error["reembed_skewed"] = repr(exc)

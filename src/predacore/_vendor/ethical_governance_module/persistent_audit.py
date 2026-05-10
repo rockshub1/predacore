@@ -7,6 +7,7 @@ structured, queryable store.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -181,9 +182,14 @@ class PersistentAuditStore:
             result = await self._db_adapter.execute(self._DB_NAME, _sql, _params)
             entry_id = result.get("lastrowid", 0)
         else:
-            cur = self._conn.execute(_sql, _params)
-            self._conn.commit()
-            entry_id = cur.lastrowid or 0
+            # Direct sqlite path inside an async method: dispatch the sync
+            # I/O to a worker thread so we don't block the event loop. Under
+            # heavy EGM-decision load this kept all coroutines stalled.
+            def _sync_log() -> int:
+                cur = self._conn.execute(_sql, _params)
+                self._conn.commit()
+                return cur.lastrowid or 0
+            entry_id = await asyncio.to_thread(_sync_log)
         self._log.debug("Audit entry #%d logged for %s", entry_id, component)
         return entry_id
 
@@ -265,7 +271,10 @@ class PersistentAuditStore:
         if self._db_adapter is not None:
             rows = await self._db_adapter.query_dicts(self._DB_NAME, sql, params)
             return [self._dict_to_entry(r) for r in rows]
-        rows = self._conn.execute(sql, params).fetchall()
+        # Direct sqlite path: bounce the blocking fetch to a worker thread.
+        rows = await asyncio.to_thread(
+            lambda: self._conn.execute(sql, params).fetchall()
+        )
         return [self._row_to_entry(r) for r in rows]
 
     # -- Statistics ---------------------------------------------------------
@@ -340,25 +349,26 @@ class PersistentAuditStore:
             for r in rows:
                 by_severity[r["severity"]] = r["cnt"]
         else:
-            total = self._scalar("SELECT COUNT(*) FROM audit_log")
-            compliant = self._scalar(
-                "SELECT COUNT(*) FROM audit_log WHERE is_compliant = 1"
-            )
-            violations = self._scalar(
-                "SELECT COUNT(*) FROM audit_log WHERE is_compliant = 0"
-            )
-            by_principle = {}
-            for r in self._conn.execute(
-                "SELECT principle, COUNT(*) as cnt FROM audit_log "
-                "WHERE is_compliant = 0 AND principle != '' GROUP BY principle"
-            ).fetchall():
-                by_principle[r["principle"]] = r["cnt"]
-            by_severity = {}
-            for r in self._conn.execute(
-                "SELECT severity, COUNT(*) as cnt FROM audit_log "
-                "WHERE is_compliant = 0 GROUP BY severity"
-            ).fetchall():
-                by_severity[r["severity"]] = r["cnt"]
+            # Direct sqlite path: bounce the read fan-out to a worker thread
+            # so we don't block the event loop with multiple sync queries.
+            def _gather_stats() -> tuple[int, int, int, dict[str, int], dict[str, int]]:
+                t = self._scalar("SELECT COUNT(*) FROM audit_log")
+                c = self._scalar("SELECT COUNT(*) FROM audit_log WHERE is_compliant = 1")
+                v = self._scalar("SELECT COUNT(*) FROM audit_log WHERE is_compliant = 0")
+                bp: dict[str, int] = {}
+                for r in self._conn.execute(
+                    "SELECT principle, COUNT(*) as cnt FROM audit_log "
+                    "WHERE is_compliant = 0 AND principle != '' GROUP BY principle"
+                ).fetchall():
+                    bp[r["principle"]] = r["cnt"]
+                bs: dict[str, int] = {}
+                for r in self._conn.execute(
+                    "SELECT severity, COUNT(*) as cnt FROM audit_log "
+                    "WHERE is_compliant = 0 GROUP BY severity"
+                ).fetchall():
+                    bs[r["severity"]] = r["cnt"]
+                return t, c, v, bp, bs
+            total, compliant, violations, by_principle, by_severity = await asyncio.to_thread(_gather_stats)
 
         return {
             "total_entries": total,

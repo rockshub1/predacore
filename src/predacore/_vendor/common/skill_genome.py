@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import logging
 import os
 import pathlib
@@ -379,8 +380,22 @@ class SkillGenome:
             "invocation_count": self.invocation_count,
         }
 
+    # Canonical skill id format: ``skill_<12 hex chars>`` per
+    # ``__post_init__`` in this class. Anchored regex used by ``from_dict``
+    # to reject attacker-controlled JSON whose ``id`` would otherwise flow
+    # into Flame's filesystem path construction (skill_collective writes
+    # ``<dir>/{id}.json``); a malicious peer could publish a genome with
+    # ``id="../../../tmp/pwned"`` to escape ``~/.predacore/flame/``.
+    _ID_RE = re.compile(r"^skill_[a-f0-9]{12}$")
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SkillGenome:
+        raw_id = data.get("id")
+        if not isinstance(raw_id, str) or not cls._ID_RE.match(raw_id):
+            raise ValueError(
+                f"SkillGenome.from_dict: invalid id={raw_id!r}; "
+                f"must match {cls._ID_RE.pattern!r}",
+            )
         trust_data = data.get("trust", {})
         trust = TrustScore(
             level=TrustLevel(trust_data.get("level", "untrusted")),

@@ -101,6 +101,26 @@ class LaneQueue:
             default_timeout,
         )
 
+    def _record_dead_letter(self, task: LaneTask) -> None:
+        """Append a failed/timed-out task to the dead-letter queue (M17).
+
+        Previously the DLQ was declared but no path appended to it — failed
+        tasks were only logged, contradicting the docstring's promise of an
+        inspectable failure record. Cap at MAX_DEAD_LETTERS, FIFO eviction.
+        """
+        self._dead_letters.append(task)
+        overflow = len(self._dead_letters) - self.MAX_DEAD_LETTERS
+        if overflow > 0:
+            del self._dead_letters[:overflow]
+
+    def get_dead_letters(self, limit: int | None = None) -> list[LaneTask]:
+        """Return the dead-letter queue (most recent first).
+
+        Reads only — does not mutate. Pass `limit=N` for the last N.
+        """
+        snapshot = list(reversed(self._dead_letters))
+        return snapshot[:limit] if limit is not None else snapshot
+
     def _get_or_create_lane(self, session_id: str) -> Lane:
         """Get existing lane or create a new one."""
         if session_id not in self._lanes:
@@ -244,6 +264,7 @@ class LaneQueue:
                     if not future.done():
                         future.set_exception(TimeoutError(task.error))
                     logger.error("Task %s timed out in lane %s", task.task_id, lane.session_id[:8])
+                    self._record_dead_letter(task)
 
                 except Exception as e:
                     task.status = TaskStatus.FAILED
@@ -257,6 +278,7 @@ class LaneQueue:
                         lane.session_id[:8],
                         e,
                     )
+                    self._record_dead_letter(task)
 
                 finally:
                     task.completed_at = time.time()

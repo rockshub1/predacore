@@ -151,12 +151,29 @@ class TwilioAdapter(ChannelAdapter):
         self._client = Client(self._account_sid, self._auth_token)
         self._validator = RequestValidator(self._auth_token)
 
+        # Default: refuse to run without signature verification configured.
+        # Anyone who can POST to the listener can otherwise run an LLM turn
+        # billed to the operator's Twilio account. Set
+        # PREDACORE_TWILIO_INSECURE=1 to opt out (development only).
+        insecure_optin = os.environ.get("PREDACORE_TWILIO_INSECURE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
         if not self._public_url:
+            if not insecure_optin:
+                logger.critical(
+                    "Twilio: PREDACORE_TWILIO_PUBLIC_URL is required for "
+                    "webhook signature verification. Refusing to start. "
+                    "Set it to your ngrok/public URL (e.g. https://abc.ngrok.io%s/sms), "
+                    "or set PREDACORE_TWILIO_INSECURE=1 for local development.",
+                    self._webhook_path,
+                )
+                return
             logger.warning(
-                "Twilio: PREDACORE_TWILIO_PUBLIC_URL unset — webhook "
-                "signature verification will be SKIPPED. Set this to your "
-                "ngrok/public URL (e.g. https://abc.ngrok.io%s/sms) for "
-                "production.", self._webhook_path,
+                "Twilio: PREDACORE_TWILIO_INSECURE=1 set — accepting webhooks "
+                "WITHOUT signature verification. Anyone reachable on %s:%d can "
+                "run an LLM turn on this account. Do NOT use in production.",
+                os.environ.get("PREDACORE_TWILIO_BIND_HOST", "127.0.0.1"),
+                self._port,
             )
 
         # aiohttp listener for inbound SMS webhooks.

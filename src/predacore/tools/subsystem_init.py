@@ -51,6 +51,12 @@ class SubsystemBundle:
     sandbox: Any = None
     docker_sandbox: Any = None
     sandbox_pool: Any = None
+    # Identity-wiring (PR1): pre-hoc safety + autonomous skill evolution.
+    # critic_gate fires before high-stakes tool dispatch (W2).
+    # skill_crystallizer observes the dispatcher's execution stream and
+    # crystallizes recurring patterns into Flame skill genomes (W1).
+    critic_gate: Any = None
+    skill_crystallizer: Any = None
     # Track what's available for logging
     available: list[str] = field(default_factory=list)
 
@@ -126,14 +132,66 @@ class SubsystemFactory:
         cls._init_llm_collab(bundle, config, skip_cli_providers)
         cls._init_openclaw(bundle, config)
         cls._init_sandbox(bundle, config)
+        # PR1 (W2 + W1): pre-hoc safety + autonomous skill evolution.
+        # Both depend on llm_for_collab (critic) or are llm-free (crystallizer),
+        # so they run AFTER _init_llm_collab.
+        cls._init_critic_and_crystallizer(bundle, _home)
 
         logger.info(
             "SubsystemFactory: initialized [%s] (%d/%d)",
             ", ".join(bundle.available),
             len(bundle.available),
-            8,
+            10,
         )
         return bundle
+
+    @staticmethod
+    def _init_critic_and_crystallizer(bundle: SubsystemBundle, home_dir: str) -> None:
+        """PR1: wire pre-hoc CriticGate + SkillCrystallizer.
+
+        CriticGate (W2): a separate LLM judges high-stakes tool calls BEFORE
+        execution. Refuses or revises actions that would violate SOUL_SEED
+        invariants — programmatic enforcement, not prompt-level request.
+
+        SkillCrystallizer (W1): observes the dispatcher's execution stream;
+        crystallizes recurring patterns (≥3 occurrences across distinct
+        contexts, ≥80% success rate) into HMAC-signed Flame skill genomes
+        that can be shared across instances. The autonomous-evolution
+        machinery already exists; this wires it into the live loop.
+        """
+        # CriticGate — needs an LLM to judge, so skip if collab LLM didn't init.
+        if bundle.llm_for_collab is not None:
+            try:
+                try:
+                    from predacore.agents.critic import CriticGate
+                except ImportError:
+                    from src.predacore.agents.critic import CriticGate  # type: ignore
+                bundle.critic_gate = CriticGate(llm=bundle.llm_for_collab)
+                bundle.available.append("critic_gate")
+                logger.info("CriticGate active (pre-hoc safety on high-stakes tools)")
+            except (ImportError, RuntimeError) as exc:
+                logger.warning("CriticGate init failed: %s", exc)
+        else:
+            logger.info("CriticGate skipped (no llm_for_collab)")
+
+        # SkillCrystallizer — no LLM dependency; always wire if vendor available.
+        try:
+            try:
+                from predacore._vendor.common.skill_evolution import SkillCrystallizer
+            except ImportError:
+                from src.predacore._vendor.common.skill_evolution import (  # type: ignore
+                    SkillCrystallizer,
+                )
+            bundle.skill_crystallizer = SkillCrystallizer(
+                user=os.environ.get("PREDACORE_MEMORY_USER")
+                or os.environ.get("USER")
+                or "default",
+                data_dir=Path(home_dir) / "skills" / "evolved",
+            )
+            bundle.available.append("skill_crystallizer")
+            logger.info("SkillCrystallizer active (auto-observing tool patterns)")
+        except (ImportError, OSError, RuntimeError) as exc:
+            logger.warning("SkillCrystallizer init failed: %s", exc)
 
     # ── Individual Initializers ──────────────────────────────────
 
@@ -240,6 +298,22 @@ class SubsystemFactory:
                     bundle.memory_healer = Healer(bundle.unified_memory, user=healer_user)
                     bundle.memory_healer.start()
                     bundle.available.append("memory_healer")
+                    # M2 (Wave 7): register an atexit hook so the healer's
+                    # background thread is joined on process exit even when
+                    # no caller wires `bundle.memory_healer.stop()` into a
+                    # graceful shutdown path. Belt-and-suspenders — gateway
+                    # cleanup should still call stop() explicitly when it
+                    # owns the bundle, but pytest runs and ad-hoc scripts
+                    # that drop the bundle on the floor get clean exit too.
+                    import atexit
+                    _healer_ref = bundle.memory_healer
+                    def _stop_healer_on_exit() -> None:
+                        try:
+                            if _healer_ref is not None:
+                                _healer_ref.stop()
+                        except Exception:  # pragma: no cover — best-effort
+                            pass
+                    atexit.register(_stop_healer_on_exit)
                     logger.info("Memory healer enabled (user=%s)", healer_user)
                 except (ImportError, OSError, RuntimeError) as heal_exc:
                     logger.warning(

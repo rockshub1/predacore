@@ -461,7 +461,29 @@ async def _frontmost_app() -> str:
 # ── Helper ──────────────────────────────────────────────────────────
 
 def _js_esc(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    """Escape a string for safe interpolation inside a JS double-quoted literal.
+
+    M10 (Wave 7): the previous implementation only escaped `\\`, `"`, and
+    `\\n` — leaving `\\r`, U+2028, U+2029, and `</script>` as breakouts that
+    let an attacker-controlled label or selector terminate the literal and
+    inject JS into the page. `json.dumps(s)[1:-1]` produces a fully-
+    escaped JSON-string body (already handles all dangerous code points)
+    without the surrounding quotes, which is exactly what the call sites
+    interpolating into ``"..."`` expect.
+
+    For new call sites, prefer wrapping the entire literal with
+    ``json.dumps(s)`` instead — that's even safer because it generates the
+    surrounding quotes. This helper exists for legacy callers that already
+    write the quotes themselves.
+    """
+    if not s:
+        return ""
+    body = json.dumps(s)[1:-1]
+    # `json.dumps` doesn't escape `</script>` (it's just printable text),
+    # but in a `<script>` block it terminates the script tag. Belt-and-
+    # suspenders: split it.
+    body = body.replace("</script>", "<\\/script>")
+    return body
 
 
 # Key name → CDP key descriptor
@@ -1739,35 +1761,35 @@ class BrowserBridge:
         return {"ok": True}
 
     # ── HTTP Auth Dialog Handling ──────────────────────────
-
-    async def set_auth_credentials(self, username: str, password: str) -> dict[str, Any]:
-        """Auto-respond to HTTP basic auth dialogs (CDP only).
-
-        When a site sends a 401 with WWW-Authenticate, Chrome shows a login
-        dialog. This intercepts it and provides credentials automatically.
-        """
-        if not self.is_cdp:
-            return {"ok": False, "error": "Auth handling requires Chrome CDP"}
-        # Enable fetch interception for auth requests
-        await self._backend.send("Fetch.enable", {
-            "handleAuthRequests": True,
-        }, timeout=3)
-        # Store credentials for the event handler
-        # We use Page.addScriptToEvaluateOnNewDocument to handle the auth
-        # via a simpler approach: override XMLHttpRequest to include auth headers
-        auth_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()
-        await self._eval(f'''
-            // Auto-inject Authorization header for requests that need it
-            window.__predacore_auth = "Basic {auth_b64}";
-        ''')
-        return {"ok": True, "username": username, "note": "Auth credentials set — will auto-respond to 401 challenges"}
+    # `set_auth_credentials` was removed: the previous implementation stashed
+    # base64(user:pass) in `window.__predacore_auth` via JS and called
+    # `Fetch.enable` with `handleAuthRequests=True` but never registered a
+    # `Fetch.authRequired` listener — the credentials were globally readable
+    # by every script on every page while doing nothing for the advertised
+    # 401 auto-handling. A correct implementation needs:
+    #   1. `Fetch.enable({handleAuthRequests: true})`
+    #   2. Subscribe to the `Fetch.authRequired` CDP event
+    #   3. Reply with `Fetch.continueWithAuth({requestId, authChallengeResponse:
+    #      {response: "ProvideCredentials", username, password}})`
+    # plus a per-domain credential map so we don't send creds to redirected
+    # hosts. Until that lands, callers should not use this surface; remove
+    # the broken function entirely so calls hard-fail rather than silently
+    # leaking credentials into the page DOM.
 
     async def clear_auth_credentials(self) -> dict[str, Any]:
-        """Remove auto-auth and disable fetch interception."""
+        """Remove any leftover `__predacore_auth` JS variable from a previous
+        broken call to the now-removed ``set_auth_credentials`` and disable
+        fetch interception. Safe to call even if no auth was ever set."""
         if not self.is_cdp:
             return {"ok": False, "error": "Auth handling requires Chrome CDP"}
-        await self._backend.send("Fetch.disable", timeout=3)
-        await self._eval("delete window.__predacore_auth;")
+        try:
+            await self._backend.send("Fetch.disable", timeout=3)
+        except Exception:  # pragma: no cover — best-effort cleanup
+            pass
+        try:
+            await self._eval("try { delete window.__predacore_auth; } catch(e) {}")
+        except Exception:  # pragma: no cover
+            pass
         return {"ok": True}
 
     # ── JS Dialog Handling (alert/confirm/prompt) ──────────

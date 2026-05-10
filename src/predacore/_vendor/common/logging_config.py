@@ -23,6 +23,11 @@ Usage:
 """
 from __future__ import annotations
 
+# M31 (Wave 7): module-level flag tracks whether setup_logging has been
+# called this interpreter. Subsequent calls only replace OUR handlers,
+# preserving anything the embedding caller has attached.
+_SETUP_LOGGING_INITIALIZED: bool = False
+
 import json
 import logging
 import sys
@@ -182,8 +187,22 @@ def setup_logging(
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # Remove existing handlers to avoid duplicates
-    root.handlers.clear()
+    # M31 (Wave 7): only clear handlers on the FIRST call. Previously every
+    # `setup_logging` invocation wiped any handlers attached by other code
+    # (e.g. pytest fixtures, embedding callers) — destructive when reused
+    # in test harnesses or when the daemon's setup_logging fired twice.
+    # Module-level flag survives across calls in the same interpreter.
+    global _SETUP_LOGGING_INITIALIZED
+    if not _SETUP_LOGGING_INITIALIZED:
+        root.handlers.clear()
+        _SETUP_LOGGING_INITIALIZED = True
+    else:
+        # Remove only OUR handlers (keyed by formatter type), preserving
+        # anything the embedding caller installed.
+        for h in list(root.handlers):
+            fmt = getattr(h, "formatter", None)
+            if isinstance(fmt, (JSONFormatter, PrettyFormatter)):
+                root.removeHandler(h)
 
     if log_file:
         # File-only logging (daemon mode) — rotating to prevent unbounded growth

@@ -27,7 +27,6 @@ import json
 import logging
 import math
 import os
-import pickle
 import re
 import time
 from collections import defaultdict
@@ -565,6 +564,13 @@ class CodeIndex:
     # ── #4: Persistent index to disk ─────────────────────────────
 
     def _index_path(self) -> Path:
+        # M15 (Wave 7): renamed `code_index.pkl` → `code_index.json` to
+        # match actual JSON contents. Old `.pkl` files are migrated on
+        # first run by `load_from_disk` falling back to the legacy path.
+        return Path(self._home_dir) / "code_index.json"
+
+    def _legacy_index_path(self) -> Path:
+        """Old extension — kept for one-shot migration on first load."""
         return Path(self._home_dir) / "code_index.pkl"
 
     def save_to_disk(self) -> bool:
@@ -575,7 +581,8 @@ class CodeIndex:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             data = {
-                "version": 2,
+                # M15: single canonical version — no more set-then-overwrite.
+                "version": 3,
                 "repo_root": self._repo_root,
                 "index_hash": self._index_hash,
                 "file_hashes": self._file_hashes,
@@ -589,7 +596,6 @@ class CodeIndex:
                 "import_graph_data": self._import_graph.to_dict(),
                 "saved_at": time.time(),
             }
-            data["version"] = 3  # Bump version — no more pickle
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, separators=(",", ":"), default=str)
             logger.info("Code index saved to disk: %s (%.1fKB)", path, path.stat().st_size / 1024)
@@ -602,9 +608,20 @@ class CodeIndex:
         """Load index from disk. Returns True if loaded successfully."""
         path = self._index_path()
         if not path.exists():
-            return False
+            # M15: one-shot migration from legacy `.pkl` filename (the
+            # contents were always JSON, only the extension was wrong).
+            legacy = self._legacy_index_path()
+            if legacy.exists():
+                try:
+                    legacy.rename(path)
+                    logger.info("Migrated code index path: %s -> %s", legacy, path)
+                except OSError as exc:
+                    logger.debug("Legacy index migration failed (non-fatal): %s", exc)
+                    return False
+            else:
+                return False
         try:
-            with open(path, "rb") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("version") != 3:
                 logger.info("Code index version mismatch, rebuilding")
@@ -630,7 +647,9 @@ class CodeIndex:
                 len(self._signatures), len(self._chunks), len(self._commits),
             )
             return True
-        except (OSError, pickle.UnpicklingError, ValueError, KeyError) as exc:
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as exc:
+            # M15: replaced misleading `pickle.UnpicklingError` with
+            # `json.JSONDecodeError` — the actual deserializer.
             logger.warning("Failed to load code index: %s", exc)
             return False
 

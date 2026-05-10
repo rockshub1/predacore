@@ -69,7 +69,11 @@ class ToolExecutor:
         self._trust_policy = self._trust_evaluator.policy
 
         self._tool_rate_max = int(os.getenv("PREDACORE_TOOL_RATE_LIMIT", "120"))
-        self._tool_timeout = int(os.getenv("PREDACORE_TOOL_TIMEOUT_SECONDS", "120"))
+        # M1 (Wave 7): use the dispatcher's canonical default (600) so
+        # `PREDACORE_TOOL_TIMEOUT_SECONDS` unset doesn't mean two different
+        # things depending on whether you went through the executor or
+        # constructed `ToolDispatcher` directly.
+        self._tool_timeout = int(os.getenv("PREDACORE_TOOL_TIMEOUT_SECONDS", "600"))
 
         # ── Subsystems (single source of truth) ──────────────────────
         bundle = SubsystemFactory.create_all(config, home_dir=home_dir)
@@ -85,6 +89,9 @@ class ToolExecutor:
         self._sandbox = bundle.sandbox
         self._docker_sandbox = bundle.docker_sandbox
         self._sandbox_pool = bundle.sandbox_pool or SessionSandboxPool(max_sessions=DEFAULT_SANDBOX_POOL_SIZE)
+        # PR1: pre-hoc safety + autonomous skill evolution.
+        self._critic_gate = bundle.critic_gate
+        self._skill_crystallizer = bundle.skill_crystallizer
 
         # Session-scoped in-memory cache
         self._memory: dict[str, dict[str, Any]] = {}
@@ -105,6 +112,8 @@ class ToolExecutor:
             openclaw_enabled=self._openclaw_enabled,
             llm_for_collab=self._llm_for_collab,
             unified_memory=self._unified_memory,
+            critic_gate=self._critic_gate,
+            skill_crystallizer=self._skill_crystallizer,
             trust_policy=self._trust_policy,
             http_with_retry=self._http_with_retry,
             format_sandbox_result=self._format_sandbox_result,
@@ -198,6 +207,8 @@ class ToolExecutor:
         ctx.desktop_operator = self._desktop_operator
         ctx.sandbox = self._sandbox
         ctx.docker_sandbox = self._docker_sandbox
+        ctx.critic_gate = self._critic_gate
+        ctx.skill_crystallizer = self._skill_crystallizer
         ctx.sandbox_pool = self._sandbox_pool
         ctx.openclaw_runtime = self._openclaw_runtime
         ctx.unified_memory = self._unified_memory

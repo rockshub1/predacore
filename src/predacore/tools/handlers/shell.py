@@ -280,6 +280,32 @@ async def handle_python_exec(args: dict[str, Any], ctx: ToolContext) -> str:
             return ctx.format_sandbox_result(result)
         return str(result)[:50000]
 
+    # No Docker available — fall back to in-process subprocess wrapper.
+    # The substring blocklist below is defense-in-depth ONLY: any non-trivial
+    # adversarial code can bypass it (string concat, hex/unicode escapes,
+    # `__class__.__bases__[0].__subclasses__()`, etc.). To keep the bypass
+    # blast radius small in this last-resort path we additionally:
+    #   1. Refuse network (Docker is required for sandboxed network).
+    #   2. Refuse when trust_level != yolo (so any approval-gated session
+    #      cannot quietly land in this mode).
+    #   3. Cap timeout at 30s (Docker path keeps the original up-to-300s).
+    if network_allowed:
+        raise blocked(
+            "python_exec network access requires Docker sandbox. Install "
+            "Docker (`docker pull predacore/sandbox`) and retry, or set "
+            "network_allowed=false.",
+            tool="python_exec",
+        )
+    _trust_level = getattr(ctx.config.security, "trust_level", "ask_everytime")
+    if _trust_level != "yolo":
+        raise blocked(
+            "python_exec without Docker is restricted in approval-gated mode "
+            "(trust_level='ask_everytime'). Install Docker to run code "
+            "sandboxed, or switch to 'yolo' trust if you accept the risk.",
+            tool="python_exec",
+        )
+    timeout = min(timeout, 30)
+
     _BLOCKED_PATTERNS = [
         "import subprocess", "import os", "os.system", "os.popen",
         "os.exec", "__import__", "eval(", "exec(", "compile(",

@@ -206,6 +206,13 @@ class BeliefStore:
 
     # ── Mutations ─────────────────────────────────────────────────────
 
+    # S4 (PR2): hard cap on belief text length. BELIEFS.md is loaded into
+    # every turn's system prompt, so big beliefs hurt prompt budget.
+    # Wave 11: 2KB → 8KB. With ~50 typical beliefs at this size, max
+    # BELIEFS.md is ~400KB (still feasible in 200k window) but real
+    # beliefs stay short (one durable principle each).
+    _MAX_BELIEF_TEXT_BYTES = 8192
+
     def add_observation(
         self,
         text: str,
@@ -217,6 +224,13 @@ class BeliefStore:
         text = text.strip()
         if not text:
             raise ValueError("Belief text cannot be empty")
+        if len(text) > self._MAX_BELIEF_TEXT_BYTES:
+            logger.warning(
+                "Belief text truncated from %d to %d bytes — keep beliefs "
+                "concise (one durable principle per row).",
+                len(text), self._MAX_BELIEF_TEXT_BYTES,
+            )
+            text = text[: self._MAX_BELIEF_TEXT_BYTES] + "..."
 
         now = _now_iso()
         bid = _short_id()

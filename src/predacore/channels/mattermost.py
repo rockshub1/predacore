@@ -49,6 +49,11 @@ class MattermostAdapter(ChannelAdapter):
         self._ws_task: asyncio.Task | None = None
         self._self_user_id: str | None = None
         self._running = False
+        # Captured at start() so _on_event can dispatch from the driver's WS
+        # thread without calling asyncio.get_event_loop() (deprecated /
+        # broken on Python 3.12+ from non-main threads). Same fix iMessage
+        # already applied.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
         if not (self._url and self._token):
@@ -74,6 +79,7 @@ class MattermostAdapter(ChannelAdapter):
             logger.error("Mattermost login failed: %s", exc)
             return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._ws_task = asyncio.create_task(self._websocket_loop(), name="mattermost-ws")
         logger.info("Mattermost adapter started (user=%s)", self._self_user_id)
 
@@ -83,7 +89,9 @@ class MattermostAdapter(ChannelAdapter):
             self._ws_task.cancel()
             try:
                 await self._ws_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except asyncio.CancelledError:
+                raise  # M27 Wave 7: re-raise to propagate parent cancellation
+            except Exception:  # noqa: BLE001
                 pass
         logger.info("Mattermost adapter stopped")
 
@@ -129,8 +137,13 @@ class MattermostAdapter(ChannelAdapter):
         channel_id = post.get("channel_id", "")
         if not text or not channel_id:
             return
-        # Schedule the dispatch on the running loop.
-        loop = asyncio.get_event_loop()
+        # Schedule the dispatch on the captured loop. Using
+        # `asyncio.get_event_loop()` here would deprecate-warn on 3.10 and
+        # raise on 3.12+ because we're inside the driver's WS thread, not
+        # the event loop's main thread.
+        loop = self._loop
+        if loop is None:
+            return
         asyncio.run_coroutine_threadsafe(
             self._dispatch(channel_id, post.get("user_id", ""), text), loop,
         )

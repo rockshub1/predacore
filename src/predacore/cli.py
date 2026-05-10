@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import select
 import subprocess as _subprocess
 import sys
@@ -1554,10 +1555,36 @@ async def _run_setup() -> None:
     if env_writes:
         env_file = DEFAULT_HOME / ".env"
         existing_content = env_file.read_text() if env_file.exists() else ""
+        # M47 (Wave 7):
+        #   1. Idempotency was a substring match across the WHOLE file —
+        #      `OPENAI_API_KEY` appearing in any comment suppressed re-write
+        #      with a new value. Anchor at start-of-line per env var.
+        #   2. Values containing `\n`, `#`, `"`, `\\`, or other shell-meta
+        #      could corrupt the file or be parsed wrong by python-dotenv.
+        #      Use shlex.quote when the value isn't shell-safe; warn on
+        #      embedded control chars (which we can't safely round-trip).
+        import shlex as _shlex
+        existing_lines = existing_content.splitlines()
         with open(env_file, "a") as f:
             for env_var, secret_val in env_writes.items():
-                if env_var not in existing_content:
-                    f.write(f"{env_var}={secret_val}\n")
+                anchor_re = re.compile(rf"^{re.escape(env_var)}=")
+                if any(anchor_re.match(line) for line in existing_lines):
+                    continue
+                # Refuse control chars — `\n` would forge a new env line,
+                # `\r` confuses some parsers. NUL is a non-starter.
+                if any(c in secret_val for c in "\x00\n\r"):
+                    console.print(
+                        f"  [warning]Skipping {env_var}: value contains "
+                        "control characters that would corrupt .env[/warning]",
+                    )
+                    continue
+                # shlex.quote returns the unquoted form when safe (alnum/
+                # underscore/dash/dot/slash) and a single-quoted form
+                # otherwise. python-dotenv accepts both.
+                quoted = _shlex.quote(secret_val) if any(
+                    c in secret_val for c in ' "\'#$\\`!*?[]{}<>|&;()'
+                ) else secret_val
+                f.write(f"{env_var}={quoted}\n")
         os.chmod(str(env_file), 0o600)
         secret_count = len(env_writes)
         plural = "s" if secret_count != 1 else ""
@@ -1882,13 +1909,14 @@ Commands:
     # Start command
     start_parser = subparsers.add_parser("start", help="Start PredaCore")
     start_parser.add_argument(
-        "--daemon", "-d", action="store_true", help="Run as background daemon"
+        "--daemon", "-d", action="store_true",
+        help="(default) Run as detached background daemon. Bare `predacore start` already does this.",
     )
     start_parser.add_argument(
         "--foreground",
         "-f",
         action="store_true",
-        help="Run daemon in foreground (no fork)",
+        help="Run attached in current terminal (legacy debug mode); dies with the shell.",
     )
     start_parser.add_argument("--config", "-c", help="Path to config file")
     start_parser.add_argument(
@@ -2177,8 +2205,29 @@ def _run_zero_args_flow() -> None:
             "  [glass.text.dim]Restarting daemon so it picks up the new provider...[/glass.text.dim]"
         )
         _run_stop(config_path=None)
-        # Give signals a moment to settle before restarting
-        time.sleep(1.0)
+        # M50 (Wave 7): wait for the OLD pid to actually exit before
+        # respawning. Previous `time.sleep(1.0)` was a guess — on slow
+        # systems the old daemon was still holding port 3000 when the new
+        # subprocess tried to bind, and the user only saw a hang while
+        # _wait_for_daemon polled for 15s. Cap the wait at 10s to give the
+        # graceful shutdown enough room without hanging the CLI forever.
+        old_pid = pid_manager.read()
+        if old_pid:
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                try:
+                    os.kill(old_pid, 0)  # signal 0 = existence check
+                except (ProcessLookupError, PermissionError):
+                    break  # gone (or escalated to a different uid — done)
+                time.sleep(0.1)
+            else:
+                console.print(
+                    "  [warning]Old daemon (PID {}) didn't exit within 10s. "
+                    "If startup fails, run `predacore stop` manually and retry."
+                    "[/warning]".format(old_pid),
+                )
+        else:
+            time.sleep(0.5)  # No PID file — just give signals a beat
 
     if not pid_manager.is_running():
         console.print()
@@ -2549,7 +2598,9 @@ def _run_doctor(
     # ── Memory ──
     console.print("\n[bold]Memory & Storage[/bold]")
     try:
-        from src.predacore.memory import UnifiedMemoryStore  # type: ignore  # noqa: F401
+        # L55 (Wave 8): use relative import so `predacore doctor` works in
+        # installed layouts where the package is `predacore`, not `src.predacore`.
+        from .memory import UnifiedMemoryStore  # type: ignore  # noqa: F401
         ok("UnifiedMemoryStore available")
     except ImportError:
         warn("Memory system not importable")
@@ -2611,7 +2662,16 @@ def _run_start(args) -> None:
         )
         return
 
-    if args.daemon and not args.foreground:
+    # New default: `predacore start` spawns a detached daemon. This survives
+    # terminal close, parent-shell exit, and SIGHUP. The legacy "run attached
+    # in current terminal" behavior is now opt-in via `--foreground` (without
+    # `--daemon`). The internal `--daemon --foreground` combo is kept because
+    # the detached subprocess re-execs itself with both flags.
+    explicit_attached = args.foreground and not args.daemon
+    internal_subprocess = args.daemon and args.foreground
+    detach = not explicit_attached and not internal_subprocess
+
+    if detach:
         # Background daemon mode — spawn a detached subprocess
         import subprocess
         import sys
@@ -2659,16 +2719,18 @@ def _run_start(args) -> None:
         console.print("   [muted]Run `predacore status` to check[/muted]")
         console.print("   [muted]Run `predacore stop` to stop[/muted]")
         console.print(f"   [muted]PID: {proc.pid}[/muted]")
+    elif internal_subprocess:
+        # Detached subprocess re-exec path — set up file logging and run.
+        log_dir = Path(config.logs_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "daemon.log"
+        setup_logging(level="INFO", json_mode=True, log_file=str(log_file))
+        asyncio.run(daemon.start())
     else:
-        # Foreground mode — set up file logging if running as daemon subprocess
-        if args.daemon:
-            log_dir = Path(config.logs_dir)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log_file = log_dir / "daemon.log"
-            setup_logging(level="INFO", json_mode=True, log_file=str(log_file))
-        else:
-            console.print("[success]Starting PredaCore in foreground mode...[/success]")
-            console.print("   [muted]Press Ctrl+C to stop[/muted]")
+        # explicit_attached: user asked for `--foreground` without `--daemon`.
+        # Runs in the current terminal; dies with the shell. Useful for debug.
+        console.print("[success]Starting PredaCore in foreground mode (attached)...[/success]")
+        console.print("   [muted]Press Ctrl+C to stop. Use `predacore start` (no --foreground) for normal background daemon.[/muted]")
         asyncio.run(daemon.start())
 
 
@@ -2833,8 +2895,14 @@ def _run_restart(config_path: str | None = None) -> None:
     _run_stop(config_path=config_path)
     time.sleep(2)
 
-    # Build start command
-    cmd = [sys.executable, "-m", "src.predacore.cli", "start", "--daemon"]
+    # Build start command. L54 (Wave 8): use the same module-path
+    # resolution `_run_start` uses so this works in installed (pipx/pip)
+    # layouts where the module is `predacore.cli`, not `src.predacore.cli`.
+    if __name__ == "__main__":
+        _module_name = "src.predacore.cli"
+    else:
+        _module_name = __name__.rsplit(".", 1)[0] + ".cli"
+    cmd = [sys.executable, "-m", _module_name, "start", "--daemon"]
     if config_path:
         cmd.extend(["--config", config_path])
 

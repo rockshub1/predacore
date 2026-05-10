@@ -147,8 +147,13 @@ class ApprovalHistory:
 
     @staticmethod
     def _hash_args(arguments: dict) -> str:
+        # M7 (Wave 7): use the full SHA-256 hex digest. Truncating to 16
+        # hex chars (64 bits) was an unnecessary narrowing of the collision
+        # space — full digest is 64 hex chars and gets stored in approvals
+        # SQLite with negligible space cost vs. eliminating the collision
+        # surface entirely.
         raw = json.dumps(arguments, sort_keys=True, default=str)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def check(self, tool_name: str, arguments: dict) -> bool | None:
         """Check if there's a previous approval. Returns True/False/None."""

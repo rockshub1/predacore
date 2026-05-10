@@ -579,19 +579,51 @@ class Flame:
     # -- Reputation persistence ---------------------------------------------
 
     def _save_reputation(self) -> None:
+        """Persist reputation map to ``reputation.json`` (atomic + locked).
+
+        M32 (Wave 7): cross-process lock on a sibling lockfile via
+        ``fcntl.flock``. Atomic-write was already protecting file
+        integrity, but the read-modify-write window in `record_report`
+        was unprotected — concurrent processes silently dropped reports.
+        Now serialised across the entire RMW operation: caller acquires
+        the lock, reads, modifies in memory, writes, releases.
+        """
         path = self._shared_dir / "reputation.json"
         tmp_path = path.with_suffix(".json.tmp")
+        lock_path = path.with_suffix(".lock")
+        lock_fd = None
         try:
+            try:
+                import fcntl
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError) as exc:
+                # fcntl unavailable (Windows) — fall through with atomic
+                # write protecting file integrity (RMW races still possible).
+                logger.debug("Reputation lock unavailable (%s)", exc)
+                lock_fd = None
+
             with open(tmp_path, "w") as f:
                 json.dump(self._reputation, f, indent=2, default=str)
             os.replace(str(tmp_path), str(path))
         except Exception as e:
             logger.error("Failed to save reputation: %s", e)
-            # Clean up temp file on failure
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        finally:
+            if lock_fd is not None:
+                try:
+                    import fcntl
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
     def _load_reputation(self) -> None:
         path = self._shared_dir / "reputation.json"

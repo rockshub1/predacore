@@ -62,8 +62,15 @@ def _cron_save() -> None:
         logger.debug("Failed to save cron tasks: %s", _exc)
 
 
-def _cron_load() -> None:
-    """Load persisted cron tasks from disk (called once on first access)."""
+def _cron_load(ctx: ToolContext | None = None) -> None:
+    """Load persisted cron tasks from disk (called once on first access).
+
+    H2 fix: tasks that were ``active`` at shutdown are RESUMED — their
+    asyncio loops are re-attached when ``ctx`` is provided. Previously this
+    flipped every reloaded task to ``active=False`` so scheduled jobs
+    silently disappeared after restart and ``cron list`` showed them as
+    "cancelled" — the opposite of the user's mental model.
+    """
     global _CRON_LOADED, _CRON_COUNTER
     if _CRON_LOADED:
         return
@@ -71,9 +78,17 @@ def _cron_load() -> None:
     try:
         if _CRON_FILE.exists():
             data = json.loads(_CRON_FILE.read_text())
+            resumed = 0
             for tid, task in data.items():
-                task["active"] = False  # don't auto-restart
                 _CRON_TASKS[tid] = task
+                if task.get("active") and ctx is not None:
+                    _cron_spawn_loop(tid, ctx)
+                    resumed += 1
+                elif task.get("active") and ctx is None:
+                    # No ctx available at load time (e.g. CLI helpers that
+                    # call _cron_load() without context). Mark as needing
+                    # resume so the next handle_cron_task call picks it up.
+                    task["_needs_resume"] = True
             existing_ids = []
             for t in _CRON_TASKS:
                 if t.startswith("cron_"):
@@ -83,9 +98,88 @@ def _cron_load() -> None:
                         pass
             if existing_ids:
                 _CRON_COUNTER = max(existing_ids)
-            logger.info("Loaded %d persisted cron tasks from disk", len(data))
+            logger.info(
+                "Loaded %d persisted cron tasks (resumed %d)",
+                len(data), resumed,
+            )
     except (OSError, json.JSONDecodeError, ValueError) as _exc:
         logger.debug("Failed to load cron tasks: %s", _exc)
+
+
+def _cron_resume_pending(ctx: ToolContext) -> int:
+    """Resume any task flagged ``_needs_resume`` by an earlier ctx-less load."""
+    resumed = 0
+    for tid, task in list(_CRON_TASKS.items()):
+        if task.pop("_needs_resume", False) and task.get("active"):
+            _cron_spawn_loop(tid, ctx)
+            resumed += 1
+    return resumed
+
+
+def _cron_spawn_loop(task_id: str, ctx: ToolContext) -> None:
+    """Create the asyncio task that drives a single cron entry's loop.
+
+    Reads everything dynamically from ``_CRON_TASKS[task_id]`` so the same
+    function works for both fresh creates and post-restart resumes (where
+    we have to rebuild the closure from persisted state).
+    """
+    task = _CRON_TASKS.get(task_id)
+    if task is None:
+        return
+    interval = int(task.get("interval_min") or 10)
+    max_runs = int(task.get("max_runs") or 0)
+    name = str(task.get("name") or task_id)
+    command = str(task.get("command") or "")
+
+    async def _cron_loop():
+        try:
+            while _CRON_TASKS.get(task_id, {}).get("active", False):
+                await asyncio.sleep(interval * 60)
+                t = _CRON_TASKS.get(task_id)
+                if not t or not t.get("active"):
+                    break
+                if max_runs > 0 and t.get("run_count", 0) >= max_runs:
+                    t["active"] = False
+                    break
+                t["run_count"] = t.get("run_count", 0) + 1
+                t["last_run"] = time.time()
+                logger.info("Cron task %s (%s) — run #%d", task_id, name, t["run_count"])
+                proc = None
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *shlex.split(command),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _trust = getattr(ctx.config.security, "trust_level", "ask_everytime")
+                    _cron_timeout = 3600 if _trust == "yolo" else 300
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=_cron_timeout,
+                    )
+                    t["last_output"] = (stdout or b"").decode(errors="replace")[:200_000]
+                    t["last_error"] = (
+                        (stderr or b"").decode(errors="replace")[:100_000]
+                        if proc.returncode != 0 else None
+                    )
+                except asyncio.TimeoutError:
+                    t["last_error"] = f"[Command timed out after {_cron_timeout}s (trust={_trust})]"
+                    if proc is not None:
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except ProcessLookupError:
+                            logger.debug("cron_task: process already exited")
+                except Exception as run_exc:
+                    t["last_error"] = str(run_exc)[:5000]
+        finally:
+            t = _CRON_TASKS.get(task_id)
+            if t:
+                t["active"] = False
+
+    atask = asyncio.create_task(_cron_loop())
+    task["_asyncio_task"] = atask
+    _CRON_TASK_REFS.add(atask)
+    atask.add_done_callback(_CRON_TASK_REFS.discard)
 
 
 def _cron_prune_dead() -> None:
@@ -107,7 +201,10 @@ def _cron_prune_dead() -> None:
 async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
     """Create, list, cancel, or check status of scheduled recurring tasks."""
     global _CRON_COUNTER
-    _cron_load()
+    _cron_load(ctx)
+    # Resume any task that was active at shutdown but couldn't be restarted
+    # at load time (in case _cron_load was called earlier without ctx).
+    _cron_resume_pending(ctx)
     action = str(args.get("action") or "").strip().lower()
 
     if action == "list":
@@ -188,59 +285,9 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
         }
         _CRON_TASKS[task_id] = task_record
         _cron_save()
-
-        async def _cron_loop():
-            try:
-                while _CRON_TASKS.get(task_id, {}).get("active", False):
-                    await asyncio.sleep(interval * 60)
-                    task = _CRON_TASKS.get(task_id)
-                    if not task or not task.get("active"):
-                        break
-                    if max_runs > 0 and task.get("run_count", 0) >= max_runs:
-                        task["active"] = False
-                        break
-                    task["run_count"] = task.get("run_count", 0) + 1
-                    task["last_run"] = time.time()
-                    logger.info("Cron task %s (%s) — run #%d", task_id, name, task["run_count"])
-                    proc = None
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            *shlex.split(command),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        # Trust-tiered cron timeout. yolo keeps the 1h ceiling
-                        # for long-running batch jobs; ask_everytime caps at 5m
-                        # so a runaway `sleep 99999` can't camp on a worker.
-                        _trust = getattr(ctx.config.security, "trust_level", "ask_everytime")
-                        _cron_timeout = 3600 if _trust == "yolo" else 300
-                        stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=_cron_timeout
-                        )
-                        task["last_output"] = (stdout or b"").decode(errors="replace")[:200_000]
-                        task["last_error"] = (
-                            (stderr or b"").decode(errors="replace")[:100_000]
-                            if proc.returncode != 0 else None
-                        )
-                    except asyncio.TimeoutError:
-                        task["last_error"] = f"[Command timed out after {_cron_timeout}s (trust={_trust})]"
-                        if proc is not None:
-                            try:
-                                proc.kill()
-                                await proc.wait()
-                            except ProcessLookupError:
-                                logger.debug("cron_task: process already exited")
-                    except Exception as run_exc:
-                        task["last_error"] = str(run_exc)[:5000]
-            finally:
-                task = _CRON_TASKS.get(task_id)
-                if task:
-                    task["active"] = False
-
-        atask = asyncio.create_task(_cron_loop())
-        task_record["_asyncio_task"] = atask
-        _CRON_TASK_REFS.add(atask)
-        atask.add_done_callback(_CRON_TASK_REFS.discard)
+        # Spawn the asyncio loop via the shared helper so the same code path
+        # serves both fresh creates and post-restart resumes.
+        _cron_spawn_loop(task_id, ctx)
 
         return json.dumps({
             "task_id": task_id,

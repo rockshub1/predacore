@@ -224,19 +224,20 @@ async def build_corpus(
 
 
 def apply_drift(files: list[Path], n: int, seed: int = 42) -> list[Path]:
-    """Mutate ``n`` random files in-place by appending a marker comment.
+    """Mutate ``n`` random files **in place** by appending a marker comment.
+
+    .. warning::
+       This DOES write to the paths passed in — the previous docstring
+       incorrectly claimed drift was applied to a temp copy. Callers must
+       guarantee the paths point somewhere safe (a tmp tree or an explicit
+       ``--source-root``); this function does not copy.
 
     Returns the list of files that were drifted. The marker is a Python /
-    text-safe comment; it's enough that ``_verify_chunk_against_source``
-    sees the EXISTING chunks no longer match perfectly (their first
-    non-blank line is still in the file but added trailing content shifts
-    the file beyond the recorded blob_sha). Callers must restore the
-    files manually after the run (we keep this safety in caller hands —
-    benchmark only mutates inside the temp index, not the working tree).
+    text-safe comment; ``_verify_chunk_against_source`` then sees the
+    existing chunks no longer match (recorded blob_sha mismatch).
 
-    NOTE: for safety, we DO NOT mutate the user's source tree by default.
-    Drift is applied to a copy under a temp directory; the bench's
-    discover_files run targets that copy.
+    Cleanup is best-effort by callers — see ``run_benchmark`` for the
+    restore loop in the ``finally`` block.
     """
     rng = random.Random(seed)
     to_drift = rng.sample(files, min(n, len(files)))
@@ -535,6 +536,15 @@ def main() -> int:
         help="After clean run, mutate N random files and re-run with verify_drop=True",
     )
     parser.add_argument(
+        "--allow-default-source-drift", action="store_true",
+        help=(
+            "Permit --simulate-drift when --source-root was NOT explicitly "
+            "passed (default = <repo>/src/predacore). Without this flag, "
+            "drift on the default tree is refused to prevent accidentally "
+            "writing marker comments into your working copy."
+        ),
+    )
+    parser.add_argument(
         "--mode", choices=("reactive", "bulk"), default="reactive",
         help=(
             "Indexing mode: 'reactive' loops reindex_file (mirrors auto-trigger "
@@ -568,11 +578,27 @@ def main() -> int:
         print(f"ERROR: queries file not found: {queries_path}", file=sys.stderr)
         return 2
 
+    # Refuse to drift the default source tree without explicit opt-in.
+    # `apply_drift` writes marker comments directly to the paths it gets;
+    # against the default <repo>/src/predacore that contaminates the working
+    # copy. Cleanup runs only on the success path — Ctrl-C / crash leaves
+    # markers behind. Force the user to either pass --source-root pointing
+    # at a tmp tree, or explicitly opt in.
+    drift_n = args.simulate_drift
+    if drift_n > 0 and args.source_root is None and not args.allow_default_source_drift:
+        print(
+            "ERROR: --simulate-drift refuses to mutate the default source tree "
+            f"({src_root}). Either pass --source-root pointing at a tmp copy, "
+            "or pass --allow-default-source-drift to override.",
+            file=sys.stderr,
+        )
+        return 2
+
     metrics = asyncio.run(
         run_benchmark(
             source_root=src_root,
             queries_path=queries_path,
-            drift_n=args.simulate_drift,
+            drift_n=drift_n,
             fetch_k=args.fetch_k,
             k_values=tuple(args.k),
             max_files=args.max_files,

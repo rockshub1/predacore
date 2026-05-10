@@ -1022,27 +1022,42 @@ class SmartInputEngine:
         """
         Ensure the target app is the frontmost application.
         Returns True if the app is now focused.
+
+        M9 (Wave 7): every `self._op.execute(...)` here runs an `osascript`
+        subprocess that blocks for 50–500 ms. Wrapping in `asyncio.to_thread`
+        keeps the event loop free during that time so other coroutines (e.g.
+        the AsyncBridge's shared loop) don't freeze.
         """
         try:
             # First check if already focused
-            frontmost = self._op.execute("frontmost_app", {})
+            frontmost = await asyncio.to_thread(
+                self._op.execute, "frontmost_app", {},
+            )
             if frontmost.get("app_name", "").lower() == app_name.lower():
                 return True
 
             # Not focused — activate it
-            self._op.execute("focus_app", {"app_name": app_name})
+            await asyncio.to_thread(
+                self._op.execute, "focus_app", {"app_name": app_name},
+            )
             await asyncio.sleep(self._focus_settle_ms / 1000.0)
 
             # Verify focus
-            frontmost = self._op.execute("frontmost_app", {})
+            frontmost = await asyncio.to_thread(
+                self._op.execute, "frontmost_app", {},
+            )
             if frontmost.get("app_name", "").lower() == app_name.lower():
                 return True
 
             # Second attempt with longer wait
-            self._op.execute("focus_app", {"app_name": app_name})
+            await asyncio.to_thread(
+                self._op.execute, "focus_app", {"app_name": app_name},
+            )
             await asyncio.sleep(self._focus_settle_ms * 2 / 1000.0)
 
-            frontmost = self._op.execute("frontmost_app", {})
+            frontmost = await asyncio.to_thread(
+                self._op.execute, "frontmost_app", {},
+            )
             return frontmost.get("app_name", "").lower() == app_name.lower()
 
         except (OSError, RuntimeError, KeyError) as e:
@@ -1208,6 +1223,10 @@ def _get_sync_bridge_pool() -> concurrent.futures.ThreadPoolExecutor:
                 _SYNC_BRIDGE_POOL = concurrent.futures.ThreadPoolExecutor(
                     max_workers=1, thread_name_prefix="predacore-smart-input-sync"
                 )
+                # L11 (Wave 8): join the worker on process exit so we don't
+                # see "thread still running" warnings on some Python builds.
+                import atexit as _atexit
+                _atexit.register(_SYNC_BRIDGE_POOL.shutdown, wait=False)
     return _SYNC_BRIDGE_POOL
 
 

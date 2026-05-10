@@ -1,5 +1,22 @@
 name: Build + push sandbox image
 
+# M62 (Wave 7) note: this workflow file is currently disabled (`.disabled`
+# suffix) — GitHub Actions ignores files with that extension. The README
+# advertises `predacore/sandbox:latest` as available on Docker Hub but
+# without this workflow re-enabled, the image will not auto-rebuild on tag.
+#
+# To re-enable:
+#   1. Rename this file from `docker-sandbox.yml.disabled` to `docker-sandbox.yml`
+#   2. Set the two required secrets in repo settings:
+#         DOCKERHUB_USERNAME
+#         DOCKERHUB_TOKEN  (access token with repo push scope)
+#   3. Push a `v*` tag to trigger the first build, or trigger via
+#      `gh workflow run "Build + push sandbox image"`
+#
+# Until then, the image users pull via `predacore bootstrap` is whatever
+# was last published manually. Document the tag they'll receive in the
+# README so the disconnect doesn't surprise operators.
+
 # Build predacore/sandbox and push to Docker Hub. Users with Docker installed
 # pull this during `predacore bootstrap`, which means their first `execute_code`
 # call is instant — no per-language `docker pull` delay mid-conversation.

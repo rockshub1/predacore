@@ -14,6 +14,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -81,9 +82,13 @@ class Message:
 class Session:
     """A conversation session with full history."""
 
-    MAX_MESSAGES: int = 500  # Configurable cap to prevent unbounded memory growth
-    CONTEXT_KEEP_RECENT_MESSAGES: int = 24
-    CONTEXT_MAX_HISTORY_TOKENS: int = 24_000
+    # Wave 7: bumped defaults for long-context models (200k+ window) and
+    # Tier-3 write-through (G3). With every message indexed semantically,
+    # truncation is no longer "loss" — it's just "not in the working
+    # window." Old defaults were tuned for 32k-window models.
+    MAX_MESSAGES: int = 100_000  # effectively unlimited for personal use
+    CONTEXT_KEEP_RECENT_MESSAGES: int = 50
+    CONTEXT_MAX_HISTORY_TOKENS: int = 100_000  # ~50% of 200k window
     CONTEXT_SUMMARY_MAX_TOKENS: int = 1_200
 
     # Token budget limits for context window packing
@@ -108,12 +113,34 @@ class Session:
     max_messages: int = MAX_MESSAGES
 
     def __post_init__(self) -> None:
-        """Allow config-driven overrides for session constants."""
+        """Allow config-driven overrides for session constants.
+
+        Reads from `config.session.{max_session_messages,
+        context_max_history_tokens, context_keep_recent_messages}` (added
+        as `SessionConfig` sub-dataclass on `PredaCoreConfig`). Falls back
+        to legacy top-level attribute lookup so old metadata payloads still
+        work. A value of 0 means "use the class default" — overrides apply
+        only when explicitly positive.
+        """
         config = self.metadata.get("_config") if self.metadata else None
         if config is not None:
-            self.MAX_MESSAGES = getattr(config, "max_session_messages", self.MAX_MESSAGES)
-            self.CONTEXT_MAX_HISTORY_TOKENS = getattr(config, "context_max_history_tokens", self.CONTEXT_MAX_HISTORY_TOKENS)
-            self.CONTEXT_KEEP_RECENT_MESSAGES = getattr(config, "context_keep_recent_messages", self.CONTEXT_KEEP_RECENT_MESSAGES)
+            session_cfg = getattr(config, "session", None) or config
+
+            def _override(field_name: str, current: int) -> int:
+                v = getattr(session_cfg, field_name, None)
+                if v is None:
+                    v = getattr(config, field_name, None)
+                if isinstance(v, int) and v > 0:
+                    return v
+                return current
+
+            self.MAX_MESSAGES = _override("max_session_messages", self.MAX_MESSAGES)
+            self.CONTEXT_MAX_HISTORY_TOKENS = _override(
+                "context_max_history_tokens", self.CONTEXT_MAX_HISTORY_TOKENS,
+            )
+            self.CONTEXT_KEEP_RECENT_MESSAGES = _override(
+                "context_keep_recent_messages", self.CONTEXT_KEEP_RECENT_MESSAGES,
+            )
             self.max_messages = self.MAX_MESSAGES
     _context_cache: dict[str, list[dict[str, str]]] = field(
         default_factory=dict,
@@ -399,7 +426,24 @@ class SessionStore:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._cache: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.Lock()  # Sync lock — session store is called from both sync and async paths
+        # G3 (memory improvement): optional Tier-3 write-through. Set via
+        # `set_unified_memory(store)` from the gateway/core wiring. When set,
+        # every appended message is also stored into the unified memory
+        # subsystem with `source_type='session_message'`, `session_id=X` so
+        # cross-session semantic search works without waiting for the
+        # MemoryConsolidator's periodic pass.
+        self._unified_memory: Any | None = None  # avoid circular import on type
+        self._tier3_loop: asyncio.AbstractEventLoop | None = None
         logger.info("SessionStore initialized at %s", self.sessions_dir)
+
+    def set_unified_memory(self, store: Any, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Wire the Tier-3 write-through. Pass the daemon's `UnifiedMemoryStore`
+        and (optionally) the running event loop. If `loop` is None, the
+        currently running loop at first write-through is captured.
+        """
+        self._unified_memory = store
+        self._tier3_loop = loop
+        logger.info("SessionStore: Tier-3 write-through enabled")
 
     def _cache_put(self, session_id: str, session: Session) -> None:
         """Insert or refresh a session in the LRU cache, evicting oldest if full."""
@@ -464,7 +508,14 @@ class SessionStore:
     def append_message(
         self, session_id: str, role: str, content: str, **kwargs: Any
     ) -> Message:
-        """Append a message to a session and persist immediately."""
+        """Append a message to a session and persist immediately.
+
+        Also fires a Tier-3 write-through (when wired via
+        `set_unified_memory`) so the message becomes semantically searchable
+        across sessions without waiting for the MemoryConsolidator's
+        periodic pass. Best-effort, fire-and-forget — Tier-2 (JSONL) is the
+        durability layer; Tier-3 indexing is enrichment.
+        """
         session = self.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
@@ -472,7 +523,60 @@ class SessionStore:
         msg = session.add_message(role, content, **kwargs)
         self._append_message_to_disk(session_id, msg)
         self._save_meta(session)  # Update timestamps
+        self._tier3_write_through(session, msg)
         return msg
+
+    def _tier3_write_through(self, session: Session, msg: Message) -> None:
+        """Fire the Tier-3 write asynchronously without blocking the caller.
+
+        Skips silently when `set_unified_memory` was never called or no
+        event loop is running. Strips empty content + system/internal
+        roles to avoid polluting the index with noise.
+        """
+        store = self._unified_memory
+        if store is None:
+            return
+        # Skip empty / system messages — only user/assistant/tool content
+        # is worth semantic-indexing.
+        content = (msg.content or "").strip()
+        if not content or msg.role not in {"user", "assistant", "tool"}:
+            return
+
+        loop = self._tier3_loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return  # No event loop available — sync caller, skip
+            self._tier3_loop = loop
+
+        async def _do_store() -> None:
+            try:
+                await store.store(
+                    content=content,
+                    memory_type="conversation",
+                    importance=2,
+                    tags=[
+                        f"session:{session.session_id}",
+                        f"role:{msg.role}",
+                        f"user:{session.user_id}",
+                    ],
+                    trust_source="user_stated" if msg.role == "user" else "claude_inferred",
+                    confidence=1.0 if msg.role == "user" else 0.85,
+                    source_path=f"session:{session.session_id}",
+                    user_id=session.user_id,
+                )
+            except (RuntimeError, OSError, ValueError, TypeError) as exc:
+                # Tier-2 already has the message; Tier-3 enrichment failure
+                # is non-fatal. Debug-level only.
+                logger.debug("Tier-3 write-through failed: %s", exc)
+
+        try:
+            if loop.is_running():
+                # Same-loop case: schedule a task on it.
+                asyncio.run_coroutine_threadsafe(_do_store(), loop)
+        except (RuntimeError, AttributeError):
+            pass
 
     def list_sessions(
         self, user_id: str | None = None, limit: int = 20
@@ -578,10 +682,23 @@ class SessionStore:
         line = json.dumps(msg.to_dict(), default=str) + "\n"
         # Validate the line is valid JSON before writing to disk
         json.loads(line.strip())
+        # M48 (Wave 7): write the bytes here, then offload the blocking
+        # fsync to a worker thread. The write itself is fast; the fsync is
+        # the part that can stall the asyncio loop for tens of ms on slow
+        # disks. Best-effort fsync — the JSONL append is already on disk
+        # via OS buffers; fsync is durability-on-crash, not correctness.
         with open(messages_file, "a") as f:
             f.write(line)
             f.flush()
-            os.fsync(f.fileno())
+            fd = f.fileno()
+            try:
+                # If we're in a running event loop, fire-and-forget the
+                # fsync to a worker thread so we don't block the loop.
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, os.fsync, fd)
+            except RuntimeError:
+                # No running loop — sync caller path; do the fsync inline.
+                os.fsync(fd)
 
     def _load_session(self, session_id: str) -> Session | None:
         """Load a full session from disk."""
