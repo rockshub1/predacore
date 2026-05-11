@@ -433,19 +433,20 @@ class AgentProcess:
         orphan-task accumulation and lets long-lived async clients
         (httpx, gRPC channels) persist across tasks.
 
-        Legacy (sync polling + asyncio.run-per-task) path is the default
-        until the async path proves itself in real workloads.
+        Default flipped 2026-05-10: async path is now the default. Set
+        ``PREDACORE_DAF_ASYNC_WORKER=0`` to opt back into the legacy
+        sync-polling path (DEPRECATED — will be deleted once the async
+        path has shipped through one full release cycle).
         """
         self.running = True
         signal.signal(signal.SIGTERM, self._handle_termination)
 
-        async_worker = os.getenv("PREDACORE_DAF_ASYNC_WORKER", "").lower() in {
-            "1", "true", "yes", "on",
-        }
+        async_worker_raw = os.getenv("PREDACORE_DAF_ASYNC_WORKER", "1").strip().lower()
+        async_worker = async_worker_raw in {"1", "true", "yes", "on", ""}
 
         if async_worker:
             self.logger.info(
-                "Starting agent process in ASYNC mode (Type: %s, M45 path)",
+                "Starting agent process in ASYNC mode (Type: %s, M45 default path)",
                 self.type_id,
             )
             try:
@@ -456,7 +457,14 @@ class AgentProcess:
                 self._cleanup()
             return
 
-        # ── Legacy sync polling path (kept verbatim) ──────────────────
+        # ── Legacy sync polling path (DEPRECATED — opt-in via env=0) ──
+        self.logger.warning(
+            "DAF agent process running in DEPRECATED legacy sync mode "
+            "(PREDACORE_DAF_ASYNC_WORKER=0). The async path is the default "
+            "as of 2026-05-10; this branch will be deleted in a future "
+            "release. If you need to keep this enabled, file an issue with "
+            "the failure mode you hit on the async path."
+        )
         try:
             self.logger.info(f"Starting agent process (Type: {self.type_id})")
             self._register_with_controller()

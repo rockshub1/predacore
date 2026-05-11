@@ -577,14 +577,50 @@ class TaskStore:
             return sorted_tasks[:limit]
 
     def _evict_old(self) -> None:
-        completed = [
-            (tid, t) for tid, t in self._tasks.items()
-            if t.status in ("completed", "failed")
-        ]
-        completed.sort(key=lambda x: x[1].created_at)
+        """Evict oldest tasks to keep the store under _MAX_TASKS.
+
+        L47 (Wave 12) — previously only evicted completed/failed. A flood
+        of long-running pending tasks could overflow the cap silently
+        because there was nothing to evict. Now: prefer completed/failed
+        first (they're done; safe to drop), then fall back to evicting
+        the oldest pending tasks if still over the cap. Logs at WARNING
+        on the pending-eviction path so operators see the back-pressure.
+        """
         to_remove = len(self._tasks) - self._MAX_TASKS
-        for tid, _ in completed[:max(to_remove, 0)]:
+        if to_remove <= 0:
+            return
+
+        terminal = sorted(
+            (
+                (tid, t)
+                for tid, t in self._tasks.items()
+                if t.status in ("completed", "failed")
+            ),
+            key=lambda x: x[1].created_at,
+        )
+        evicted_terminal = 0
+        for tid, _ in terminal[:to_remove]:
             self._tasks.pop(tid, None)
+            evicted_terminal += 1
+
+        remaining = to_remove - evicted_terminal
+        if remaining > 0:
+            # Still over cap. Fall back to oldest pending/running tasks.
+            pending = sorted(
+                (
+                    (tid, t)
+                    for tid, t in self._tasks.items()
+                    if t.status not in ("completed", "failed")
+                ),
+                key=lambda x: x[1].created_at,
+            )
+            for tid, _ in pending[:remaining]:
+                self._tasks.pop(tid, None)
+            logger.warning(
+                "TaskStore at cap (%d) — evicted %d oldest pending tasks. "
+                "Increase _MAX_TASKS or check for stuck agents.",
+                self._MAX_TASKS, remaining,
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,48 @@ from .skill_scanner import ScanVerdict, SkillScanner
 logger = logging.getLogger(__name__)
 
 
+def _skill_json_default(obj: Any) -> Any:
+    """L34 — explicit JSON encoder for skill persistence.
+
+    Replaces ``json.dump(..., default=str)`` which silently coerced *any*
+    non-JSON object (functions, exceptions, locks, sockets) to its repr
+    string — irreversibly. Skill state files reloaded into objects that
+    look "OK" but had become opaque strings where structured data was
+    expected.
+
+    Now: well-defined types are converted to their canonical JSON-safe
+    form; anything else raises TypeError so the bug surfaces in tests
+    instead of silently poisoning the saved file.
+    """
+    import datetime as _dt
+    import enum
+    from pathlib import PurePath
+
+    if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
+        return obj.isoformat()
+    if isinstance(obj, PurePath):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        # Sort when comparable so output is stable across runs.
+        try:
+            return sorted(obj)
+        except TypeError:
+            return list(obj)
+    if isinstance(obj, enum.Enum):
+        return obj.value
+    if isinstance(obj, bytes):
+        # Base64-encode so reload can round-trip. Skill state shouldn't
+        # carry raw bytes today; this just means we'd fail-loud-then-recover.
+        import base64
+        return {"__bytes__": base64.b64encode(obj).decode("ascii")}
+    # Unknown type — refuse to silently lose data. Caller (the open/dump
+    # block) catches Exception and writes a logger.error with the bad object.
+    raise TypeError(
+        f"Cannot JSON-encode {type(obj).__name__}={obj!r} in skill state. "
+        "Either pre-convert in to_dict() or extend _skill_json_default."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reputation thresholds
 # ---------------------------------------------------------------------------
@@ -493,7 +535,7 @@ class Flame:
         tmp_path = path.with_suffix(".json.tmp")
         try:
             with open(tmp_path, "w") as f:
-                json.dump(genome.to_dict(), f, indent=2, default=str)
+                json.dump(genome.to_dict(), f, indent=2, default=_skill_json_default)
             os.replace(str(tmp_path), str(path))
         except Exception as e:
             logger.error("Failed to save local skill %s: %s", genome.id, e)
@@ -524,7 +566,7 @@ class Flame:
         tmp_path = path.with_suffix(".json.tmp")
         try:
             with open(tmp_path, "w") as f:
-                json.dump(genome.to_dict(), f, indent=2, default=str)
+                json.dump(genome.to_dict(), f, indent=2, default=_skill_json_default)
             os.replace(str(tmp_path), str(path))
         except Exception as e:
             logger.error("Failed to write to shared pool %s: %s", genome.id, e)
@@ -605,7 +647,7 @@ class Flame:
                 lock_fd = None
 
             with open(tmp_path, "w") as f:
-                json.dump(self._reputation, f, indent=2, default=str)
+                json.dump(self._reputation, f, indent=2, default=_skill_json_default)
             os.replace(str(tmp_path), str(path))
         except Exception as e:
             logger.error("Failed to save reputation: %s", e)

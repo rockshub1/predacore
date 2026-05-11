@@ -1978,3 +1978,58 @@ class TestReportRateLimit:
         )
 
 
+class TestSkillJSONEncoder:
+    """L34: explicit encoder must round-trip well-defined types and refuse
+    silent coercion of anything else (functions, exceptions, etc.)."""
+
+    def test_encodes_datetime_path_set_enum_bytes(self):
+        import datetime
+        import json
+        from enum import Enum
+        from pathlib import Path
+
+        from predacore._vendor.common.skill_collective import _skill_json_default
+
+        class Level(Enum):
+            HIGH = "high"
+
+        data = {
+            "ts": datetime.datetime(2026, 5, 11, 12, 0),
+            "path": Path("/tmp/x"),
+            "tags": {"a", "b"},
+            "level": Level.HIGH,
+            "blob": b"hi",
+        }
+        encoded = json.dumps(data, default=_skill_json_default)
+        decoded = json.loads(encoded)
+        assert decoded["ts"] == "2026-05-11T12:00:00"
+        assert decoded["path"] == "/tmp/x"
+        assert sorted(decoded["tags"]) == ["a", "b"]
+        assert decoded["level"] == "high"
+        assert decoded["blob"] == {"__bytes__": "aGk="}
+
+    def test_refuses_function(self):
+        import json
+        import pytest as _pytest
+        from predacore._vendor.common.skill_collective import _skill_json_default
+
+        def some_func():
+            pass
+
+        with _pytest.raises(TypeError, match="Cannot JSON-encode"):
+            json.dumps({"x": some_func}, default=_skill_json_default)
+
+    def test_refuses_exception_object(self):
+        import json
+        import pytest as _pytest
+        from predacore._vendor.common.skill_collective import _skill_json_default
+
+        with _pytest.raises(TypeError, match="Cannot JSON-encode"):
+            json.dumps({"x": RuntimeError("boom")}, default=_skill_json_default)
+
+    def test_shared_with_skill_evolution(self):
+        from predacore._vendor.common.skill_collective import _skill_json_default as c
+        from predacore._vendor.common.skill_evolution import _skill_json_default as e
+        assert c is e, "skill_evolution should import the same helper"
+
+

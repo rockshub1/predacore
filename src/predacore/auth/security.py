@@ -486,6 +486,16 @@ def sanitize_user_input(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# L57 — only HTTP-shaped ports may be reached on public hosts. A
+# URL like `http://public-host:22/...` previously passed because the
+# IP-checker didn't look at the port. Now: scheme-default ports (80/443)
+# always allowed; explicit ports must be on the HTTP-shaped allowlist.
+# This kills "tunnel a webhook through a host that happens to also
+# speak SSH/SMTP" attack shapes.
+_ALLOWED_HTTP_PORTS: frozenset[int] = frozenset({80, 8000, 8008, 8080, 8888})
+_ALLOWED_HTTPS_PORTS: frozenset[int] = frozenset({443, 4443, 8443})
+
+
 def validate_url_ssrf(url: str) -> bool:
     """
     Validate a URL against SSRF attacks.
@@ -494,6 +504,7 @@ def validate_url_ssrf(url: str) -> bool:
       - Private/loopback IPs (127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x)
       - IPv6 loopback (::1) and unique-local (fc00::/7)
       - Non-http(s) schemes (file://, ftp://, etc.)
+      - Non-HTTP-shaped ports on public hosts (e.g. 22/SSH, 25/SMTP)
 
     Returns True if the URL is safe to fetch.
     Raises ValueError if the URL targets a blocked resource.
@@ -509,6 +520,18 @@ def validate_url_ssrf(url: str) -> bool:
     hostname = (parsed.hostname or "").strip()
     if not hostname:
         raise ValueError("URL has no hostname.")
+
+    # --- Port validation (L57) ---
+    # parsed.port is None when scheme-default is implicit (80/443) — allow.
+    # Explicit ports must be on the HTTP-shaped allowlist.
+    if parsed.port is not None:
+        allowed = _ALLOWED_HTTPS_PORTS if parsed.scheme == "https" else _ALLOWED_HTTP_PORTS
+        if parsed.port not in allowed:
+            raise ValueError(
+                f"URL port {parsed.port} is not allowed for {parsed.scheme} "
+                f"(allowed: {sorted(allowed)}). Blocked to prevent reaching "
+                "non-HTTP services (SSH, SMTP, databases, etc.) on public hosts."
+            )
 
     # --- Resolve hostname to IP(s) and check each one ---
     def _resolve(host: str) -> list[str]:

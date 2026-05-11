@@ -72,16 +72,25 @@ _JOURNAL_TAIL_ENTRIES = 50
 _JOURNAL_TAIL_MAX_BYTES = 30_000
 
 # Maximum diff lines to include in an EVOLUTION.md entry.
-# Wave 11: 200 → 10,000. EVOLUTION.md is OUT of the prompt; this only
-# affects audit log readability + file size. Effectively no cap for
-# real diffs (most identity rewrites are <500 lines).
-_MAX_DIFF_LINES = 10_000
+# Wave 12: 10,000 → 1,000. Real identity/belief diffs are <500 lines in
+# practice; 1000 keeps generous headroom while bounding worst-case entry
+# size at ~1MB (was ~10MB at 10k lines × 100 char avg).
+_MAX_DIFF_LINES = 1_000
 
 # EVOLUTION.md keeps the most recent N entries — prevents unbounded growth.
-# Wave 11: 200 → 100,000 (out of prompt; effectively unlimited audit trail
-# for personal-use). At ~5KB per entry, a fully filled file is ~500MB —
-# well within disk budget for an agent supposed to remember its history.
-_MAX_EVOLUTION_ENTRIES = 100_000
+# Wave 12: 100,000 → 1,000. Previous comment claimed "~500MB well within
+# disk budget" — that math was right but the storage is wrong: every
+# belief save reads + rewrites the entire file, so cap=100k turned the
+# audit log into an O(N) hot path on every belief mutation. At ~5KB
+# per typical entry, cap=1000 keeps the file under ~5MB and rotation
+# manageable. Audit history beyond that is journal-tier (sessions/),
+# not identity-tier.
+_MAX_EVOLUTION_ENTRIES = 1_000
+
+# Compact EVOLUTION.md only when it exceeds this size — keeps the fast
+# append path (O(1) per write) on the steady-state hot path and amortizes
+# the read-rewrite cost to once-per-rotation.
+_EVOLUTION_COMPACT_SIZE_BYTES = 6 * 1024 * 1024  # 6MB trigger
 
 # Operational guide for the memory subsystem — engineering knowledge that
 # describes how the memory tools work and when to use them. Lives in code so
@@ -221,22 +230,59 @@ def _log_evolution_to_file(
         "is diff-logged here with timestamp and reason._\n"
     )
     try:
-        existing = evo_path.read_text(encoding="utf-8") if evo_path.exists() else header
-        new_content = existing + entry
-
-        # Auto-prune: keep only the most recent _MAX_EVOLUTION_ENTRIES entries.
-        # Entries start with "## " at column 0 (see format in `entry` above).
-        entry_markers = new_content.split("\n## ")
-        if len(entry_markers) - 1 > _MAX_EVOLUTION_ENTRIES:
-            # [0] is the pre-first-entry header; [1:] are individual entries.
-            kept = entry_markers[-_MAX_EVOLUTION_ENTRIES:]
-            new_content = header.rstrip() + "\n\n## " + "\n## ".join(kept)
-
-        _atomic_write_text(evo_path, new_content)
+        # Fast path: O(1) append when file already exists. Previously
+        # this path read + rewrote the entire file on every belief save,
+        # making EVOLUTION.md its own bloat problem on long sessions.
+        if evo_path.exists():
+            with open(evo_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+        else:
+            with open(evo_path, "w", encoding="utf-8") as f:
+                f.write(header + entry)
         _identity_file_cache.pop(str(evo_path), None)
+
+        # Compact only when the file crosses the size trigger (rare).
+        try:
+            if evo_path.stat().st_size > _EVOLUTION_COMPACT_SIZE_BYTES:
+                _compact_evolution_log(evo_path, header)
+        except OSError:
+            pass
+
         logger.info("EVOLUTION.md updated for %s", filename)
     except OSError as exc:
         logger.warning("Evolution log write failed for %s: %s", filename, exc)
+
+
+def _compact_evolution_log(evo_path: Path, header: str) -> None:
+    """Trim EVOLUTION.md to the most recent _MAX_EVOLUTION_ENTRIES entries.
+
+    Called from `_log_evolution_to_file` only when the file size exceeds
+    `_EVOLUTION_COMPACT_SIZE_BYTES`. Amortizes the read-rewrite cost so
+    the steady-state append path stays O(1). The header is preserved.
+    """
+    try:
+        existing = evo_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("EVOLUTION.md compaction read failed: %s", exc)
+        return
+
+    # Entries start with "## " at column 0; split keeps the header in [0].
+    entry_markers = existing.split("\n## ")
+    entry_count = len(entry_markers) - 1
+    if entry_count <= _MAX_EVOLUTION_ENTRIES:
+        return
+
+    kept = entry_markers[-_MAX_EVOLUTION_ENTRIES:]
+    compacted = header.rstrip() + "\n\n## " + "\n## ".join(kept)
+    try:
+        _atomic_write_text(evo_path, compacted)
+        _identity_file_cache.pop(str(evo_path), None)
+        logger.info(
+            "EVOLUTION.md compacted: %d → %d entries",
+            entry_count, _MAX_EVOLUTION_ENTRIES,
+        )
+    except OSError as exc:
+        logger.warning("EVOLUTION.md compaction write failed: %s", exc)
 
 
 @dataclass

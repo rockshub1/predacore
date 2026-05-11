@@ -929,134 +929,23 @@ class TestPersonaDriftGuard:
 
 
 # ===========================================================================
-# TEST 10: In-Process MCP — build server, dispatch through it
+# TEST 10: In-Process MCP — DELETED (Wave 12, 2026-05-11)
 # ===========================================================================
+# The previous TestInProcessMCP class (7 tests) imported from
+# `src.predacore.tools.mcp_server`, a module that was deleted in an
+# earlier refactor. The tests were broken from that point forward
+# (verified via `find . -name mcp_server*` — no matches under
+# src/predacore/). Removing the dead class so the test suite signal
+# stays accurate. MCP integration today lives in `services/mcp_client.py`
+# and `services/mcp_registry.py` — those have their own coverage.
 
 class TestInProcessMCP:
-    """Test the in-process SDK MCP server wiring."""
+    """Placeholder — original class deleted; module imports were dead."""
 
-    def test_mcp_tool_definitions_load(self):
-        """_get_tool_definitions returns a non-empty tool list."""
-        from src.predacore.tools.mcp_server import _get_tool_definitions
-
-        tools = _get_tool_definitions()
-        assert isinstance(tools, list)
-        assert len(tools) > 0
-
-        # Each tool should have name and description
-        for tool in tools[:5]:
-            assert "name" in tool
-            assert "description" in tool
-
-    def test_mcp_tool_names_have_prefix(self):
-        """get_mcp_tool_names returns prefixed tool names."""
-        from src.predacore.tools.mcp_server import get_mcp_tool_names
-
-        names = get_mcp_tool_names()
-        assert len(names) > 0
-        for name in names:
-            assert name.startswith("mcp__predacore__")
-
-    def test_mcp_config_dict_structure(self):
-        """get_mcp_config_dict returns valid MCP config."""
-        from src.predacore.tools.mcp_server import get_mcp_config_dict
-
-        config = get_mcp_config_dict()
-        assert "mcpServers" in config
-        assert "predacore" in config["mcpServers"]
-        predacore_cfg = config["mcpServers"]["predacore"]
-        assert "command" in predacore_cfg
-        assert "args" in predacore_cfg
-
-    def test_mcp_handler_factory(self, dispatcher):
-        """_make_tool_handler creates async handlers that route to dispatcher."""
-        from src.predacore.tools.mcp_server import _make_tool_handler
-
-        handler = _make_tool_handler(dispatcher, "run_command")
-        result = _run(handler({"command": "echo mcp_test"}))
-
-        assert isinstance(result, dict)
-        assert "content" in result
-        assert len(result["content"]) > 0
-        assert "mcp_test" in result["content"][0]["text"]
-
-    def test_mcp_handler_error_handling(self, dispatcher):
-        """MCP handler returns error structure for unknown tools."""
-        from src.predacore.tools.mcp_server import _make_tool_handler
-
-        handler = _make_tool_handler(dispatcher, "nonexistent_tool_xyz")
-        result = _run(handler({}))
-
-        assert isinstance(result, dict)
-        assert "content" in result
-        # Should get an error response (either is_error or error text)
-        text = result["content"][0]["text"]
-        assert "unknown tool" in text.lower() or "error" in text.lower()
-
-    def test_mcp_stdio_server_message_handling(self):
-        """MCPStdioServer handles protocol messages correctly."""
-        from src.predacore.tools.mcp_server import MCPStdioServer
-
-        server = MCPStdioServer()
-
-        # Test initialize
-        init_msg = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {},
-        }
-        response = _run(server.handle_message(init_msg))
-        assert response is not None
-        assert response["id"] == 1
-        assert "result" in response
-        assert "capabilities" in response["result"]
-
-        # Test tools/list
-        list_msg = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {},
-        }
-        response = _run(server.handle_message(list_msg))
-        assert response is not None
-        assert "tools" in response["result"]
-        assert len(response["result"]["tools"]) > 0
-
-        # Test ping
-        ping_msg = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "ping",
-            "params": {},
-        }
-        response = _run(server.handle_message(ping_msg))
-        assert response is not None
-        assert response["id"] == 3
-
-    def test_mcp_notification_returns_none(self):
-        """Notifications (no id) should return None."""
-        from src.predacore.tools.mcp_server import MCPStdioServer
-
-        server = MCPStdioServer()
-        notification = {
-            "method": "notifications/initialized",
-            "params": {},
-        }
-        response = _run(server.handle_message(notification))
-        assert response is None
-
-    def test_build_sdk_mcp_server_structure(self, dispatcher):
-        """build_sdk_mcp_server returns a server config when SDK is available."""
-        try:
-            import claude_agent_sdk
-        except ImportError:
-            pytest.skip("claude_agent_sdk not installed")
-
-        from src.predacore.tools.mcp_server import build_sdk_mcp_server
-        server_config = build_sdk_mcp_server(dispatcher)
-        assert server_config is not None
+    def test_placeholder_class_replaced_dead_imports(self):
+        """Documents the deletion in test output for future spelunkers."""
+        # Intentionally empty assertion — the class body itself is the docs.
+        assert True
 
 
 # ===========================================================================

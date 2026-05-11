@@ -6,6 +6,7 @@ no provider is configured.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -246,10 +247,21 @@ class HashingEmbeddingClient(EmbeddingClient):
         self.dim = dim
 
     def _hash(self, s: str) -> list[float]:
-        # Very crude deterministic embedding for offline use
-        v = [0] * self.dim
-        for i, ch in enumerate(s.encode("utf-8")):
-            v[i % self.dim] = (v[i % self.dim] + ch) % 1000
+        """L20 (Wave 12): SHA-256 stretch fills every dim slot regardless of
+        input length. Old version only mutated `len(s.encode())` slots, so
+        short strings ("a", "b") differed in 1 byte out of `dim` and produced
+        near-identical L2-normalized vectors — clustering collapsed.
+
+        Now: for each 32-byte block needed, hash the input with a block
+        index suffix. SHA-256's avalanche property means distinct inputs
+        produce distant vectors at every length.
+        """
+        raw = s.encode("utf-8")
+        chunks_needed = (self.dim + 31) // 32
+        stream = bytearray()
+        for chunk_idx in range(chunks_needed):
+            stream += hashlib.sha256(raw + chunk_idx.to_bytes(4, "big")).digest()
+        v = [float(stream[i]) for i in range(self.dim)]
         # L2 normalize
         norm = math.sqrt(sum(x * x for x in v)) or 1.0
         return [x / norm for x in v]

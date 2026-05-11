@@ -310,9 +310,12 @@ def detect_loop(
                 return True
 
     # Check 5: Stall detection — too many tool calls is suspicious regardless of variety
-    # Use 80% of max_iterations as threshold (or min 15) to avoid false positives
-    # on agents with low max_steps (e.g. desktop_agent with max_steps=15)
-    stall_threshold = max(15, int(max_iterations * 0.8)) if max_iterations else 15
+    # L48 fix: was ``max(15, int(max_iterations * 0.8))`` which floored at 15.
+    # Typed agents with max_steps=5-15 never reached the floor → effectively
+    # dead code for them. New floor is 5 so the threshold scales with
+    # max_iterations but small budgets (≤5) rely on the iteration cap itself
+    # for protection rather than triggering stall mid-run.
+    stall_threshold = max(5, int(max_iterations * 0.8)) if max_iterations else 15
     if len(tool_history) >= stall_threshold:
         logger.warning(
             "Loop detected: %d tool calls (threshold %d) without completing — likely stalled",

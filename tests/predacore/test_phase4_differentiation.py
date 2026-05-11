@@ -20,108 +20,25 @@ def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
-# ===== 1. FAISS Vector Index ================================================
+# ===== 1. FAISS Vector Index — REMOVED 2026-05-11 ===========================
+# The TestFAISSVectorIndex class that lived here imported from
+# ``predacore._vendor.knowledge_nexus.faiss_vector_index``. That module was
+# intentionally deleted in audit finding C1 (the entire knowledge_nexus
+# vendor subpackage is gone). The test was kept alive only by stale
+# ``__pycache__/*.pyc`` shells. Deleted as part of the Wave 12 test-rot
+# cleanup. The hot vector-index code path is exercised by
+# tests/predacore/test_schema_migration.py via ``_NumpyVectorIndex`` and
+# ``_HnswVectorIndex``.
 
-class TestFAISSVectorIndex(unittest.TestCase):
 
-    def test_add_and_search(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
+class TestFAISSVectorIndexDeleted(unittest.TestCase):
+    """Sentinel — the FAISSVectorIndex tests that used to live here were
+    removed in Wave 12 because the underlying module was deleted in C1.
+    See block comment above. This single test pins the deletion."""
 
-        idx = FAISSVectorIndex(dimensions=4)
-        _run(idx.add("a", [1.0, 0.0, 0.0, 0.0]))
-        _run(idx.add("b", [0.0, 1.0, 0.0, 0.0]))
-        _run(idx.add("c", [1.0, 0.1, 0.0, 0.0]))
-
-        results = _run(idx.search_similar([1.0, 0.0, 0.0, 0.0], top_k=2))
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0][0], "a")  # Exact match first
-        self.assertGreater(results[0][1], 0.9)
-
-    def test_dimension_mismatch(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        idx = FAISSVectorIndex(dimensions=4)
-        with self.assertRaises(ValueError):
-            _run(idx.add("x", [1.0, 0.0]))
-
-    def test_remove(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        idx = FAISSVectorIndex(dimensions=2)
-        _run(idx.add("a", [1.0, 0.0]))
-        self.assertEqual(idx.size, 1)
-        _run(idx.remove("a"))
-        self.assertEqual(idx.size, 0)
-
-    def test_layer_filtering(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        idx = FAISSVectorIndex(dimensions=2)
-        _run(idx.add("a", [1.0, 0.0], {"layers": ["code"]}))
-        _run(idx.add("b", [0.9, 0.1], {"layers": ["docs"]}))
-
-        results = _run(idx.search_similar([1.0, 0.0], layers={"code"}))
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0][0], "a")
-
-    def test_persistence(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
-
-        try:
-            idx = FAISSVectorIndex(dimensions=3)
-            _run(idx.add("x", [1.0, 0.5, 0.0]))
-            _run(idx.add("y", [0.0, 1.0, 0.5]))
-            _run(idx.save_to_disk(path))
-
-            loaded = _run(FAISSVectorIndex.load_from_disk(path))
-            self.assertEqual(loaded.size, 2)
-            results = _run(loaded.search_similar([1.0, 0.5, 0.0], top_k=1))
-            self.assertEqual(results[0][0], "x")
-        finally:
-            os.unlink(path)
-
-    def test_hash_embedding(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import HashEmbedding
-
-        emb = HashEmbedding(dims=64)
-        v1 = emb.embed("hello world")
-        v2 = emb.embed("hello world")
-        v3 = emb.embed("goodbye moon")
-
-        self.assertEqual(len(v1), 64)
-        self.assertEqual(v1, v2)  # Deterministic
-        self.assertNotEqual(v1, v3)
-
-    def test_hash_embedding_normalized(self):
-        import math
-
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import HashEmbedding
-
-        emb = HashEmbedding(dims=32)
-        v = emb.embed("test text")
-        norm = math.sqrt(sum(x * x for x in v))
-        self.assertAlmostEqual(norm, 1.0, places=5)
-
-    def test_metadata(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        idx = FAISSVectorIndex(dimensions=2)
-        _run(idx.add("a", [1.0, 0.0], {"label": "test"}))
-        meta = idx.get_metadata("a")
-        self.assertEqual(meta["label"], "test")
-
-    def test_update(self):
-        from predacore._vendor.knowledge_nexus.faiss_vector_index import FAISSVectorIndex
-
-        idx = FAISSVectorIndex(dimensions=2)
-        _run(idx.add("a", [1.0, 0.0]))
-        _run(idx.update("a", [0.0, 1.0]))
-        results = _run(idx.search_similar([0.0, 1.0], top_k=1))
-        self.assertEqual(results[0][0], "a")
-        self.assertGreater(results[0][1], 0.9)
+    def test_knowledge_nexus_module_stays_deleted(self):
+        with self.assertRaises(ImportError):
+            from predacore._vendor.knowledge_nexus import faiss_vector_index  # noqa: F401
 
 
 # ===== 2. Persistent Audit Store ============================================

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -86,7 +87,17 @@ class WebChatAdapter(ChannelAdapter):
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._connections: dict[str, web.WebSocketResponse] = {}
-        self._max_connections = 50  # Max simultaneous WebSocket connections
+        # L29 — pull from config.channels.webchat.max_connections; default 50.
+        # Env override: PREDACORE_WEBCHAT_MAX_CONNECTIONS.
+        try:
+            _cfg_max = int(wc_config.get("max_connections", 50))
+        except (TypeError, ValueError):
+            _cfg_max = 50
+        try:
+            _env_max = int(os.environ.get("PREDACORE_WEBCHAT_MAX_CONNECTIONS", "") or 0)
+        except ValueError:
+            _env_max = 0
+        self._max_connections = _env_max if _env_max > 0 else _cfg_max
         self._gateway: Gateway | None = None
         self._stats_task: asyncio.Task | None = None
         self._stats_cache: dict | None = None
@@ -428,11 +439,21 @@ class WebChatAdapter(ChannelAdapter):
         return stats
 
     async def _stats_broadcast_loop(self) -> None:
-        """Push live stats to all connected WebSocket clients every 5 seconds."""
+        """Push live stats to all connected WebSocket clients every 5 seconds.
+
+        L30 (Wave 12) — when no clients are connected, idle for 30s instead
+        of waking every 5s to discover the same emptiness. Saves ~17000
+        no-op wake-ups per day on an unused dashboard. First client to
+        connect still gets a stats push within 30s.
+        """
         while True:
             try:
+                if not self._connections:
+                    await asyncio.sleep(30)
+                    continue
                 await asyncio.sleep(5)
                 if not self._connections:
+                    # Last client disconnected mid-sleep — skip the build.
                     continue
                 stats = self._build_dashboard_stats()
                 msg = {"type": "stats_update", "data": stats}

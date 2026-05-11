@@ -389,7 +389,14 @@ async def _codex_stream_chat(
                 continue
             try:
                 event = json.loads(data_str)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                # L43 — surface decode failures instead of silent skip.
+                # Use logger.warning so log-level filtering catches it;
+                # malformed stream events are rare and worth seeing.
+                logger.warning(
+                    "Codex SSE JSON decode failed: %s — payload[:200]=%r",
+                    exc, data_str[:200],
+                )
                 continue
 
             etype = event.get("type") or ""
@@ -465,7 +472,13 @@ async def _codex_stream_chat(
             slot = fn_args_accum[idx]
             try:
                 args = json.loads(slot["arguments"]) if slot["arguments"] else {}
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                # L43 — tool call args that don't parse are a real bug
+                # downstream (handler gets {} silently). Log so it shows up.
+                logger.warning(
+                    "Codex tool-call args JSON decode failed: %s — payload[:200]=%r",
+                    exc, str(slot.get("arguments", ""))[:200],
+                )
                 args = {}
             tool_calls.append(
                 {"id": slot["call_id"], "name": slot["name"], "arguments": args}

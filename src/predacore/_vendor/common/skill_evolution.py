@@ -32,6 +32,7 @@ from .skill_genome import (
     TrustLevel,
     TrustScore,
 )
+from .skill_collective import _skill_json_default
 from .skill_scanner import ScanVerdict, SkillScanner
 
 logger = logging.getLogger(__name__)
@@ -390,7 +391,7 @@ class SkillCrystallizer:
         tmp_path = path.with_suffix(".json.tmp")
         try:
             with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+                json.dump(data, f, indent=2, default=_skill_json_default)
             os.replace(str(tmp_path), str(path))
         except Exception as e:
             logger.error("Failed to save evolution state: %s", e)

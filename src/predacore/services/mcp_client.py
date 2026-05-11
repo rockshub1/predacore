@@ -176,7 +176,9 @@ class MCPClient:
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    pass  # expected — we just cancelled it
+                except Exception:  # noqa: BLE001 — task already cancelling
                     pass
 
         for fut in self._pending.values():

@@ -18,6 +18,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -442,6 +443,45 @@ def _classify_tool_dependencies(
     return independent, dependent
 
 
+# ── Per-turn context ──────────────────────────────────────────────────
+
+
+@dataclass
+class _TurnContext:
+    """Per-turn state for ``PredaCoreCore.process()``.
+
+    Carries the call-site inputs (immutable after construction) and the
+    mutable accumulators that the Setup / AgentLoop / PostProcess phases
+    of ``process()`` share. The phases mutate ``messages``, ``tools_used``,
+    ``tool_errors``, etc. in place. Introduced by H22 Phase 3a (2026-05-11)
+    to make the agent-loop state explicit so the loop can be split into
+    named helper methods without long parameter lists.
+    """
+
+    # Inputs (immutable after init)
+    user_id: str
+    message: str
+    session: Session
+    confirm_fn: Callable | None = None
+    stream_fn: Callable | None = None
+    event_fn: Callable | None = None
+    start_time: float = 0.0
+
+    # Derived in _setup_turn
+    sid: str = ""  # cached session.session_id
+    messages: list[dict[str, Any]] = field(default_factory=list)
+
+    # Mutable accumulators populated by the agent loop
+    tools_used: list[str] = field(default_factory=list)
+    tool_errors: list[str] = field(default_factory=list)
+    tool_history: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    tool_results: list[str] = field(default_factory=list)
+    executed_tool_calls: int = 0
+    provider_tool_log: list[dict[str, Any]] = field(default_factory=list)
+    tool_refusal_retry: int = 0
+    tool_announcement_retry: int = 0
+
+
 # ── PredaCore Core ──────────────────────────────────────────────────────
 
 
@@ -531,8 +571,9 @@ class PredaCoreCore:
 
                 self._memory_retriever = MemoryRetriever(
                     store=self.tools._unified_memory,
+                    llm=self.llm,  # Wave-12 G2 — enables HyDE on low-conf recall
                 )
-                logger.info("Unified MemoryRetriever active")
+                logger.info("Unified MemoryRetriever active (HyDE: llm wired)")
             except (ImportError, OSError, ValueError, TypeError) as exc:
                 logger.warning("MemoryRetriever init failed: %s", exc)
 
@@ -1120,6 +1161,435 @@ class PredaCoreCore:
         except (ImportError, OSError, RuntimeError) as _exc:
             logger.debug("Identity reflection check failed (non-fatal)", exc_info=True)
 
+    # ── H22 Phase 3b: Setup phase ────────────────────────────────────
+
+    async def _setup_turn_messages(self, ctx: "_TurnContext") -> list[dict[str, Any]]:
+        """Build the initial messages list for the agent loop.
+
+        Composes the system prompt with optional memory-recall context,
+        packs token-budgeted session history via
+        ``Session.build_context_window``, and appends the current user
+        message if it isn't already the tail of the packed history.
+
+        Cognitive layers (Phase 5, 2026-05-11):
+          - ``PREDACORE_PROMPT_IMPROVER=1`` (default) runs an LLM
+            prompt-engineer pass over the user's message and injects
+            the sharpened version as an internal-context system block.
+          - ``PREDACORE_LAYPLAN=1`` (default) runs a planning pass when
+            the prompt improver flagged ``requires_planning=true``.
+
+        Returns a fresh list of dict-shaped messages — the agent loop
+        mutates it as tool round-trips are appended.
+        """
+        system_prompt = self._system_prompt
+
+        memory_context = ""
+        if self._memory_retriever:
+            memory_context = await self._memory_retriever.build_context(
+                query=ctx.message,
+                user_id=ctx.user_id,
+                session_id=ctx.sid,
+            )
+        else:
+            memory_context = await self._build_runtime_memory_context(
+                ctx.user_id, ctx.message
+            )
+        if memory_context:
+            system_prompt = (
+                f"{system_prompt}\n\n---\n\n"
+                "# Retrieved Runtime Memory\n"
+                "Use these memories only when relevant. If they conflict with the latest "
+                "user message, trust the latest user message and ask a clarifying question.\n"
+                f"{memory_context}"
+            )
+
+        context_budget_tokens, history_min_tokens = _context_budget_for_provider(
+            self.llm.active_provider,
+            self.llm.active_model,
+        )
+        messages = [{"role": "system", "content": system_prompt}]
+        system_tokens = Session.estimate_tokens(system_prompt)
+        history_budget_tokens = max(
+            history_min_tokens,
+            context_budget_tokens - system_tokens,
+        )
+        logger.info(
+            "Prompt budget: provider=%s model=%s total=%d system=%d history=%d",
+            self.llm.active_provider,
+            self.llm.active_model,
+            context_budget_tokens,
+            system_tokens,
+            history_budget_tokens,
+        )
+
+        messages.extend(
+            ctx.session.build_context_window(
+                max_total_tokens=history_budget_tokens,
+                keep_recent_messages=32,
+                summary_max_tokens=1_200,
+            )
+        )
+
+        # ── Cognitive layers 0 + 1: prompt improver + (gated) lay plan
+        improver_block = await self._apply_prompt_improver(ctx)
+        plan_block = None
+        if improver_block and improver_block.get("requires_planning"):
+            plan_block = await self._apply_lay_plan(
+                ctx, improver_block["improved_prompt"]
+            )
+
+        # Insert internal-context blocks BEFORE the user message so the
+        # agent reads "user's intent (sharpened)" + "plan" then "actual
+        # user words" in sequence.
+        if improver_block:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": improver_block["system_block"],
+                }
+            )
+        if plan_block:
+            messages.append({"role": "system", "content": plan_block})
+
+        if not messages or messages[-1].get("content") != ctx.message:
+            messages.append({"role": "user", "content": ctx.message})
+
+        return messages
+
+    async def _apply_prompt_improver(
+        self, ctx: "_TurnContext"
+    ) -> dict[str, Any] | None:
+        """Run the prompt-engineer pass and produce an internal context
+        block. Returns ``None`` when disabled or the improver no-op'd."""
+        if os.getenv("PREDACORE_PROMPT_IMPROVER", "1") == "0":
+            return None
+        # Skip on extremely short messages — pure overhead.
+        if len(ctx.message.strip()) < 8:
+            return None
+        try:
+            from .agents.cognitive_layers import improve_prompt
+        except ImportError:
+            return None
+        result = await improve_prompt(llm=self.llm, user_message=ctx.message)
+        # No-op if the improver returned the input verbatim or empty.
+        improved = (result.improved_prompt or "").strip()
+        if not improved or improved == ctx.message.strip():
+            return None
+        block_lines = [
+            "# Internal context — sharpened user intent",
+            "",
+            "The prompt engineer pre-processed the user's message into the",
+            "high-detail version below. Treat this as the authoritative",
+            "interpretation of what the user is asking for. The user's",
+            "literal words follow as the next message — refer back to them",
+            "when citing what they said.",
+            "",
+            improved,
+        ]
+        if result.ambiguities:
+            block_lines.append("")
+            block_lines.append("## Flagged ambiguities (resolve these or ask the user):")
+            for amb in result.ambiguities:
+                block_lines.append(f"- {amb}")
+        return {
+            "system_block": "\n".join(block_lines),
+            "improved_prompt": improved,
+            "requires_planning": result.requires_planning,
+        }
+
+    async def _apply_lay_plan(
+        self, ctx: "_TurnContext", improved_prompt: str
+    ) -> str | None:
+        """Generate a short execution plan when the improver flagged
+        ``requires_planning``. Returns the plan-as-system-block or
+        ``None`` when disabled / failed."""
+        if os.getenv("PREDACORE_LAYPLAN", "1") == "0":
+            return None
+        try:
+            from .agents.cognitive_layers import lay_plan
+        except ImportError:
+            return None
+        plan = await lay_plan(llm=self.llm, improved_prompt=improved_prompt)
+        if not plan:
+            return None
+        return (
+            "# Internal context — execution plan\n\n"
+            "Before executing, you laid out this plan. Follow it unless a "
+            "tool result invalidates a step (then revise and continue):\n\n"
+            f"{plan}"
+        )
+
+    # ── H22 Phase 3d: PostProcess phase ──────────────────────────────
+
+    @staticmethod
+    async def _emit_event(ctx: "_TurnContext", event_type: str, data: dict[str, Any]) -> None:
+        """Fire ``ctx.event_fn`` if registered; tolerate sync/async callbacks
+        and swallow non-fatal callback errors. Used by both the agent loop
+        and ``_finalize_turn``."""
+        cb = ctx.event_fn
+        if cb is None:
+            return
+        try:
+            result = cb(event_type, data)
+            if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                await result
+        except (TypeError, RuntimeError, OSError):
+            logger.debug(
+                "Event emit failed for %s (non-fatal)", event_type, exc_info=True
+            )
+
+    async def _finalize_turn(
+        self,
+        ctx: "_TurnContext",
+        *,
+        initial_content: str,
+        response: dict[str, Any],
+        iteration: int,
+        success: bool,
+        error: str | None = None,
+        stream_was_used: bool = False,
+    ) -> str:
+        """Apply drift guard, record outcome, run post-turn hooks (memory,
+        journal, identity reflection), and return the user-facing final
+        content. Both the no-tool-calls early exit and the loop-exhaustion
+        fallback in ``process()`` call into this single helper.
+
+        ``success`` is the turn's terminal state: True for a normal answer
+        (even if some tools errored — those count separately via
+        ``ctx.tool_errors``); False for loop exhaustion or LLM failure.
+        Only successful turns trigger the memory/journal/reflection hooks.
+
+        Cognitive layers (Phase 5, 2026-05-11):
+          - ``PREDACORE_TEST_CRITIQUE=1`` (default) runs the fused
+            Test+Critique gate on a successful draft answer. On REGEN
+            the agent gets one extra LLM call with the critique as
+            user-facing instruction.
+          - ``PREDACORE_META_REFLECT_EVERY_N`` (default 20; 0 disables)
+            samples a meta-pattern from the completed turn and stores
+            it for future PreRecall.
+        """
+        # ── Cognitive layer 2: Test + Critique (success path only)
+        if success:
+            critique_content = await self._apply_test_and_critique(
+                ctx, initial_content
+            )
+            if critique_content is not None:
+                initial_content = critique_content
+
+        final_content, drift_assessment, regen_count = await self._apply_persona_drift_guard(
+            user_message=ctx.message,
+            messages=ctx.messages,
+            initial_content=initial_content,
+            tools_used=ctx.executed_tool_calls,
+        )
+
+        try:
+            self._transcript.append_message(ctx.sid, "assistant", final_content)
+        except OSError:
+            logger.debug("Transcript write failed (non-fatal)", exc_info=True)
+
+        provider_used = response.get("provider_used", self.llm._provider_name)
+        usage = response.get("usage", {})
+
+        if success:
+            response_eval = _evaluate_response(
+                ctx.message, final_content, ctx.tools_used, ctx.tool_results
+            )
+            if response_eval.issues:
+                logger.info(
+                    "Response evaluation: confidence=%.2f issues=%s",
+                    response_eval.confidence,
+                    ",".join(response_eval.issues),
+                )
+            elapsed = time.time() - ctx.start_time
+            comp_tokens = usage.get("completion_tokens", 0)
+            logger.info(
+                "Response generated in %.1fs (%d iterations, %d tokens, "
+                "drift_score=%.2f, drift_regens=%d, confidence=%.2f)",
+                elapsed,
+                iteration,
+                comp_tokens,
+                drift_assessment.score,
+                regen_count,
+                response_eval.confidence,
+            )
+            await self._emit_event(
+                ctx,
+                "response",
+                {
+                    "content": final_content,
+                    "tokens": comp_tokens,
+                    "tools_used": ctx.executed_tool_calls,
+                    "iterations": iteration,
+                    "elapsed_s": round(elapsed, 2),
+                    "provider": provider_used,
+                    "usage": usage,
+                    "cost_usd": response.get("cost_usd", 0),
+                    "streamed": stream_was_used,
+                },
+            )
+
+        await self._record_outcome(
+            user_id=ctx.user_id,
+            message=ctx.message,
+            response=final_content,
+            tools_used=ctx.tools_used,
+            tool_errors=ctx.tool_errors,
+            iterations=iteration,
+            start_time=ctx.start_time,
+            provider=provider_used,
+            model=response.get("model_used", ""),
+            usage=usage,
+            drift_score=drift_assessment.score if success else 0.0,
+            drift_regens=regen_count if success else 0,
+            session_id=ctx.sid,
+            success=success and not bool(ctx.tool_errors),
+            error=error,
+        )
+
+        if success:
+            await self._store_turn_memory(
+                ctx.user_id,
+                ctx.message,
+                final_content,
+                ctx.tools_used,
+                ctx.sid,
+                provider_used,
+            )
+            await self._append_decision_journal(
+                message=ctx.message,
+                response=final_content,
+                tools_used=ctx.tools_used,
+                tool_errors=ctx.tool_errors,
+                iterations=iteration,
+                start_time=ctx.start_time,
+                usage=usage,
+                session_id=ctx.sid,
+            )
+            await self._maybe_identity_reflect()
+            await self._maybe_sample_meta_pattern(ctx, final_content)
+
+        return final_content
+
+    async def _apply_test_and_critique(
+        self, ctx: "_TurnContext", draft_content: str
+    ) -> str | None:
+        """Run the fused Test+Critique gate on the draft answer.
+
+        Returns the regenerated content on REGEN (one extra LLM call
+        with the critique as instruction). Returns ``None`` when the
+        verdict is PASS or the layer is disabled — caller continues
+        with the original draft.
+        """
+        if os.getenv("PREDACORE_TEST_CRITIQUE", "1") == "0":
+            return None
+        if not draft_content or not draft_content.strip():
+            return None
+        try:
+            from .agents.cognitive_layers import test_and_critique
+        except ImportError:
+            return None
+        result = await test_and_critique(
+            llm=self.llm,
+            user_message=ctx.message,
+            draft_answer=draft_content,
+        )
+        if result.verdict != "REGEN" or not result.critique:
+            return None
+        logger.info(
+            "Test+Critique returned REGEN: %s",
+            result.critique[:140].replace("\n", " "),
+        )
+        # Append the draft + critique as new turns and let the LLM
+        # regenerate. No tools on the regen — pure rewrite.
+        regen_messages = list(ctx.messages)
+        regen_messages.append({"role": "assistant", "content": draft_content})
+        regen_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "[System: An independent reviewer critiqued your draft "
+                    "response above. Address this critique and produce a "
+                    "revised final answer. Keep the user's intent unchanged "
+                    "— sharpen, fix gaps, ground claims in evidence.]\n\n"
+                    f"Critique:\n{result.critique}"
+                ),
+            }
+        )
+        try:
+            regenerated = await self.llm.chat(
+                messages=regen_messages,
+                tools=None,
+                temperature=0.2,
+            )
+        except (ConnectionError, TimeoutError, OSError, RuntimeError) as exc:
+            logger.debug("Test+Critique regen failed (non-fatal): %s", exc)
+            return None
+        if not isinstance(regenerated, dict):
+            return None
+        new_content = str(regenerated.get("content") or "").strip()
+        if not new_content:
+            return None
+        return new_content
+
+    async def _maybe_sample_meta_pattern(
+        self, ctx: "_TurnContext", final_content: str
+    ) -> None:
+        """Every Nth turn, generate a meta-pattern from the completed
+        turn and store it in unified memory for future PreRecall.
+
+        Controlled by ``PREDACORE_META_REFLECT_EVERY_N`` (default 20;
+        0 disables). Non-fatal — any failure is logged at debug.
+        """
+        try:
+            every_n = int(os.getenv("PREDACORE_META_REFLECT_EVERY_N", "20"))
+        except (ValueError, TypeError):
+            every_n = 20
+        if every_n <= 0:
+            return
+        # Use the outcome-store row count as a stable turn counter so
+        # we don't have to thread state through ctx for sample timing.
+        try:
+            self._meta_reflect_turn_counter = (
+                getattr(self, "_meta_reflect_turn_counter", 0) + 1
+            )
+            if self._meta_reflect_turn_counter % every_n != 0:
+                return
+        except Exception:  # noqa: BLE001 — counter is bookkeeping
+            return
+        try:
+            from .agents.cognitive_layers import meta_reflect_pattern
+        except ImportError:
+            return
+        pattern = await meta_reflect_pattern(
+            llm=self.llm,
+            user_message=ctx.message,
+            tools_used=ctx.tools_used,
+            final_answer=final_content,
+        )
+        if not pattern:
+            return
+        # Best-effort store; never blocks the turn return.
+        um = self.tools._unified_memory
+        if um is None:
+            return
+        try:
+            await um.store(
+                content=f"Meta-pattern: {pattern}",
+                memory_type="conversation",
+                importance=3,
+                session_id=ctx.sid,
+                user_id=ctx.user_id,
+                metadata={
+                    "kind": "meta_pattern",
+                    "tools_used": ctx.tools_used,
+                },
+                memory_scope="user",
+            )
+            logger.info("Meta-pattern sampled and stored")
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.debug("Meta-pattern store failed (non-fatal): %s", exc)
+
     # ── Direct tool shortcut ─────────────────────────────────────────
 
     def _extract_direct_tool_shortcut(
@@ -1233,12 +1703,8 @@ class PredaCoreCore:
                 except (OSError, RuntimeError) as _exc:
                     logger.debug("Feedback update failed (non-fatal)", exc_info=True)
 
-        # Outcome tracking accumulators
-        _tools_used: list[str] = []
-        _tool_errors: list[str] = []
-        _tool_history: list[tuple[str, dict[str, Any]]] = []
-        _tool_results: list[str] = []
-
+        # Direct-tool shortcut: imperative "run tool X with args" turns
+        # bypass the LLM round-trip entirely.
         shortcut = self._extract_direct_tool_shortcut(message)
         if shortcut is not None:
             tool_name, tool_args = shortcut
@@ -1270,78 +1736,58 @@ class PredaCoreCore:
             )
             return result
 
-        system_prompt = self._system_prompt
-
-        memory_context = ""
-        if self._memory_retriever:
-            memory_context = await self._memory_retriever.build_context(
-                query=message,
-                user_id=user_id,
-                session_id=sid,
-            )
-        else:
-            memory_context = await self._build_runtime_memory_context(
-                user_id, message
-            )
-        if memory_context:
-            system_prompt = (
-                f"{system_prompt}\n\n---\n\n"
-                "# Retrieved Runtime Memory\n"
-                "Use these memories only when relevant. If they conflict with the latest "
-                "user message, trust the latest user message and ask a clarifying question.\n"
-                f"{memory_context}"
-            )
-
-        # Build message history with a token-aware packing strategy.
-        # Reserve headroom for tool schemas, model output, and loop retries.
-        context_budget_tokens, history_min_tokens = _context_budget_for_provider(
-            self.llm.active_provider,
-            self.llm.active_model,
+        # H22 Phase 3: thread per-turn state through named helper methods.
+        # Mutable list fields (messages, tools_used, …) are shared by
+        # reference between ctx, _run_agent_loop, and _finalize_turn.
+        ctx = _TurnContext(
+            user_id=user_id,
+            message=message,
+            session=session,
+            confirm_fn=confirm_fn,
+            stream_fn=stream_fn,
+            event_fn=event_fn,
+            start_time=start_time,
+            sid=sid,
         )
-        messages = [{"role": "system", "content": system_prompt}]
-        system_tokens = Session.estimate_tokens(system_prompt)
-        history_budget_tokens = max(
-            history_min_tokens,
-            context_budget_tokens - system_tokens,
-        )
-        logger.info(
-            "Prompt budget: provider=%s model=%s total=%d system=%d history=%d",
-            self.llm.active_provider,
-            self.llm.active_model,
-            context_budget_tokens,
-            system_tokens,
-            history_budget_tokens,
-        )
+        ctx.messages = await self._setup_turn_messages(ctx)
+        return await self._run_agent_loop(ctx)
 
-        messages.extend(
-            session.build_context_window(
-                max_total_tokens=history_budget_tokens,
-                keep_recent_messages=32,
-                summary_max_tokens=1_200,
-            )
-        )
+    # ── H22 Phase 3c: AgentLoop phase ────────────────────────────────
 
-        if not messages or messages[-1].get("content") != message:
-            messages.append({"role": "user", "content": message})
+    async def _run_agent_loop(self, ctx: "_TurnContext") -> str:
+        """Run the LLM ⇄ tool-execution loop until completion or
+        max-iteration exhaustion. Returns the user-facing final string
+        (delegating to ``_finalize_turn`` for both terminal states).
 
-        # Agent loop: LLM → tool calls → LLM → ... → final response
+        H22 Phase 3c (2026-05-11): extracted verbatim from the body of
+        ``process()`` to make the agent loop a named, separately-testable
+        unit. Mutates ``ctx.messages`` / ``ctx.tools_used`` /
+        ``ctx.tool_errors`` / ``ctx.tool_history`` / ``ctx.tool_results``
+        / ``ctx.provider_tool_log`` / ``ctx.executed_tool_calls`` in
+        place via the locals aliased at the top.
+        """
+        # Aliases keep the historical loop body verbatim. All mutations
+        # via these names update the same objects ctx exposes.
+        user_id = ctx.user_id
+        message = ctx.message
+        session = ctx.session
+        sid = ctx.sid
+        confirm_fn = ctx.confirm_fn
+        stream_fn = ctx.stream_fn
+        start_time = ctx.start_time
+        messages = ctx.messages
+        _tools_used = ctx.tools_used
+        _tool_errors = ctx.tool_errors
+        _tool_history = ctx.tool_history
+        _tool_results = ctx.tool_results
+        _provider_tool_log = ctx.provider_tool_log
+
         executed_tool_calls = 0
-        _provider_tool_log: list[dict] = []  # tools the provider ran server-side
         tool_refusal_retry = 0
         tool_announcement_retry = 0
-        _raw_emit = event_fn
 
         async def _emit(event_type, data):
-            if not _raw_emit:
-                return
-            try:
-                result = _raw_emit(event_type, data)
-                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
-                    await result
-            except (TypeError, RuntimeError, OSError) as _exc:
-                logger.debug(
-                    "Event emit failed for %s (non-fatal)", event_type, exc_info=True
-                )
+            await self._emit_event(ctx, event_type, data)
 
         for iteration in range(self._max_tool_iterations):
             logger.debug("Agent loop iteration %d", iteration + 1)
@@ -1565,124 +2011,26 @@ class PredaCoreCore:
                     )
                     content = response.get("content", "Done.")
 
-                (
-                    final_content,
-                    drift_assessment,
-                    regen_count,
-                ) = await self._apply_persona_drift_guard(
-                    user_message=message,
-                    messages=messages,
+                ctx.executed_tool_calls = executed_tool_calls
+                return await self._finalize_turn(
+                    ctx,
                     initial_content=content,
-                    tools_used=executed_tool_calls,
+                    response=response,
+                    iteration=iteration + 1,
+                    success=True,
+                    stream_was_used=_stream_this_iter is not None,
                 )
-
-                # Meta-cognition: evaluate response quality
-                response_eval = _evaluate_response(
-                    message,
-                    final_content,
-                    _tools_used,
-                    _tool_results,
-                )
-                if response_eval.issues:
-                    logger.info(
-                        "Response evaluation: confidence=%.2f issues=%s",
-                        response_eval.confidence,
-                        ",".join(response_eval.issues),
-                    )
-
-                # No simulated-streaming fallback here. Providers that natively
-                # stream call stream_fn themselves during .chat(); providers
-                # that don't stream will render inside the CLI's glass response
-                # panel when the "response" event fires. This keeps both paths
-                # clean and non-duplicating.
-                elapsed = time.time() - start_time
-                comp_tokens = response.get("usage", {}).get("completion_tokens", 0)
-                provider_used = response.get("provider_used", self.llm._provider_name)
-                logger.info(
-                    "Response generated in %.1fs (%d iterations, %d tokens, "
-                    "drift_score=%.2f, drift_regens=%d, confidence=%.2f)",
-                    elapsed,
-                    iteration + 1,
-                    comp_tokens,
-                    drift_assessment.score,
-                    regen_count,
-                    response_eval.confidence,
-                )
-                await _emit(
-                    "response",
-                    {
-                        "content": final_content,
-                        "tokens": comp_tokens,
-                        "tools_used": executed_tool_calls,
-                        "iterations": iteration + 1,
-                        "elapsed_s": round(elapsed, 2),
-                        "provider": provider_used,
-                        "usage": response.get("usage", {}),
-                        "cost_usd": response.get("cost_usd", 0),
-                        "streamed": _stream_this_iter is not None,
-                    },
-                )
-                try:
-                    self._transcript.append_message(sid, "assistant", final_content)
-                except OSError:
-                    logger.debug("Transcript write failed (non-fatal)", exc_info=True)
-                await self._record_outcome(
-                    user_id=user_id,
-                    message=message,
-                    response=final_content,
-                    tools_used=_tools_used,
-                    tool_errors=_tool_errors,
-                    iterations=iteration + 1,
-                    start_time=start_time,
-                    provider=provider_used,
-                    model=response.get("model_used", ""),
-                    usage=response.get("usage", {}),
-                    drift_score=drift_assessment.score,
-                    drift_regens=regen_count,
-                    session_id=sid,
-                    success=not bool(_tool_errors),
-                )
-                # Post-turn: store conversation in unified memory
-                await self._store_turn_memory(
-                    user_id,
-                    message,
-                    final_content,
-                    _tools_used,
-                    sid,
-                    provider_used,
-                )
-                # Post-turn: append to DECISIONS.md (per-turn reasoning trace)
-                await self._append_decision_journal(
-                    message=message,
-                    response=final_content,
-                    tools_used=_tools_used,
-                    tool_errors=_tool_errors,
-                    iterations=iteration + 1,
-                    start_time=start_time,
-                    usage=response.get("usage", {}),
-                    session_id=sid,
-                )
-                # Post-turn: identity reflection (non-blocking)
-                await self._maybe_identity_reflect()
-                return final_content
 
             # ── Execute tool calls (parallel when possible) ───────────
-            # Two paths diverge here depending on provider capability:
+            # Round-trip serialization is provider-owned via
+            # ``LLMProvider.append_assistant_turn`` /
+            # ``append_tool_results_turn`` (Phase A, 2026-04-21). The
+            # core no longer forks on structured-vs-flat — each provider
+            # builds its own wire shape (Anthropic content_blocks with
+            # thinking signatures, OpenAI nested tool_calls, Gemini
+            # functionCall/functionResponse parts).
             #
-            #   structured_path (Anthropic): the provider
-            #     returned content_blocks (text + thinking + tool_use).
-            #     We append ONE assistant turn preserving those blocks
-            #     verbatim, then ONE user turn with all tool_result
-            #     blocks keyed by tool_use_id. Thinking signatures and
-            #     tool_use ids survive the round trip — Anthropic's
-            #     interleaved-thinking + tool_use contract is honored.
-            #
-            #   flat path (OpenAI/Gemini/others): we fall back to the
-            #     legacy per-tool text stubs [Calling tool: X] /
-            #     [Tool Result: X]. Those providers don't validate tool
-            #     linkage, so plain strings still work.
-            #
-            # Stream user-visible text BEFORE tool execution either way.
+            # Stream user-visible text BEFORE tool execution.
             _is_tool_announcement = bool(
                 content
                 and re.match(
@@ -1884,122 +2232,70 @@ class PredaCoreCore:
                     return s[:12000] + "\n...[truncated]...\n" + s[-2000:]
                 return s
 
-            # Phase A refactor (2026-04-21): provider-delegated tool-turn
-            # serialization. Each provider builds its OWN wire-format turns
-            # via the typed LLMProvider.append_*_turn methods — no more
-            # structured/flat fork here, no more "[Calling tool: X]" text
-            # stubs for non-Anthropic providers.
+            # Provider-delegated tool-turn serialization (Phase A, shipped
+            # 2026-04-21). The provider's typed ``append_assistant_turn`` /
+            # ``append_tool_results_turn`` build the correct wire shape for
+            # the active backend (Anthropic content_blocks, OpenAI nested
+            # tool_calls, Gemini functionCall/Response parts).
             #
-            # Default is ON. Set PREDACORE_NEW_TOOL_TURNS=0 to force the
-            # legacy path (emergency rollback only — the legacy path is
-            # scheduled for removal).
-            _use_new_tool_turns = os.getenv("PREDACORE_NEW_TOOL_TURNS", "1") != "0"
+            # A.8 (2026-05-11): deleted the legacy structured + flat-stub
+            # branches that the ``PREDACORE_NEW_TOOL_TURNS=0`` env flag used
+            # to gate. The "[Calling tool: X]" / "[Tool Result: X]" text
+            # stubs that poisoned long-conversation context are gone for
+            # good.
+            from .llm_providers import (
+                AssistantResponse,
+                ToolCallRef,
+                ToolResultRef,
+                message_from_dict,
+                message_to_dict,
+            )
 
-            if _use_new_tool_turns:
-                from .llm_providers import (
-                    AssistantResponse,
-                    ToolCallRef,
-                    ToolResultRef,
-                    message_from_dict,
-                    message_to_dict,
+            # Build typed response — the provider's chat() still returns a
+            # dict so we normalize here at the core↔provider boundary.
+            typed_tool_calls = [
+                ToolCallRef(
+                    id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
+                    name=tc.get("name", ""),
+                    arguments=tc.get("arguments", {}) or tc.get("input", {}) or {},
                 )
-
-                # Build typed response — the provider's chat() still returns a
-                # dict so we normalize here at the core↔provider boundary.
-                typed_tool_calls = [
-                    ToolCallRef(
-                        id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
+                for idx, tc in enumerate(tool_calls)
+            ]
+            # Carry per-provider round-trip state through provider_extras
+            # so each provider's append_*_turn can replay it verbatim.
+            #   - Anthropic: content_blocks (thinking signatures, tool_use ids)
+            #   - Gemini:    content_parts  (thoughtSignature on functionCall)
+            _extras: dict[str, Any] = {}
+            if response_blocks:
+                _extras["content_blocks"] = response_blocks
+            _content_parts = response.get("content_parts")
+            if isinstance(_content_parts, list) and _content_parts:
+                _extras["content_parts"] = _content_parts
+            typed_response = AssistantResponse(
+                content=content or "",
+                tool_calls=typed_tool_calls,
+                provider_extras=_extras,
+            )
+            # Build typed tool results from (tc, result_str) pairs
+            typed_results: list[ToolResultRef] = []
+            for idx, (tc, result_str) in enumerate(collected):
+                capped = _cap_result(result_str)
+                typed_results.append(
+                    ToolResultRef(
+                        call_id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
                         name=tc.get("name", ""),
-                        arguments=tc.get("arguments", {}) or tc.get("input", {}) or {},
+                        result=capped,
+                        is_error=capped.startswith("[Error") or capped.startswith("Error:"),
                     )
-                    for idx, tc in enumerate(tool_calls)
-                ]
-                # Carry per-provider round-trip state through provider_extras
-                # so each provider's append_*_turn can replay it verbatim.
-                #   - Anthropic: content_blocks (thinking signatures, tool_use ids)
-                #   - Gemini:    content_parts  (thoughtSignature on functionCall)
-                _extras: dict[str, Any] = {}
-                if response_blocks:
-                    _extras["content_blocks"] = response_blocks
-                _content_parts = response.get("content_parts")
-                if isinstance(_content_parts, list) and _content_parts:
-                    _extras["content_parts"] = _content_parts
-                typed_response = AssistantResponse(
-                    content=content or "",
-                    tool_calls=typed_tool_calls,
-                    provider_extras=_extras,
                 )
-                # Build typed tool results from (tc, result_str) pairs
-                typed_results: list[ToolResultRef] = []
-                for idx, (tc, result_str) in enumerate(collected):
-                    capped = _cap_result(result_str)
-                    typed_results.append(
-                        ToolResultRef(
-                            call_id=tc.get("id", "") or f"{tc.get('name', 'tool')}_{idx}",
-                            name=tc.get("name", ""),
-                            result=capped,
-                            is_error=capped.startswith("[Error") or capped.startswith("Error:"),
-                        )
-                    )
 
-                # Provider owns serialization — no more fork, no more poison stubs
-                provider = self.llm.active_provider_instance
-                typed_msgs = [message_from_dict(m) for m in messages]
-                provider.append_assistant_turn(typed_msgs, typed_response)
-                provider.append_tool_results_turn(typed_msgs, typed_results)
-                # Re-sync dict-based messages list in place
-                messages[:] = [message_to_dict(m) for m in typed_msgs]
-            elif structured_path:
-                # LEGACY structured path (Anthropic only) — kept for one-week
-                # rollback window. Identical to pre-Phase-A behavior.
-                tool_result_blocks: list[dict] = []
-                summary_lines: list[str] = []
-                for tc, result_str in collected:
-                    capped = _cap_result(result_str)
-                    tool_use_id = tc.get("id") or ""
-                    block: dict = {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": capped,
-                    }
-                    if capped.startswith("[Error") or capped.startswith("Error:"):
-                        block["is_error"] = True
-                    tool_result_blocks.append(block)
-                    summary_lines.append(f"[Tool Result: {tc['name']}]\n{capped}")
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": content or "",
-                        "content_blocks": response_blocks,
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "\n\n".join(summary_lines) or "[Tool results]",
-                        "content_blocks": tool_result_blocks,
-                    }
-                )
-            else:
-                # LEGACY flat path — kept for one-week rollback window.
-                # This is the PATH THAT CAUSED CONTEXT POISONING via literal
-                # "[Calling tool: X]" text stubs. It will be deleted in A.8
-                # once PREDACORE_NEW_TOOL_TURNS=1 is the default.
-                for tc, result_str in collected:
-                    capped = _cap_result(result_str)
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": f"[Calling tool: {tc['name']}]",
-                        }
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"[Tool Result: {tc['name']}]\n{capped}",
-                        }
-                    )
+            # Provider owns serialization — single path, no poison stubs.
+            provider = self.llm.active_provider_instance
+            typed_msgs = [message_from_dict(m) for m in messages]
+            provider.append_assistant_turn(typed_msgs, typed_response)
+            provider.append_tool_results_turn(typed_msgs, typed_results)
+            # Re-sync dict-based messages list in place
+            messages[:] = [message_to_dict(m) for m in typed_msgs]
 
             # Project-drift warnings get their own user messages so the
             # model sees them even when the tool_result turn is structured.
@@ -2058,34 +2354,15 @@ class PredaCoreCore:
         final_content = final.get(
             "content", "I completed the task but ran into complexity limits."
         )
-        final_content, _, _ = await self._apply_persona_drift_guard(
-            user_message=message,
-            messages=messages,
+        ctx.executed_tool_calls = executed_tool_calls
+        return await self._finalize_turn(
+            ctx,
             initial_content=final_content,
-            tools_used=executed_tool_calls,
-        )
-        try:
-            self._transcript.append_message(sid, "assistant", final_content)
-        except OSError:
-            logger.debug("Transcript write failed (non-fatal)", exc_info=True)
-        await self._record_outcome(
-            user_id=user_id,
-            message=message,
-            response=final_content,
-            tools_used=_tools_used,
-            tool_errors=_tool_errors,
-            iterations=self._max_tool_iterations,
-            start_time=start_time,
-            provider=final.get("provider_used", self.llm._provider_name),
-            model=final.get("model_used", ""),
-            usage=final.get("usage", {}),
-            drift_score=0.0,
-            drift_regens=0,
-            session_id=sid,
+            response=final,
+            iteration=self._max_tool_iterations,
             success=False,
             error="max_iterations_exhausted",
         )
-        return final_content
 
     # ── Orchestrator routing (Phase 8 — PREDACORE_USE_ORCHESTRATOR=1) ──
 
@@ -2117,18 +2394,19 @@ class PredaCoreCore:
                 OrchestratorConfig,
             )
             from .agents.budget import OrchestrationBudget
+            from .tools.handlers import HANDLER_MAP
         except ImportError as exc:
             logger.debug("Orchestrator import failed: %s — using legacy", exc)
             return None
 
-        if self._llm is None or not getattr(self.tools, "_handler_map", None):
+        if self.llm is None or not HANDLER_MAP:
             logger.debug("Orchestrator path declined: missing llm or handler_map")
             return None
 
         orch = Orchestrator(
-            llm=self._llm,
-            memory=getattr(self, "unified_memory", None),
-            handler_map=getattr(self.tools, "_handler_map", None) or {},
+            llm=self.llm,
+            memory=getattr(self.tools, "_unified_memory", None),
+            handler_map=HANDLER_MAP,
             tool_executor=self.tools,
             outcome_store=self._outcome_store,
             config=OrchestratorConfig(

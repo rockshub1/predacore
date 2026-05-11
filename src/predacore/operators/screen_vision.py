@@ -315,7 +315,10 @@ class ScreenVisionEngine:
             result = await self._llm.chat(messages)
             description = result.get("content", "")
         except (OSError, RuntimeError, ValueError, TimeoutError) as e:
-            logger.warning("Vision LLM call failed: %s", e)
+            # L14 — vision LLM is the whole point of this code path;
+            # silent failure → caller gets a placeholder description and
+            # has no idea why. Error level surfaces it in ops dashboards.
+            logger.error("Vision LLM call failed: %s", e)
             description = f"[vision failed: {e}]"
 
         return state, description

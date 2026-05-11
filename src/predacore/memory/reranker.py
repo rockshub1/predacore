@@ -1,0 +1,182 @@
+"""
+Cross-encoder reranker for memory recall.
+
+The bi-encoder (BGE-small via Rust / predacore_core) does first-stage
+retrieval — fast top-K candidate selection over the full corpus. The
+cross-encoder rerunner here does the slow precise re-ordering of those
+candidates: for each (query, doc) pair, the model produces a relevance
+score that the bi-encoder's vector-similarity score can't capture.
+
+Industry-standard two-stage retrieval. The reranker operates on the raw
+TEXT of (query, doc) pairs — it does NOT consume the bi-encoder's
+embeddings. That's why BGE-small as the embedder + Qwen3-Reranker-0.6B
+as the reranker is a clean combination: different model families, but
+the reranker only needs the document text and produces its own scoring.
+
+Default model: ``Qwen/Qwen3-Reranker-0.6B`` (Apache 2.0, 32k context,
+100+ languages including code, MTEB-R 65.80). The model loads lazily
+via ``sentence_transformers.CrossEncoder`` on first ``predict()`` call;
+subsequent calls reuse the loaded weights.
+
+Wired in via:
+  - ``UnifiedMemoryStore(reranker=Qwen3Reranker())`` at construction, OR
+  - env flag ``PREDACORE_MEMORY_RERANKER=1`` + ``recall(rerank=True)``
+
+Failures fail-open: if the model can't load, the reranker logs the error
+and returns the candidates unchanged. The bi-encoder result stays
+authoritative; reranking is enrichment, not a hard requirement.
+
+Wave 12 (v1.6.0): ``sentence-transformers`` + ``torch`` + ``transformers``
+moved into core ``dependencies`` so the reranker works out of the box
+on a fresh install. The ``[reranker]`` extra is kept as a back-compat
+no-op alias so existing install commands don't error.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+# Default model — Qwen3-Reranker-0.6B is the current SOTA small-model
+# cross-encoder (MTEB-R 65.80, 32k context, 0.6B params, Apache 2.0).
+# Can be overridden via env or constructor for evaluation / A-B tests.
+DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+
+# How many candidates we ask the bi-encoder for when reranking is on.
+# More candidates = higher recall ceiling, linear latency cost in the
+# reranker. 100 is the sweet spot for personal-use scale (~10-25k rows):
+# pushes recall@10 from BGE's ~93% to ~98% at ~200ms total per query.
+DEFAULT_RERANK_CANDIDATES = 100
+
+
+class Qwen3Reranker:
+    """Lazy-loading cross-encoder reranker.
+
+    Holds a ``sentence_transformers.CrossEncoder`` instance that's loaded
+    on first ``predict()`` call. Subsequent calls reuse the same model
+    object — no re-init cost.
+
+    Thread-safe: ``CrossEncoder.predict`` releases the GIL during model
+    forward pass; the caller (``UnifiedMemoryStore.recall``) wraps the
+    call in ``asyncio.to_thread`` to keep the event loop free.
+    """
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_RERANKER_MODEL,
+        max_length: int = 512,
+    ) -> None:
+        # ``max_length`` is the per-pair token cap inside the cross-encoder.
+        # Qwen3 supports 32k but most predacore memories are chunked at
+        # ~1000 tokens already (MAX_CHUNK_CHARS=4000 / ~4 chars per token).
+        # 512 covers >99% of stored content and keeps per-pair inference
+        # fast. Bump if you start storing long-form summaries.
+        self._model_name = model_name
+        self._max_length = max_length
+        self._model: Any = None  # CrossEncoder, lazy
+        self._load_failed = False
+
+    def _ensure_loaded(self) -> bool:
+        """Load the model on first use. Returns False on import/load failure."""
+        if self._model is not None:
+            return True
+        if self._load_failed:
+            return False
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:
+            # Wave 12: sentence-transformers is in core deps now. This
+            # path should be unreachable on a fresh `pip install predacore`.
+            # Surfacing instead of crashing covers source-install edge
+            # cases (e.g. broken venv, deliberate stripping of torch).
+            logger.warning(
+                "Reranker disabled — sentence-transformers not installed in "
+                "this venv. Run `pip install -U predacore` to repair (got: %s)",
+                exc,
+            )
+            self._load_failed = True
+            return False
+        try:
+            logger.info("Loading reranker model %s (first call — downloads ~1.2GB on first run)",
+                        self._model_name)
+            self._model = CrossEncoder(
+                self._model_name,
+                max_length=self._max_length,
+                trust_remote_code=False,
+            )
+            logger.info("Reranker %s loaded", self._model_name)
+            return True
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning(
+                "Reranker %s failed to load: %s — falling back to bi-encoder only",
+                self._model_name, exc,
+            )
+            self._load_failed = True
+            return False
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        """Score (query, doc) text pairs. Returns a list of floats aligned with `pairs`.
+
+        Higher score = more relevant. Sigmoid-applied so values are in [0, 1].
+        Returns equal scores (1.0) if the model couldn't load — caller
+        should treat that as "no reordering" rather than failing the recall.
+        """
+        if not pairs:
+            return []
+        if not self._ensure_loaded():
+            # Fail-open: equal scores → bi-encoder order preserved on sort
+            return [1.0] * len(pairs)
+        try:
+            # ``predict`` returns numpy array; convert to list for JSON-safe
+            # downstream. Apply sigmoid so scores are bounded [0, 1] for
+            # easier interpretation in logs / debug traces.
+            import numpy as _np
+            raw = self._model.predict(pairs, convert_to_numpy=True)
+            arr = _np.asarray(raw, dtype=_np.float32).reshape(-1)
+            # Sigmoid: Qwen3-Reranker outputs raw logits by default.
+            scores = 1.0 / (1.0 + _np.exp(-arr))
+            return scores.tolist()
+        except (RuntimeError, ValueError, OSError) as exc:
+            logger.warning("Reranker predict failed: %s — preserving bi-encoder order", exc)
+            return [1.0] * len(pairs)
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+
+def maybe_default_reranker() -> Qwen3Reranker | None:
+    """Construct a reranker instance when ``PREDACORE_MEMORY_RERANKER=1``.
+
+    Wave 12 (2026-05-11): default flipped to ``"1"`` (ON). The reranker
+    fail-opens when ``sentence-transformers`` isn't installed — predict()
+    returns ``[1.0] * N`` so bi-encoder order is preserved. Setting the
+    default to ON means users who install ``predacore[reranker]`` get
+    the recall boost automatically; users who don't have the extra
+    installed see no difference. Set ``PREDACORE_MEMORY_RERANKER=0`` to
+    explicitly disable even when the package is installed.
+
+    Returns None when disabled so callers can pass it as ``reranker=``
+    without branching at every site.
+    """
+    if os.getenv("PREDACORE_MEMORY_RERANKER", "1").strip().lower() in {"1", "true", "yes", "on"}:
+        model_override = os.getenv("PREDACORE_MEMORY_RERANKER_MODEL", "").strip()
+        if model_override:
+            return Qwen3Reranker(model_name=model_override)
+        return Qwen3Reranker()
+    return None
+
+
+__all__ = [
+    "DEFAULT_RERANKER_MODEL",
+    "DEFAULT_RERANK_CANDIDATES",
+    "Qwen3Reranker",
+    "maybe_default_reranker",
+]

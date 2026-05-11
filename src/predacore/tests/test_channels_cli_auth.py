@@ -808,6 +808,770 @@ class TestWhatsAppAdapter:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 5b. MessageBird adapter — HS256 JWT webhook verification
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestMessagebirdAdapter:
+    """MessagebirdAdapter HS256 JWT signature verification.
+
+    Regression: webhook accepted unauthenticated (BACKLOG H12).
+    """
+
+    def _make_adapter(self, signing_key: str = "test-signing-key"):
+        from predacore.channels.messagebird import MessagebirdAdapter
+        config = _make_mock_config(
+            channels_dict={
+                "messagebird": {
+                    "access_key": "fake",
+                    "from": "Predacore",
+                    "signing_key": signing_key,
+                }
+            }
+        )
+        return MessagebirdAdapter(config)
+
+    @staticmethod
+    def _make_jwt(secret: str, payload: dict, *, alg: str = "HS256") -> str:
+        import base64 as _b64
+        import hashlib as _h
+        import hmac as _hm
+        import json as _j
+
+        def _b64u(b: bytes) -> str:
+            return _b64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+        header = _b64u(_j.dumps({"alg": alg, "typ": "JWT"}).encode())
+        body = _b64u(_j.dumps(payload).encode())
+        sig_input = f"{header}.{body}".encode("ascii")
+        sig = _hm.new(secret.encode(), sig_input, _h.sha256).digest()
+        return f"{header}.{body}.{_b64u(sig)}"
+
+    def test_verify_signature_valid(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"originator=%2B15551234567&body=hi"
+        body_hash = hashlib.sha256(body).hexdigest()
+        token = self._make_jwt(
+            "k1",
+            {
+                "iss": "MessageBird",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+                "payload_hash": body_hash,
+            },
+        )
+        assert adapter._verify_signature(body, token) is True
+
+    def test_verify_signature_bearer_prefix_accepted(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x=1"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is True
+
+    def test_verify_signature_wrong_key_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x=1"
+        token = self._make_jwt(
+            "evil",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, token) is False
+
+    def test_verify_signature_expired_rejected(self):
+        adapter = self._make_adapter("k1")
+        body = b"x=1"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": 100,
+                "exp": 200,  # ancient
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, token) is False
+
+    def test_verify_signature_payload_hash_mismatch_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x=1"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(b"different").hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, token) is False
+
+    def test_verify_signature_wrong_alg_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x=1"
+        # Try alg=none
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+            alg="none",
+        )
+        assert adapter._verify_signature(body, token) is False
+
+    def test_verify_signature_no_signing_key_rejected(self):
+        adapter = self._make_adapter("")
+        assert adapter._verify_signature(b"body", "anything") is False
+
+    def test_verify_signature_malformed_token_rejected(self):
+        adapter = self._make_adapter("k1")
+        assert adapter._verify_signature(b"body", "not.a.jwt.really") is False
+        assert adapter._verify_signature(b"body", "") is False
+        assert adapter._verify_signature(b"body", "only.two") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5c. Vonage adapter — HS256 JWT webhook verification
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestVonageAdapter:
+    """VonageAdapter HS256 JWT signature verification.
+
+    Regression: webhook accepted unauthenticated (BACKLOG H12).
+    """
+
+    def _make_adapter(self, signature_secret: str = "vonage-secret"):
+        from predacore.channels.vonage import VonageAdapter
+        config = _make_mock_config(
+            channels_dict={
+                "vonage": {
+                    "application_id": "app-1",
+                    "private_key_path": "/tmp/key.pem",
+                    "from_number": "12055551234",
+                    "signature_secret": signature_secret,
+                }
+            }
+        )
+        return VonageAdapter(config)
+
+    @staticmethod
+    def _make_jwt(secret: str, payload: dict, *, alg: str = "HS256") -> str:
+        import base64 as _b64
+        import hashlib as _h
+        import hmac as _hm
+        import json as _j
+
+        def _b64u(b: bytes) -> str:
+            return _b64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+        header = _b64u(_j.dumps({"alg": alg, "typ": "JWT"}).encode())
+        body = _b64u(_j.dumps(payload).encode())
+        sig_input = f"{header}.{body}".encode("ascii")
+        sig = _hm.new(secret.encode(), sig_input, _h.sha256).digest()
+        return f"{header}.{body}.{_b64u(sig)}"
+
+    def test_verify_signature_valid_bearer(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b'{"channel":"sms","from":"+15551234567","message":{"content":{"text":"hi"}}}'
+        token = self._make_jwt(
+            "k1",
+            {
+                "iss": "Vonage",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is True
+
+    def test_verify_signature_missing_bearer_prefix_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        # Vonage requires Bearer prefix; raw token rejected.
+        assert adapter._verify_signature(body, token) is False
+
+    def test_verify_signature_wrong_secret_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x"
+        token = self._make_jwt(
+            "evil",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is False
+
+    def test_verify_signature_expired_rejected(self):
+        adapter = self._make_adapter("k1")
+        body = b"x"
+        token = self._make_jwt(
+            "k1",
+            {"nbf": 100, "exp": 200, "payload_hash": hashlib.sha256(body).hexdigest()},
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is False
+
+    def test_verify_signature_payload_hash_mismatch_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(b"different").hexdigest(),
+            },
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is False
+
+    def test_verify_signature_alg_none_rejected(self):
+        import time as _t
+        adapter = self._make_adapter("k1")
+        body = b"x"
+        token = self._make_jwt(
+            "k1",
+            {
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 60,
+                "payload_hash": hashlib.sha256(body).hexdigest(),
+            },
+            alg="none",
+        )
+        assert adapter._verify_signature(body, f"Bearer {token}") is False
+
+    def test_verify_signature_no_secret_rejected(self):
+        adapter = self._make_adapter("")
+        assert adapter._verify_signature(b"x", "Bearer anything") is False
+
+    def test_verify_signature_malformed_rejected(self):
+        adapter = self._make_adapter("k1")
+        assert adapter._verify_signature(b"x", "") is False
+        assert adapter._verify_signature(b"x", "Bearer bad.token") is False
+        assert adapter._verify_signature(b"x", "Bearer not.a.jwt.really") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5d. Zalo adapter — X-ZEvent-Signature SHA-256 verification
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestZaloAdapter:
+    """ZaloAdapter X-ZEvent-Signature verification.
+
+    Regression: webhook accepted unauthenticated (BACKLOG H12).
+    Zalo signature is sha256(app_id + body + timestamp + secret_key).
+    """
+
+    def _make_adapter(self, app_id: str = "1234", secret_key: str = "zalo-sk"):
+        from predacore.channels.zalo import ZaloAdapter
+        config = _make_mock_config(
+            channels_dict={
+                "zalo": {
+                    "access_token": "tok",
+                    "app_id": app_id,
+                    "secret_key": secret_key,
+                }
+            }
+        )
+        return ZaloAdapter(config)
+
+    @staticmethod
+    def _make_mac(app_id: str, body: bytes, timestamp: str, secret: str) -> str:
+        return hashlib.sha256(
+            app_id.encode() + body + timestamp.encode() + secret.encode()
+        ).hexdigest()
+
+    def test_verify_signature_valid(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b'{"event_name":"user_send_text","timestamp":"1700000000"}'
+        ts = "1700000000"
+        mac = self._make_mac("1234", body, ts, "sk")
+        assert adapter._verify_signature(body, f"mac={mac}", ts) is True
+
+    def test_verify_signature_wrong_secret_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b'{"event_name":"user_send_text"}'
+        ts = "1700000000"
+        bad_mac = self._make_mac("1234", body, ts, "evil")
+        assert adapter._verify_signature(body, f"mac={bad_mac}", ts) is False
+
+    def test_verify_signature_wrong_app_id_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b'{}'
+        ts = "1700000000"
+        # Compute mac with wrong app_id
+        bad_mac = self._make_mac("9999", body, ts, "sk")
+        assert adapter._verify_signature(body, f"mac={bad_mac}", ts) is False
+
+    def test_verify_signature_wrong_timestamp_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b'{}'
+        # Compute mac with one timestamp; verify with another
+        mac_a = self._make_mac("1234", body, "100", "sk")
+        assert adapter._verify_signature(body, f"mac={mac_a}", "200") is False
+
+    def test_verify_signature_body_tampered_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        ts = "100"
+        mac = self._make_mac("1234", b'{"text":"hi"}', ts, "sk")
+        assert adapter._verify_signature(b'{"text":"evil"}', f"mac={mac}", ts) is False
+
+    def test_verify_signature_no_secret_rejected(self):
+        adapter = self._make_adapter("1234", "")
+        assert adapter._verify_signature(b"x", "mac=anything", "100") is False
+
+    def test_verify_signature_no_mac_prefix_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b"x"
+        ts = "100"
+        mac = self._make_mac("1234", body, ts, "sk")
+        # missing "mac=" prefix
+        assert adapter._verify_signature(body, mac, ts) is False
+
+    def test_verify_signature_missing_timestamp_rejected(self):
+        adapter = self._make_adapter("1234", "sk")
+        body = b"x"
+        mac = self._make_mac("1234", body, "", "sk")
+        assert adapter._verify_signature(body, f"mac={mac}", "") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5e. Kakao adapter — Bearer token + IP allowlist verification
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestKakaoAdapter:
+    """KakaotalkAdapter Bearer token + IP allowlist verification.
+
+    Regression: webhook accepted unauthenticated (BACKLOG H12).
+    """
+
+    def _make_adapter(
+        self, verification_token: str = "kakao-token", ip_allowlist: str = ""
+    ):
+        from predacore.channels.kakaotalk import KakaotalkAdapter
+        config = _make_mock_config(
+            channels_dict={
+                "kakaotalk": {
+                    "access_token": "tok",
+                    "public_id": "pub-1",
+                    "verification_token": verification_token,
+                    "ip_allowlist": ip_allowlist,
+                }
+            }
+        )
+        return KakaotalkAdapter(config)
+
+    def test_verify_bearer_valid(self):
+        adapter = self._make_adapter("kt")
+        assert adapter._verify_bearer("Bearer kt") is True
+
+    def test_verify_bearer_wrong_token(self):
+        adapter = self._make_adapter("kt")
+        assert adapter._verify_bearer("Bearer wrong") is False
+
+    def test_verify_bearer_missing_prefix(self):
+        adapter = self._make_adapter("kt")
+        assert adapter._verify_bearer("kt") is False
+
+    def test_verify_bearer_empty_header(self):
+        adapter = self._make_adapter("kt")
+        assert adapter._verify_bearer("") is False
+
+    def test_verify_bearer_no_token_configured(self):
+        adapter = self._make_adapter("")
+        assert adapter._verify_bearer("Bearer anything") is False
+
+    def test_verify_bearer_case_insensitive_prefix(self):
+        adapter = self._make_adapter("kt")
+        assert adapter._verify_bearer("bearer kt") is True
+        assert adapter._verify_bearer("BEARER kt") is True
+
+    def test_ip_allowlist_no_config_passes(self):
+        adapter = self._make_adapter("kt", "")
+        # Empty allowlist → skip check (returns True)
+        assert adapter._verify_remote_ip("1.2.3.4") is True
+        assert adapter._verify_remote_ip("") is True
+
+    def test_ip_allowlist_exact_match(self):
+        adapter = self._make_adapter("kt", "10.0.0.5,192.168.1.0/24")
+        assert adapter._verify_remote_ip("10.0.0.5") is True
+        assert adapter._verify_remote_ip("10.0.0.6") is False
+
+    def test_ip_allowlist_cidr_match(self):
+        adapter = self._make_adapter("kt", "192.168.1.0/24")
+        assert adapter._verify_remote_ip("192.168.1.50") is True
+        assert adapter._verify_remote_ip("192.168.2.50") is False
+
+    def test_ip_allowlist_invalid_remote_rejected(self):
+        adapter = self._make_adapter("kt", "10.0.0.0/8")
+        assert adapter._verify_remote_ip("not-an-ip") is False
+        assert adapter._verify_remote_ip("") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5f. Google Chat adapter — OIDC bearer JWT verification (RS256)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestGoogleChatAdapter:
+    """GoogleChatAdapter OIDC bearer JWT (RS256) + legacy token verification.
+
+    Regression: webhook accepted unauthenticated (BACKLOG H11).
+    Tests inject a self-generated RSA public key into the adapter's cert
+    cache to bypass the network JWKS fetch.
+    """
+
+    def _make_adapter(
+        self, project_number: str = "", verification_token: str = ""
+    ):
+        from predacore.channels.google_chat import GoogleChatAdapter
+        config = _make_mock_config(
+            channels_dict={
+                "google_chat": {
+                    "project_number": project_number,
+                    "verification_token": verification_token,
+                }
+            }
+        )
+        return GoogleChatAdapter(config)
+
+    @staticmethod
+    def _gen_keypair():
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return priv, priv.public_key()
+
+    @staticmethod
+    def _make_rs256_jwt(priv_key, payload: dict, kid: str = "test-kid", alg: str = "RS256") -> str:
+        import base64 as _b64
+        import json as _j
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        def _b64u(b: bytes) -> str:
+            return _b64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+        header = _b64u(_j.dumps({"alg": alg, "typ": "JWT", "kid": kid}).encode())
+        body = _b64u(_j.dumps(payload).encode())
+        sig_input = f"{header}.{body}".encode("ascii")
+        sig = priv_key.sign(sig_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{header}.{body}.{_b64u(sig)}"
+
+    def _inject_pubkey(self, adapter, pub_key, kid: str = "test-kid"):
+        import time as _t
+        adapter._certs = {kid: pub_key}
+        adapter._certs_expires_at = _t.time() + 3600
+
+    @pytest.mark.asyncio
+    async def test_jwt_valid(self):
+        import time as _t
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "proj-1",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is True
+
+    @pytest.mark.asyncio
+    async def test_jwt_audience_list_accepted(self):
+        import time as _t
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": ["proj-2", "proj-1"],
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is True
+
+    @pytest.mark.asyncio
+    async def test_jwt_wrong_issuer_rejected(self):
+        import time as _t
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "spoofed@example.com",
+                "aud": "proj-1",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_wrong_audience_rejected(self):
+        import time as _t
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "wrong-proj",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_wrong_key_rejected(self):
+        import time as _t
+        priv1, _ = self._gen_keypair()
+        _, pub2 = self._gen_keypair()  # different keypair
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub2)
+        token = self._make_rs256_jwt(
+            priv1,  # signed with priv1, but adapter has pub2
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "proj-1",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_expired_rejected(self):
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "proj-1",
+                "nbf": 100, "exp": 200,
+            },
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_alg_none_rejected(self):
+        import time as _t
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "proj-1",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+            alg="none",
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_no_project_number_rejected(self):
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="")
+        self._inject_pubkey(adapter, pub)
+        token = self._make_rs256_jwt(
+            priv, {"iss": "chat@system.gserviceaccount.com"}
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_missing_bearer_rejected(self):
+        adapter = self._make_adapter(project_number="proj-1")
+        assert await adapter._verify_jwt("") is False
+        assert await adapter._verify_jwt("not-bearer") is False
+        assert await adapter._verify_jwt("Bearer not.a.jwt") is False
+
+    @pytest.mark.asyncio
+    async def test_jwt_unknown_kid_rejected(self):
+        """Unknown kid + JWKS fetch failure → reject (don't crash)."""
+        import time as _t
+        from unittest.mock import AsyncMock
+        priv, pub = self._gen_keypair()
+        adapter = self._make_adapter(project_number="proj-1")
+        self._inject_pubkey(adapter, pub, kid="known-kid")
+        # Stub _refresh_certs so the unknown-kid retry doesn't hit network.
+        adapter._refresh_certs = AsyncMock()
+        token = self._make_rs256_jwt(
+            priv,
+            {
+                "iss": "chat@system.gserviceaccount.com",
+                "aud": "proj-1",
+                "nbf": int(_t.time()) - 10,
+                "exp": int(_t.time()) + 600,
+            },
+            kid="other-kid",
+        )
+        assert await adapter._verify_jwt(f"Bearer {token}") is False
+
+    def test_legacy_token_valid(self):
+        adapter = self._make_adapter(verification_token="legacy-tok")
+        assert adapter._verify_legacy_token("legacy-tok") is True
+
+    def test_legacy_token_wrong(self):
+        adapter = self._make_adapter(verification_token="legacy-tok")
+        assert adapter._verify_legacy_token("wrong") is False
+
+    def test_legacy_token_unconfigured(self):
+        adapter = self._make_adapter(verification_token="")
+        assert adapter._verify_legacy_token("anything") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5g. iMessage adapter — AppleScript send via argv (no interpolation)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestIMessageSend:
+    """iMessage send-path regression for M26.
+
+    Adversarial buddy/text inputs (line terminators, quotes, AppleScript
+    metacharacters) must flow through osascript argv unchanged — never
+    interpolated into the script source.
+    """
+
+    def _make_adapter(self):
+        from predacore.channels.imessage import IMessageAdapter
+        config = _make_mock_config()
+        return IMessageAdapter(config)
+
+    @pytest.mark.asyncio
+    async def test_send_passes_buddy_and_text_as_argv(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        from predacore.channels.imessage import _SEND_APPLESCRIPT
+        from predacore.gateway import OutgoingMessage
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        adapter = self._make_adapter()
+
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        captured = {}
+
+        async def fake_subproc(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return proc
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_subproc)
+
+        msg = OutgoingMessage(
+            channel="imessage",
+            user_id='+15551234567"; do evil',
+            text='hi\n"; tell application "Finder" to delete every file',
+            session_id="s1",
+        )
+        await adapter.send(msg)
+        # osascript, -e, <script>, <buddy>, <text>
+        args = captured["args"]
+        assert args[0] == "osascript"
+        assert args[1] == "-e"
+        assert args[2] == _SEND_APPLESCRIPT
+        assert args[3] == msg.user_id  # verbatim
+        assert args[4] == msg.text     # verbatim — no escaping, no interpolation
+
+    @pytest.mark.asyncio
+    async def test_send_handles_newlines_and_unicode_unchanged(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        from predacore.gateway import OutgoingMessage
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        adapter = self._make_adapter()
+
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        captured = {}
+
+        async def fake_subproc(*args, **kwargs):
+            captured["args"] = args
+            return proc
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_subproc)
+
+        # U+2028 LINE SEPARATOR + U+2029 PARAGRAPH SEPARATOR + CR + LF + tab
+        adversarial_text = "line1 line2 line3\r\n\thello\\world"
+        msg = OutgoingMessage(
+            channel="imessage", user_id="bob@example.com",
+            text=adversarial_text, session_id="s1",
+        )
+        await adapter.send(msg)
+        args = captured["args"]
+        assert args[3] == "bob@example.com"
+        assert args[4] == adversarial_text  # verbatim
+
+    @pytest.mark.asyncio
+    async def test_send_short_circuits_off_macos(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        from predacore.gateway import OutgoingMessage
+
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        adapter = self._make_adapter()
+        called = AsyncMock()
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", called)
+        await adapter.send(OutgoingMessage(
+            channel="imessage", user_id="x", text="y", session_id="s1",
+        ))
+        called.assert_not_called()
+
+    def test_module_no_longer_exports_escape_helper(self):
+        """``_escape_applescript`` was removed from imessage.py; the new
+        argv-based send path makes it unnecessary."""
+        from predacore.channels import imessage as ic
+        assert not hasattr(ic, "_escape_applescript"), (
+            "imessage._escape_applescript must stay removed — argv-based "
+            "send is the only correct path (M26)."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 6. WebChat adapter — WebSocket lifecycle
 # ═══════════════════════════════════════════════════════════════════════
 

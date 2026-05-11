@@ -230,9 +230,12 @@ class MastodonAdapter(ChannelAdapter):
         sender_acct = sender.get("acct", "")  # e.g. "alice@example.com"
         if not sender_acct:
             return
-        # Strip our own mention from the text so the agent doesn't see it
+        # Strip LEADING mentions from the text so the agent doesn't see them.
+        # L33 fix: strip all consecutive @handles at the start, not just the
+        # first — multi-mention DMs ("@bot @ops fix the build") used to leak
+        # @ops into the prompt.
         body = _strip_html(status.get("content", "") or "")
-        body = re.sub(r"@\S+\s*", "", body, count=1).strip()
+        body = re.sub(r"^(?:@\S+\s*)+", "", body).strip()
         if not body:
             return
 

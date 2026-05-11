@@ -109,6 +109,21 @@ class GeminiCLIProvider(LLMProvider):
         # Determine model
         model = self.config.model or "gemini-2.5-flash"
 
+        # L39 (Wave 12): refuse model strings that aren't a single CLI token.
+        # `cmd` is passed via argv (no shell), so `subprocess` itself won't
+        # word-split, but a model name like "-m foo --some-flag" injected
+        # via config would still register `--some-flag` as a separate
+        # gemini-cli argument and change behavior. The regex allows the
+        # shape Google publishes ("gemini-2.5-flash", "gemini-1.5-pro-002").
+        import re as _re
+        _MODEL_NAME_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}$")
+        if model and not _MODEL_NAME_RE.match(model):
+            raise ValueError(
+                f"gemini_cli: refusing model name {model!r} — must be a "
+                "single token of [A-Za-z0-9._-] (1-64 chars). "
+                "Looks like an injected flag or shell fragment."
+            )
+
         # Construct command
         _trust = os.getenv("PREDACORE_TRUST_LEVEL", "ask_everytime").lower()
         cmd = [gemini_bin, "-p", "", "-o", "text"]

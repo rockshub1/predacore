@@ -71,9 +71,33 @@ class TranscriptWriter:
         self._handles: dict[str, Any] = {}  # session_id -> file handle
 
     def _get_path(self, session_id: str) -> Path:
-        """Get the transcript file path for a session."""
-        safe_id = session_id.replace("/", "_").replace("..", "_")
-        return self._output_dir / f"{safe_id}.jsonl"
+        """Get the transcript file path for a session.
+
+        L16 (Wave 12): sanitize against directory traversal + control
+        characters. Old version only stripped `/` and `..` — null bytes,
+        backslashes (Windows path traversal), and leading `/` (absolute-path
+        escape) survived. Now: replace every non-allowed character with `_`
+        and apply a defense-in-depth `Path.resolve()` containment check.
+        """
+        # Whitelist allowed characters; everything else becomes `_`.
+        # Allowed: alnum, dash, underscore, dot (for hex-suffix or version).
+        import re as _re
+        safe_id = _re.sub(r"[^A-Za-z0-9_.\-]", "_", session_id or "")
+        # Collapse runs of dots so `..` and `....` can't sneak through.
+        safe_id = _re.sub(r"\.{2,}", "_", safe_id)
+        # Collapse runs of underscores for readability.
+        safe_id = _re.sub(r"_+", "_", safe_id).strip("._") or "unknown"
+        # Cap length to avoid filesystem-limit surprises (most FS cap ~255).
+        safe_id = safe_id[:128]
+        path = (self._output_dir / f"{safe_id}.jsonl").resolve()
+        out_root = self._output_dir.resolve()
+        if out_root not in path.parents and path != out_root:
+            # Should be unreachable after sanitization, but fail-closed.
+            raise ValueError(
+                f"transcripts: sanitized path escapes output dir "
+                f"({session_id!r} → {path})"
+            )
+        return path
 
     def start_session(
         self,

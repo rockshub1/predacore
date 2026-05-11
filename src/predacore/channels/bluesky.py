@@ -214,6 +214,14 @@ class BlueskyAdapter(ChannelAdapter):
         # Bluesky returns newest-first; reverse so we process in order.
         for msg in reversed(messages):
             rkey = getattr(msg, "rev", "") or getattr(msg, "id", "")
+            # L32 (Wave 12) — atproto invariant. The `rev` / message `id` is
+            # an atproto TID (Timestamp Identifier): a 13-char base32-sortable
+            # encoding of (microseconds-since-epoch ++ clock-id). Lexicographic
+            # order matches chronological order by construction — that's the
+            # whole point of the format. If atproto ever migrates off TIDs
+            # (e.g. to ULIDs or CIDs), this comparison silently breaks
+            # newest-first dedup, so the invariant is documented here.
+            # spec: https://atproto.com/specs/record-key#record-key-type-tid
             if rkey and rkey <= last_seen:
                 continue
             sender_did = getattr(getattr(msg, "sender", None), "did", "")

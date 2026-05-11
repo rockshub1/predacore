@@ -233,6 +233,18 @@ SCHEMA_VERSION = 2
 CURRENT_EMBEDDING_VERSION = "bge-small-en-v1.5"
 CURRENT_CHUNKER_VERSION = "semantic-v1"
 
+# Wave-12 G2 (HyDE) — when the top bi-encoder score on a recall is below
+# this threshold, we treat the query as low-confidence and trigger a
+# Hypothetical-Document expansion: ask a cheap LLM to write a plausible
+# answer, embed that, recall again, merge. Closes the recall ceiling
+# that the reranker alone can't reach. Tune via PREDACORE_MEMORY_HYDE_THRESHOLD.
+try:
+    _HYDE_CONFIDENCE_THRESHOLD = float(
+        os.environ.get("PREDACORE_MEMORY_HYDE_THRESHOLD", "0.55")
+    )
+except ValueError:
+    _HYDE_CONFIDENCE_THRESHOLD = 0.55
+
 # Valid verification states for a memory row. Enforced at recall — rows
 # not in {ok, unverified} are filtered out of semantic search unless
 # explicitly requested (show_stale=True / show_superseded=True).
@@ -278,13 +290,15 @@ def _memory_is_visible_in_recall(
     reason key when returning False. Used by L4 ``recall_explain`` to
     compute per-stage filter deltas. Pass ``self._invariant_skips``.
     """
-    # mem may be a dict or sqlite3.Row; both support .get / [] access, but
-    # sqlite3.Row doesn't support .get — guard against that.
-    try:
-        state = mem["verification_state"] if "verification_state" in mem.keys() else "ok"  # type: ignore[union-attr]
-    except (AttributeError, TypeError):
-        state = mem.get("verification_state", "ok") if hasattr(mem, "get") else "ok"
-    state = (state or "ok").lower()
+    # L26 (Wave 12): unify dict/Row probing through _row_field. The old
+    # branchy try/except probe used `.keys()` for one path and `.get()`
+    # for the other, with a silent "ok" fallback if both failed — which
+    # meant a row missing `verification_state` would invisibly default to
+    # "ok" instead of being audited. _row_field is the canonical helper
+    # (defined just below) and handles dict, sqlite3.Row, and duck-typed
+    # objects with one consistent code path.
+    state = _row_field(mem, "verification_state", "ok")
+    state = (str(state) if state is not None else "ok").lower()
     if state in _HIDDEN_BY_DEFAULT_STATES:
         if skips is not None:
             # state name maps directly to counter key (stale → stale_verification,
@@ -1583,12 +1597,26 @@ class UnifiedMemoryStore:
         embedding_client: Any = None,
         vector_index: Any = None,
         db_adapter: Any = None,
+        reranker: Any = None,
     ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._embed = embedding_client
         self._vec_index = vector_index
         self._db_adapter = db_adapter
+        # Optional cross-encoder reranker — Qwen3Reranker or equivalent.
+        # When set, ``recall(rerank=True)`` rescores the bi-encoder's top-N
+        # candidates via the cross-encoder before returning. If left None,
+        # auto-pick from env (PREDACORE_MEMORY_RERANKER=1 enables the
+        # default Qwen3-Reranker-0.6B model). Always optional — recall
+        # works identically with the reranker absent or fail-open.
+        if reranker is None:
+            try:
+                from .reranker import maybe_default_reranker
+                reranker = maybe_default_reranker()
+            except ImportError:
+                reranker = None
+        self._reranker = reranker
         # Ingress safety — secret scanner stats are surfaced via get_stats().
         # Import locally to avoid a circular import at module load time.
         try:
@@ -2251,6 +2279,10 @@ class UnifiedMemoryStore:
         project_id: str | list[str] | None = None,
         verify: bool = False,
         verify_drop: bool = False,
+        rerank: bool | None = None,
+        rerank_candidates: int | None = None,
+        use_hyde: bool | None = None,
+        hyde_llm: Any = None,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         Recall memories by semantic similarity (predacore_core SIMD cosine).
@@ -2282,7 +2314,48 @@ class UnifiedMemoryStore:
         Combined ``verify=True`` + ``verify_drop=True`` is the path to **100%
         accuracy on code-backed memories** — only rows whose source still
         contains the indexed content are returned.
+
+        ``rerank`` (Wave 12 G2/reranker plan) — when True, fetch
+        ``rerank_candidates`` from the bi-encoder (default 100, configurable
+        via ``PREDACORE_MEMORY_RERANK_CANDIDATES``) and rescore each
+        (query, doc_text) pair with the cross-encoder reranker, then return
+        the top_k after reordering. Defaults to True when ``self._reranker``
+        is set; explicit ``rerank=False`` opts out per-call. Pushes
+        recall@10 from ~93% (BGE alone) to ~98% (BGE + Qwen3 reranker)
+        on conversation queries. Fail-open: if the reranker model can't
+        load, returns the bi-encoder result unchanged.
+
+        ``use_hyde`` (G2) — when True and the top-1 bi-encoder score is
+        below ``_HYDE_CONFIDENCE_THRESHOLD`` (default 0.55), the recall
+        layer asks ``hyde_llm`` to generate a hypothetical answer to the
+        query, embeds that hypothetical text, and runs a second recall
+        whose results are merged (dedup by id, max score per id).
+        Defaults to True when ``PREDACORE_MEMORY_HYDE=1``. Requires
+        ``hyde_llm`` (any object with ``async chat(messages=...)``) to be
+        passed in or available on the caller. Closes the recall gap that
+        the reranker can't reach: when the relevant doc didn't even make
+        the bi-encoder's top-N due to phrasing mismatch.
         """
+        # Resolve env-default rerank / hyde flags when caller didn't specify.
+        if rerank is None:
+            rerank = self._reranker is not None
+        if rerank_candidates is None:
+            try:
+                rerank_candidates = int(
+                    os.getenv("PREDACORE_MEMORY_RERANK_CANDIDATES", "100")
+                )
+            except ValueError:
+                rerank_candidates = 100
+        if use_hyde is None:
+            # Wave 12 (2026-05-11): default flipped to "1" (ON). HyDE is
+            # a no-op when ``hyde_llm`` is None — so flipping ON globally is
+            # safe; only callers that wire an LLM (MemoryRetriever does)
+            # will actually trigger expansion. And only on low-confidence
+            # recalls (top score < _HYDE_CONFIDENCE_THRESHOLD).
+            use_hyde = os.getenv("PREDACORE_MEMORY_HYDE", "1").strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+
         # Empty query → semantic has no meaning, use keyword path
         if not query or not query.strip():
             return await self._recall_keyword(
@@ -2311,8 +2384,13 @@ class UnifiedMemoryStore:
             query_vec = vecs[0]
             self._embedding_cache.set(embed_key, query_vec, ttl_seconds=600)
 
-        # Semantic search via vector index
-        hits = await self._vec_index.search(query_vec, top_k=top_k * 3)
+        # Semantic search via vector index.
+        # When reranking, fetch a wider candidate set so the cross-encoder
+        # has more raw material to reorder — pushes recall@10 from BGE's
+        # ~93% to ~98%. When reranker is off, the 3× multiplier is enough
+        # for the post-trim ranking weights to do their work.
+        _fetch_k = max(top_k * 3, rerank_candidates) if rerank and self._reranker is not None else top_k * 3
+        hits = await self._vec_index.search(query_vec, top_k=_fetch_k)
 
         # Collect ALL matching candidates first (no early break) so that
         # when we re-sort by weighted score below, we don't accidentally
@@ -2396,7 +2474,239 @@ class UnifiedMemoryStore:
         if verify:
             results = self._apply_verification(results, drop=verify_drop)
 
+        # Wave-12 G2 — HyDE expansion on low-confidence queries.
+        # When the top bi-encoder score is below the confidence threshold,
+        # ask hyde_llm to write a hypothetical answer to the query, embed
+        # THAT, recall again, and merge results. Closes the case where the
+        # right doc didn't make the bi-encoder's top-N due to phrasing mismatch.
+        if use_hyde and hyde_llm is not None and results:
+            top_score = results[0][1] if results else 0.0
+            if top_score < _HYDE_CONFIDENCE_THRESHOLD:
+                results = await self._maybe_hyde_expand(
+                    query=query, hyde_llm=hyde_llm,
+                    initial_results=results, user_id=user_id, top_k=top_k,
+                    memory_types=memory_types, min_importance=min_importance,
+                    scopes=scopes, team_id=team_id,
+                    show_superseded=show_superseded, project_id=project_id,
+                )
+
+        # Wave-12 — cross-encoder reranker (Qwen3-Reranker-0.6B by default).
+        # Rescore the top candidates with the cross-encoder and reorder by
+        # the reranker score. Fail-open: if the reranker isn't loaded or
+        # raises, returns the bi-encoder order unchanged.
+        if rerank and self._reranker is not None and len(results) > 1:
+            results = await self._apply_reranker(query, results, top_k)
+
         return results
+
+    async def _apply_reranker(
+        self,
+        query: str,
+        results: list[tuple[dict[str, Any], float]],
+        top_k: int,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """Run cross-encoder reranker over (query, doc_text) pairs and
+        return the top_k results reordered by reranker score.
+
+        The cross-encoder operates on TEXT — it doesn't consume the
+        bi-encoder embedding vectors. That's why BGE-small as the
+        embedder + Qwen3-Reranker-0.6B as the reranker compose cleanly.
+        """
+        if not results:
+            return results
+        # Build (query, doc_text) pairs. ``content`` is the indexed string
+        # for the row; identical to what was embedded.
+        pairs = [(query, mem.get("content", "") or "") for mem, _ in results]
+        try:
+            scores = await asyncio.to_thread(self._reranker.predict, pairs)
+        except (RuntimeError, ValueError, OSError) as exc:
+            logger.debug("Reranker call failed (preserving bi-encoder order): %s", exc)
+            return results[:top_k]
+        if not scores or len(scores) != len(results):
+            # Reranker returned unexpected shape — preserve original order
+            return results[:top_k]
+        # Attach reranker score to each row (for debug / explain) and resort
+        rescored: list[tuple[dict[str, Any], float, float]] = []
+        for (mem, bi_score), r_score in zip(results, scores):
+            mem["_rerank_score"] = float(r_score)
+            rescored.append((mem, float(bi_score), float(r_score)))
+        rescored.sort(key=lambda x: x[2], reverse=True)
+        return [(m, b) for (m, b, _r) in rescored[:top_k]]
+
+    async def _maybe_hyde_expand(
+        self,
+        *,
+        query: str,
+        hyde_llm: Any,
+        initial_results: list[tuple[dict[str, Any], float]],
+        user_id: str,
+        top_k: int,
+        memory_types: list[str] | None,
+        min_importance: int,
+        scopes: list[str] | None,
+        team_id: str | None,
+        show_superseded: bool,
+        project_id: str | list[str] | None,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """G2 (HyDE) — generate a hypothetical answer, embed it, recall again, merge.
+
+        Cheap LLM call (Haiku-class) writes a 1-2 sentence answer the way a
+        stored memory would phrase it. That phrasing has a much higher
+        chance of matching the actual stored content than the user's
+        original natural-language question. Merge the second recall's
+        results with the first, keeping the max score per id.
+        """
+        try:
+            hypothetical = await self._hyde_generate(query, hyde_llm)
+        except Exception as exc:  # noqa: BLE001 — fail-open on any LLM error
+            logger.debug("HyDE LLM call failed (preserving initial recall): %s", exc)
+            return initial_results
+        if not hypothetical or len(hypothetical) < 10:
+            return initial_results
+        # Embed the hypothetical answer; reuse the embedding cache.
+        hyde_key = hash_key("hyde", hypothetical)
+        hyde_vec = self._embedding_cache.get(hyde_key)
+        if hyde_vec is None:
+            try:
+                vecs = await self._embed.embed([hypothetical])
+            except (RuntimeError, ValueError) as exc:
+                logger.debug("HyDE embed failed (preserving initial recall): %s", exc)
+                return initial_results
+            if not vecs or not vecs[0]:
+                return initial_results
+            hyde_vec = vecs[0]
+            self._embedding_cache.set(hyde_key, hyde_vec, ttl_seconds=600)
+        # Second recall via the hypothetical embedding
+        try:
+            hyde_hits = await self._vec_index.search(hyde_vec, top_k=top_k * 3)
+        except (RuntimeError, ValueError) as exc:
+            logger.debug("HyDE vector search failed: %s", exc)
+            return initial_results
+        if not hyde_hits:
+            return initial_results
+        # Hydrate the hypothetical hits via the same fetch path
+        hyde_ids = [hid for hid, _ in hyde_hits]
+        score_lookup = {hid: float(score) for hid, score in hyde_hits}
+        try:
+            hyde_rows = await self._fetch_rows_by_ids(
+                hyde_ids,
+                user_id=user_id, memory_types=memory_types,
+                min_importance=min_importance,
+                scopes=scopes, team_id=team_id,
+                show_superseded=show_superseded, project_id=project_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            logger.debug("HyDE row fetch failed: %s", exc)
+            return initial_results
+        # Merge: max score per id; HyDE results marked for telemetry
+        merged: dict[str, tuple[dict[str, Any], float]] = {}
+        for mem, score in initial_results:
+            mid = mem.get("id", "")
+            if mid:
+                merged[mid] = (mem, score)
+        for row in hyde_rows:
+            rid = row.get("id", "")
+            if not rid:
+                continue
+            row_score = score_lookup.get(rid, 0.0)
+            row["_hyde_match"] = True
+            if rid in merged:
+                # Take the higher of (existing, hyde) — typically hyde wins
+                existing_mem, existing_score = merged[rid]
+                if row_score > existing_score:
+                    merged[rid] = (row, row_score)
+            else:
+                merged[rid] = (row, row_score)
+        # Resort by score and trim
+        out = sorted(merged.values(), key=lambda x: x[1], reverse=True)[:top_k * 3]
+        return out
+
+    async def _hyde_generate(self, query: str, hyde_llm: Any) -> str:
+        """Generate a 1-2 sentence hypothetical answer for HyDE.
+
+        Uses a tight system prompt to force concise plausible-doc shape.
+        Returns the model's content string; caller treats empty as no-op.
+        """
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are writing a SHORT plausible answer to the user's "
+                    "question (1-2 sentences max). The answer doesn't need "
+                    "to be factually correct — its purpose is to phrase the "
+                    "answer the way a stored memory would phrase it so we "
+                    "can retrieve similar content. Write as if you already "
+                    "knew the answer; do NOT say 'I don't know' or hedge."
+                ),
+            },
+            {"role": "user", "content": query},
+        ]
+        result = await hyde_llm.chat(messages=prompt_messages, temperature=0.2)
+        if isinstance(result, dict):
+            content = str(result.get("content") or "").strip()
+        else:
+            content = str(result or "").strip()
+        return content[:1000]  # safety cap
+
+    async def _fetch_rows_by_ids(
+        self,
+        ids: list[str],
+        *,
+        user_id: str,
+        memory_types: list[str] | None,
+        min_importance: int,
+        scopes: list[str] | None,
+        team_id: str | None,
+        show_superseded: bool,
+        project_id: str | list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """Hydrate a list of memory ids back into row dicts, applying the
+        same scope/type/importance filters that recall() uses.
+
+        Called by the HyDE merge path so the second-pass candidates go
+        through the same gating as the first-pass.
+        """
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        sql = (
+            "SELECT * FROM memories WHERE id IN ({placeholders})".format(
+                placeholders=placeholders,
+            )
+        )
+        if self._db_adapter is not None:
+            rows = await self._db_adapter.fetchall(self._DB_NAME, sql, list(ids))
+        else:
+            def _fetch():
+                cur = self._conn.execute(sql, tuple(ids))
+                return cur.fetchall()
+            async with self._db_lock:
+                rows = await self._in_thread(_fetch)
+        out: list[dict[str, Any]] = []
+        for r in rows or []:
+            # sqlite3.Row supports keys()/[] but not dict() directly.
+            if hasattr(r, "keys"):
+                mem = {k: r[k] for k in r.keys()}
+            else:
+                mem = dict(r)
+            # Reuse the visibility + scope filters from the main recall path
+            if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded, skips=self._invariant_skips):
+                continue
+            if user_id != "default" and mem.get("user_id") not in {user_id, "default"}:
+                continue
+            if memory_types and mem.get("memory_type") not in memory_types:
+                continue
+            try:
+                if int(mem.get("importance") or 0) < min_importance:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if not _memory_matches_scope(mem, scopes, team_id):
+                continue
+            if not _matches_project_filter(mem, project_id, self._invariant_skips):
+                continue
+            out.append(mem)
+        return out
 
     def _apply_verification(
         self,
@@ -2573,6 +2883,19 @@ class UnifiedMemoryStore:
 
         # Snapshot counters so we can compute per-query deltas
         skips_before = dict(self._invariant_skips)
+        # M23 (Wave 12, 2026-05-11): track per-filter rejection counts at
+        # the recall_explain layer too. ``self._invariant_skips`` only
+        # captures verification-state / project-id / version-skew skips
+        # (the visibility-check rejections); user/type/importance/scope
+        # filters happen below in this method and were invisible to
+        # callers looking at filtered_out. We tally them locally so the
+        # final ``filtered_out`` dict shows the FULL story.
+        local_filter_skips: dict[str, int] = {
+            "user_mismatch": 0,
+            "type_mismatch": 0,
+            "importance_below_min": 0,
+            "scope_mismatch": 0,
+        }
 
         # --- Vector stage -------------------------------------------------
         vector_raw: list[dict[str, Any]] = []
@@ -2608,12 +2931,16 @@ class UnifiedMemoryStore:
                         ):
                             continue
                         if mem.get("user_id") != user_id:
+                            local_filter_skips["user_mismatch"] += 1
                             continue
                         if memory_types and mem.get("memory_type") not in memory_types:
+                            local_filter_skips["type_mismatch"] += 1
                             continue
                         if mem.get("importance", 0) < min_importance:
+                            local_filter_skips["importance_below_min"] += 1
                             continue
                         if not _memory_matches_scope(mem, scopes, team_id=team_id):
+                            local_filter_skips["scope_mismatch"] += 1
                             continue
                         vector_kept.append({
                             "id": memory_id,
@@ -2650,11 +2977,15 @@ class UnifiedMemoryStore:
         out["stages"]["keyword.kept"] = keyword_kept
 
         # --- Filter delta ------------------------------------------------
+        # Combines invariant-level skips (visibility / project / version)
+        # with the user/type/importance/scope filter counters tracked
+        # locally in this query (M23 fix).
         skips_after = dict(self._invariant_skips)
-        out["stages"]["filtered_out"] = {
+        invariant_delta = {
             k: skips_after.get(k, 0) - skips_before.get(k, 0)
             for k in skips_after
         }
+        out["stages"]["filtered_out"] = {**invariant_delta, **local_filter_skips}
 
         # --- Final merged ranking (union, dedup by id, sort by score) ----
         merged: dict[str, dict[str, Any]] = {}

@@ -537,6 +537,21 @@ class VoiceInterface:
         elif provider == VoiceProvider.OPENAI:
             self._tts = OpenAITTS()
             self._tts_fallbacks = [KokoroTTS(), EdgeTTS(), SystemTTS()]
+        elif provider in (VoiceProvider.GOOGLE, VoiceProvider.ELEVENLABS):
+            # L18 — surface the silent fallthrough. Google/ElevenLabs TTS
+            # backends are not implemented in this build, but the config
+            # accepts them; previously the code silently used SystemTTS
+            # so the user heard macOS `say` instead of the voice they asked
+            # for. Surface it loudly so callers know and either install
+            # the backend or fix their config.
+            logger.warning(
+                "TTS provider %s is not implemented in this build — "
+                "falling back to system TTS (macOS `say` / Linux espeak). "
+                "Set tts_provider to kokoro/edge/openai for neural voices.",
+                provider.value,
+            )
+            self._tts = SystemTTS()
+            self._tts_fallbacks = []
         else:
             self._tts = SystemTTS()
             self._tts_fallbacks = []

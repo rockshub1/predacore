@@ -50,20 +50,27 @@ logger = logging.getLogger(__name__)
 # Runtime Configuration — Single source of truth for all sandbox types
 # ══════════════════════════════════════════════════════════════════════
 
+# L58 (Wave 12) — every runtime image is now version-pinned instead of
+# resolving to a moving `:latest`. `:latest` is a supply-chain hazard
+# (a compromised registry mirror or upstream tag overwrite can swap the
+# image under you) and a reproducibility hazard (the same script runs
+# differently on different days). Match the matrix to other pinned
+# images in `deploy/kubernetes/*` and `docker/sandbox/Dockerfile`.
+# Bumping a runtime is a single-line change here.
 _RUNTIME_IMAGES: dict[str, str] = {
     "python": "python:3.11-slim",
     "node": "node:20-alpine",
     "typescript": "node:20-alpine",
     "ruby": "ruby:3.2-alpine",
     "go": "golang:1.22-alpine",
-    "rust": "rust:latest",
+    "rust": "rust:1.83-slim",
     "java": "eclipse-temurin:21-jdk",
     "kotlin": "gradle:jdk17",
-    "c": "gcc:latest",
-    "cpp": "gcc:latest",
+    "c": "gcc:14",
+    "cpp": "gcc:14",
     "php": "php:8.2-cli-alpine",
-    "r": "r-base:latest",
-    "julia": "julia:latest",
+    "r": "r-base:4.4.2",
+    "julia": "julia:1.11.2",
     "bash": "bash:5",
 }
 
@@ -112,10 +119,19 @@ class SubprocessSandboxManager(AbstractSandboxManager):
 
     def __init__(self, logger: logging.Logger | None = None):
         self.logger = logger or logging.getLogger(__name__)
-        if os.environ.get("PREDACORE_ENV") == "production":
+        # L59 (Wave 12): warn unconditionally, not just when
+        # PREDACORE_ENV=production. Operators who never set the env
+        # var (the common path on dev / local / staging machines)
+        # previously got zero signal that the sandbox they're using
+        # isn't hardened. Suppress with PREDACORE_SUBPROCESS_SANDBOX_ACK=1
+        # once you've made the conscious choice.
+        if os.environ.get("PREDACORE_SUBPROCESS_SANDBOX_ACK", "").strip() != "1":
             self.logger.warning(
-                "SubprocessSandboxManager is NOT hardened — use "
-                "DockerSandboxManager for production deployments"
+                "SubprocessSandboxManager is NOT hardened — code runs in "
+                "an unisolated subprocess with the daemon's privileges. "
+                "Use DockerSandboxManager for any untrusted code path. "
+                "Set PREDACORE_SUBPROCESS_SANDBOX_ACK=1 to silence this "
+                "warning after acknowledging the risk."
             )
 
     async def run(

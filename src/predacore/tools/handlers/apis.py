@@ -313,7 +313,7 @@ def _save_apis(home: Path, data: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
         os.replace(tmp, str(path))
-    except BaseException:
+    except Exception:  # noqa: BLE001 — tempfile cleanup on any failure
         try:
             os.unlink(tmp)
         except OSError:

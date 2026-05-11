@@ -213,6 +213,14 @@ class MemoryIgnore:
             self.excludes.append(line)
         else:
             self.includes.append(line)
+        # L25 (Wave 12): populate the dir_only set at parse time so the
+        # data structure matches its docstring intent. Previously this set
+        # was initialized but never written to; _pattern_matches re-derived
+        # the dir-only flag from the trailing "/" on every match call.
+        # Keeping behavior identical (the matcher still parses for safety)
+        # but the set is now accurate, which makes the contract honest.
+        if line.endswith("/"):
+            self.dir_only.add(line.lstrip("/").rstrip("/"))
 
     @classmethod
     def for_root(cls, root: str | Path) -> "MemoryIgnore":

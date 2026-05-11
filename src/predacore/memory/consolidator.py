@@ -667,19 +667,42 @@ class MemoryConsolidator:
 
         keepers: set[str] = set()  # IDs that won a prior comparison — never delete these
 
+        # L28 (Wave 12) — batch-embed all candidates in a single call so a
+        # 500-memory sweep is 1 model invocation instead of 500. Each
+        # embed() call had its own batching overhead + network round trip;
+        # consolidating amortizes both. Falls back per-memory if the
+        # batch call errors so a single bad memory doesn't break the sweep.
+        content_index = {mem["id"]: mem.get("content", "") for mem in memories}
+        embed_cache: dict[str, list[float]] = {}
+        if self._store._embed:
+            try:
+                ordered_ids = list(content_index.keys())
+                ordered_contents = [content_index[i] for i in ordered_ids]
+                batch_vecs = await self._store._embed.embed(ordered_contents)
+                if batch_vecs and len(batch_vecs) == len(ordered_ids):
+                    for mid, vec in zip(ordered_ids, batch_vecs):
+                        if vec:
+                            embed_cache[mid] = vec
+            except (RuntimeError, ValueError, TypeError) as exc:
+                logger.debug("merge_similar batch embed failed (%s) — per-mem fallback", exc)
+
         for mem in memories:
             if mem["id"] in to_delete:
                 continue
             if mem.get("memory_type") in ("preference", "entity"):
                 continue
 
-            # Find similar memories via vector search
+            # Find similar memories via vector search (uses cached embedding if available)
             try:
                 if self._store._embed:
-                    vecs = await self._store._embed.embed([mem["content"]])
-                    if vecs and vecs[0]:
+                    vec = embed_cache.get(mem["id"])
+                    if vec is None:
+                        # Fallback: embed this one memory (only when the batch missed it).
+                        single = await self._store._embed.embed([mem["content"]])
+                        vec = single[0] if single and single[0] else None
+                    if vec:
                         similar = await self._store._vec_index.search(
-                            vecs[0],
+                            vec,
                             top_k=5,
                         )
                         for other_id, score in similar:

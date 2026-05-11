@@ -141,9 +141,13 @@ class OCREngine:
             try:
                 return await self._extract_tesseract(str(path), min_confidence)
             except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                # L14 — last-chance backend; if Tesseract dies too the
+                # next line escalates the whole OCR call to error.
                 logger.warning("Tesseract OCR failed: %s", exc)
 
-        logger.warning("No OCR backend available")
+        # L14 — terminal: no OCR backend produced results. Error level so
+        # ops dashboards alert on systemic OCR failure (vs. one-off image).
+        logger.error("No OCR backend available")
         return []
 
     async def extract_full_text(
