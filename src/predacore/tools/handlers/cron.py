@@ -42,12 +42,37 @@ _DANGEROUS_COMMAND_PATTERNS = [
 # In-memory task store (persisted to ~/.predacore/cron_tasks.json)
 # ---------------------------------------------------------------------------
 
+# M6 fix (Wave 12, 2026-05-11): track task lifecycle as an explicit state
+# instead of a single ``active`` bool. The bool flipped to False on both
+# natural completion AND cancellation, so ``cron list`` showed both as
+# "cancelled" — opposite of user expectation. The ``state`` field is the
+# source of truth going forward; ``active`` stays in persisted JSON for
+# backwards compat with pre-Wave-12 cron_tasks.json files.
+CRON_STATE_ACTIVE = "active"        # loop is running
+CRON_STATE_COMPLETED = "completed"  # max_runs reached, exited cleanly
+CRON_STATE_CANCELLED = "cancelled"  # user cancelled via cron_task action=cancel
+CRON_STATE_ERRORED = "errored"      # loop crashed inside the finally
+
 _CRON_TASKS: dict[str, dict[str, Any]] = {}
 _CRON_COUNTER = 0
 _CRON_TASK_REFS: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
 _CRON_MAX_TASKS = 20
 _CRON_FILE = Path.home() / ".predacore" / "cron_tasks.json"
 _CRON_LOADED = False
+
+
+def _cron_state(task: dict[str, Any]) -> str:
+    """Resolve a task's current state for display.
+
+    Backwards-compat: tasks persisted before the M6 fix have only the
+    ``active`` bool. Derive state from it for those (active → "active",
+    inactive → "completed" since we can't distinguish natural completion
+    from cancellation retroactively).
+    """
+    explicit = task.get("state")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return CRON_STATE_ACTIVE if task.get("active") else CRON_STATE_COMPLETED
 
 
 def _cron_save() -> None:
@@ -132,14 +157,26 @@ def _cron_spawn_loop(task_id: str, ctx: ToolContext) -> None:
     command = str(task.get("command") or "")
 
     async def _cron_loop():
+        # L8 — run immediately on first iteration, then sleep + run for
+        # subsequent ones. Old behavior slept the full interval before
+        # the first run; for `max_runs=1` that meant waiting the entire
+        # interval just to fire one job ("should it run now?" surprise).
+        # Resumed tasks (post-restart) still get an immediate first run
+        # which is correct semantics — they were already active.
+        first = True
         try:
             while _CRON_TASKS.get(task_id, {}).get("active", False):
-                await asyncio.sleep(interval * 60)
+                if not first:
+                    await asyncio.sleep(interval * 60)
+                first = False
                 t = _CRON_TASKS.get(task_id)
                 if not t or not t.get("active"):
                     break
                 if max_runs > 0 and t.get("run_count", 0) >= max_runs:
+                    # Natural completion — M6 distinguishes this from cancel.
                     t["active"] = False
+                    t["state"] = CRON_STATE_COMPLETED
+                    _cron_save()
                     break
                 t["run_count"] = t.get("run_count", 0) + 1
                 t["last_run"] = time.time()
@@ -175,6 +212,12 @@ def _cron_spawn_loop(task_id: str, ctx: ToolContext) -> None:
             t = _CRON_TASKS.get(task_id)
             if t:
                 t["active"] = False
+                # Only stamp a terminal state if one isn't already set
+                # (cancel() and natural-completion both stamp before we
+                # reach here; this catches loop crashes).
+                if t.get("state") in (None, CRON_STATE_ACTIVE):
+                    t["state"] = CRON_STATE_ERRORED
+                _cron_save()
 
     atask = asyncio.create_task(_cron_loop())
     task["_asyncio_task"] = atask
@@ -213,7 +256,7 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
             return "[No scheduled tasks]"
         lines = ["## Scheduled Tasks\n"]
         for tid, task in _CRON_TASKS.items():
-            status = "active" if task.get("active") else "cancelled"
+            status = _cron_state(task)
             lines.append(
                 f"- **{task['name']}** (id={tid}, {status}) "
                 f"every {task['interval_min']}m, "
@@ -225,6 +268,9 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
         task_id = str(args.get("task_id") or "").strip()
         if not task_id or task_id not in _CRON_TASKS:
             raise resource_not_found("Cron task", task_id or "(empty)", tool="cron_task")
+        # M6: stamp explicit "cancelled" BEFORE flipping active so the
+        # loop's `finally` doesn't downgrade it to "errored".
+        _CRON_TASKS[task_id]["state"] = CRON_STATE_CANCELLED
         _CRON_TASKS[task_id]["active"] = False
         atask = _CRON_TASKS[task_id].get("_asyncio_task")
         if atask and not atask.done():
@@ -278,6 +324,7 @@ async def handle_cron_task(args: dict[str, Any], ctx: ToolContext) -> str:
             "max_runs": max_runs,
             "run_count": 0,
             "active": True,
+            "state": CRON_STATE_ACTIVE,
             "created_at": time.time(),
             "last_run": None,
             "last_output": None,

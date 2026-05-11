@@ -139,16 +139,38 @@ class ChromeNotRunningError(ConnectionError):
 # ── ChromeCDP Backend ───────────────────────────────────────────────
 
 class _ChromeCDP:
-    """Chrome DevTools Protocol backend over aiohttp websocket."""
+    """Chrome DevTools Protocol backend over aiohttp websocket.
+
+    M8+M12 rewrite (Wave 12, 2026-05-11): ONE central receive task
+    consumes the websocket and dispatches messages to per-request
+    Futures (responses keyed by ``id``) or per-event waiter queues
+    (events keyed by ``method``). Previously each ``send()`` and each
+    ``wait_for_event()`` ran its own ad-hoc receive loop directly
+    reading ``self._ws.receive()``, which under concurrency stole each
+    other's messages and produced subtle hangs / dropped events. The
+    central dispatcher also fixes the dialog-event reentrancy bug
+    (M12): ``_handle_dialog_event`` runs as a fire-and-forget task that
+    calls back into ``send()`` via the dispatch table, so there's no
+    receive-loop reentrancy on the same socket.
+    """
     def __init__(self) -> None:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._msg_id: int = 0
         self._ws_url: str = ""
         self.browser_label: str = ""
-        self._events: dict[str, list[dict]] = {}
-        self._event_waiters: dict[str, list[asyncio.Future]] = {}
         self._bridge_ref: Any | None = None  # Back-ref to BrowserBridge for dialog handling
+
+        # M8 fix: central receive task + dispatch tables.
+        self._recv_task: asyncio.Task[None] | None = None
+        # msg_id → Future awaiting the response payload (dict)
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        # event method → list of Futures waiting for the next firing
+        self._event_waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
+        # Serialize ``ws.send_json`` (aiohttp ws send is not concurrent-safe)
+        self._send_lock = asyncio.Lock()
+        # Set by ``_recv_loop`` on exit so callers can detect ws death
+        self._recv_done: asyncio.Event = asyncio.Event()
 
     @property
     def connected(self) -> bool:
@@ -200,6 +222,10 @@ class _ChromeCDP:
             # and closes the session before we propagate the exception.
             if not ok:
                 await self._cleanup()
+        # Start the central receive task BEFORE issuing any send() so the
+        # initial Page.enable / Runtime.enable responses get routed.
+        self._recv_done = asyncio.Event()
+        self._recv_task = asyncio.create_task(self._recv_loop(), name="cdp-recv")
         # Enable CDP domains we need
         await self.send("Page.enable", timeout=2)
         await self.send("Runtime.enable", timeout=2)
@@ -208,72 +234,119 @@ class _ChromeCDP:
         logger.info("CDP connected: %s (%s)", self.browser_label, self._ws_url[:80])
         return True
 
+    async def _recv_loop(self) -> None:
+        """Central message dispatcher. Reads ``self._ws`` exactly once and
+        routes messages to per-request Futures or per-event waiter queues.
+
+        Exits when the websocket closes or errors; on exit, fails all
+        pending Futures with ``ConnectionError`` so callers don't hang.
+        """
+        try:
+            assert self._ws is not None
+            ws = self._ws
+            while not ws.closed:
+                raw = await ws.receive()
+                if raw.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(raw.data)
+                    except (json.JSONDecodeError, ValueError):
+                        logger.debug("CDP: dropped non-JSON ws frame")
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    # Response to a previous send()? Route by id.
+                    mid = data.get("id")
+                    if isinstance(mid, int):
+                        fut = self._pending.pop(mid, None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(data)
+                        continue
+                    # Otherwise it's an unsolicited event.
+                    evt_method = data.get("method")
+                    if not isinstance(evt_method, str):
+                        continue
+                    # Auto-handle JS dialogs as a separate task; the
+                    # handler calls back into send() but via the dispatch
+                    # table — no receive-loop reentrancy (M12 fix).
+                    if evt_method == "Page.javascriptDialogOpening" and self._bridge_ref:
+                        asyncio.create_task(
+                            self._bridge_ref._handle_dialog_event(
+                                data.get("params", {})
+                            ),
+                            name="cdp-dialog",
+                        )
+                    waiters = self._event_waiters.pop(evt_method, [])
+                    for w in waiters:
+                        if not w.done():
+                            w.set_result(data.get("params", {}))
+                elif raw.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+                # Other frame types (PING/PONG/BINARY) are silently ignored.
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — receive-loop top-level
+            logger.debug("CDP receive loop exited: %s", exc, exc_info=True)
+        finally:
+            # Fail any in-flight requests so callers don't hang on a dead ws.
+            for fut in list(self._pending.values()):
+                if not fut.done():
+                    fut.set_exception(ConnectionError("CDP websocket closed"))
+            self._pending.clear()
+            for waiters in list(self._event_waiters.values()):
+                for w in waiters:
+                    if not w.done():
+                        w.cancel()
+            self._event_waiters.clear()
+            self._recv_done.set()
+
     async def send(self, method: str, params: dict[str, Any] | None = None,
                    timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
         if not self.connected:
             return {"error": "CDP not connected"}
+        loop = asyncio.get_running_loop()
         self._msg_id += 1
         mid = self._msg_id
-        assert self._ws is not None
-        await self._ws.send_json({"id": mid, "method": method, "params": params or {}})
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[mid] = fut
+        try:
+            async with self._send_lock:
+                assert self._ws is not None
+                await self._ws.send_json(
+                    {"id": mid, "method": method, "params": params or {}}
+                )
             try:
-                raw = await asyncio.wait_for(self._ws.receive(), timeout=max(0.1, deadline - asyncio.get_event_loop().time()))
+                data = await asyncio.wait_for(fut, timeout=timeout)
             except asyncio.TimeoutError:
                 return {"error": f"CDP timeout for {method}"}
-            if raw.type == aiohttp.WSMsgType.TEXT:
-                data = json.loads(raw.data)
-                if data.get("id") == mid:
-                    if "error" in data:
-                        return {"error": data["error"].get("message", str(data["error"]))}
-                    return data.get("result", {})
-                # Store events for waiters
-                if "method" in data:
-                    evt_method = data["method"]
-                    # Auto-handle JS dialogs so they never block
-                    if evt_method == "Page.javascriptDialogOpening" and self._bridge_ref:
-                        import asyncio as _aio
-                        _aio.create_task(self._bridge_ref._handle_dialog_event(data.get("params", {})))
-                    waiters = self._event_waiters.get(evt_method, [])
-                    for w in waiters:
-                        if not w.done():
-                            w.set_result(data.get("params", {}))
-                    self._event_waiters.pop(evt_method, None)
-            elif raw.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                self._ws = None
-                return {"error": "CDP websocket closed"}
-        return {"error": f"CDP timeout for {method}"}
+            except ConnectionError as exc:
+                return {"error": str(exc)}
+            if "error" in data:
+                err = data["error"]
+                return {"error": err.get("message", str(err)) if isinstance(err, dict) else str(err)}
+            return data.get("result", {})
+        finally:
+            # Drop the pending slot if it's still there (timeout / error path).
+            self._pending.pop(mid, None)
 
     async def wait_for_event(self, event_name: str, timeout: float = 10.0) -> dict[str, Any] | None:
+        if not self.connected:
+            return None
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._event_waiters.setdefault(event_name, []).append(fut)
-        # Drain messages while waiting
-        assert self._ws is not None
-        deadline = loop.time() + timeout
-        while not fut.done() and loop.time() < deadline:
-            try:
-                raw = await asyncio.wait_for(self._ws.receive(), timeout=max(0.1, deadline - loop.time()))
-            except asyncio.TimeoutError:
-                break
-            if raw.type == aiohttp.WSMsgType.TEXT:
-                data = json.loads(raw.data)
-                if "method" in data:
-                    evt = data["method"]
-                    for w in self._event_waiters.get(evt, []):
-                        if not w.done():
-                            w.set_result(data.get("params", {}))
-                    self._event_waiters.pop(evt, None)
-            elif raw.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                break
-        if fut.done():
-            return fut.result()
-        # Cleanup
-        waiters = self._event_waiters.get(event_name, [])
-        if fut in waiters:
-            waiters.remove(fut)
-        return None
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        except asyncio.CancelledError:
+            return None
+        finally:
+            # Clean up the waiter slot if it's still queued (timeout/cancel).
+            waiters = self._event_waiters.get(event_name, [])
+            if fut in waiters:
+                waiters.remove(fut)
+                if not waiters:
+                    self._event_waiters.pop(event_name, None)
 
     async def evaluate_js(self, expression: str, timeout: float = _DEFAULT_TIMEOUT) -> Any:
         res = await self.send("Runtime.evaluate", {
@@ -290,9 +363,24 @@ class _ChromeCDP:
         return val
 
     async def close(self) -> None:
+        # Closing the ws will cause _recv_loop to exit naturally and
+        # fail all pending Futures. Cancelling the task explicitly
+        # covers the case where the ws is wedged (close() hangs).
         if self._ws and not self._ws.closed:
-            await self._ws.close()
+            try:
+                await asyncio.wait_for(self._ws.close(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                pass
         self._ws = None
+        if self._recv_task is not None and not self._recv_task.done():
+            self._recv_task.cancel()
+            try:
+                await asyncio.wait_for(self._recv_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:  # noqa: BLE001 — recv loop teardown
+                pass
+        self._recv_task = None
         await self._cleanup()
 
     async def _cleanup(self) -> None:
@@ -2094,7 +2182,7 @@ class BrowserBridge:
                                 if r.status == 200:
                                     logger.info("CDP enabled on already-running Chrome")
                                     return True
-                except (OSError, Exception):
+                except Exception:  # noqa: BLE001 — broad catch on Chrome auto-launch fallback
                     pass
                 # --args didn't work on running Chrome — need a restart
                 logger.warning(
@@ -2143,12 +2231,15 @@ class BrowserBridge:
                             async with s.get(f"http://localhost:{self._cdp_port}/json", timeout=aiohttp.ClientTimeout(total=1)) as r:
                                 if r.status == 200:
                                     return True
-                except (OSError, Exception):
+                except Exception:  # noqa: BLE001 — broad catch on Chrome auto-launch fallback
                     continue
-            logger.warning("Chrome launched but CDP not responding after 15s")
+            # L14 — terminal failure (no fallback available). Error level
+            # so log-filter dashboards see it.
+            logger.error("Chrome launched but CDP not responding after 15s")
             return False
         except (OSError, FileNotFoundError) as exc:
-            logger.warning("Failed to launch Chrome: %s", exc)
+            # L14 — terminal failure (no fallback available). Error level.
+            logger.error("Failed to launch Chrome: %s", exc)
             return False
 
     async def _use_cdp(self, name: str = "Chrome") -> bool:

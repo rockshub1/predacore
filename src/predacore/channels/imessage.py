@@ -63,11 +63,6 @@ def _chunk_message(text: str, max_len: int = IMESSAGE_MAX_LENGTH) -> list[str]:
     return chunks
 
 
-def _escape_applescript(text: str) -> str:
-    """Escape a string for safe inclusion inside an AppleScript literal."""
-    return text.replace("\\", "\\\\").replace('"', '\\"')
-
-
 class IMessageAdapter(ChannelAdapter):
     """iMessage via Messages.app + chat.db polling."""
 
@@ -148,17 +143,21 @@ class IMessageAdapter(ChannelAdapter):
         logger.info("iMessage adapter stopped")
 
     async def send(self, message: OutgoingMessage) -> None:
-        """Dispatch via AppleScript. ``user_id`` is the contact's phone/email."""
+        """Dispatch via AppleScript. ``user_id`` is the contact's phone/email.
+
+        The AppleScript receives ``buddy`` and ``text`` via ``argv`` (not via
+        string interpolation), so neither value can break out of the
+        AppleScript literal. This closes the M26 audit finding — line
+        terminators / adversarial Unicode in either field are safe because
+        AppleScript treats argv items as opaque strings.
+        """
         if platform.system() != "Darwin":
             return
         for chunk in _chunk_message(message.text):
-            script = _SEND_APPLESCRIPT.format(
-                text=_escape_applescript(chunk),
-                buddy=_escape_applescript(message.user_id),
-            )
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "osascript", "-e", script,
+                    "osascript", "-e", _SEND_APPLESCRIPT,
+                    message.user_id, chunk,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                 )
@@ -261,10 +260,16 @@ class IMessageAdapter(ChannelAdapter):
 
 
 # AppleScript that sends one message through Messages.app. We target the
-# default iMessage service explicitly so SMS fallbacks don't surprise us
-# (send via ``service 1st service whose service type is iMessage``).
-_SEND_APPLESCRIPT = '''tell application "Messages"
-    set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "{buddy}" of targetService
-    send "{text}" to targetBuddy
-end tell'''
+# default iMessage service explicitly so SMS fallbacks don't surprise us.
+# Inputs (buddy id, text) come in via ``argv`` so there is NO string
+# interpolation into the script — line terminators / adversarial Unicode
+# in either field cannot break out of the AppleScript literal (M26 fix).
+_SEND_APPLESCRIPT = '''on run argv
+    set buddyName to item 1 of argv
+    set messageText to item 2 of argv
+    tell application "Messages"
+        set targetService to 1st service whose service type = iMessage
+        set targetBuddy to buddy buddyName of targetService
+        send messageText to targetBuddy
+    end tell
+end run'''

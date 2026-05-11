@@ -143,7 +143,16 @@ class SkillMarketplace:
     """
 
     def __init__(self, data_path: str | None = None):
-        self._data_path = Path(data_path) if data_path else Path("data/skills")
+        # L7 (Wave 12): default was cwd-relative `Path("data/skills")` which
+        # is surprising for a daemon — `installed_skills.json` would land
+        # in wherever the user happened to launch from. Use the standard
+        # `~/.predacore/skills` location instead. Production callers
+        # (MarketplaceManager.initialize) still pass an explicit path
+        # from config so they're unaffected.
+        if data_path:
+            self._data_path = Path(data_path)
+        else:
+            self._data_path = Path.home() / ".predacore" / "skills"
         self._data_path.mkdir(parents=True, exist_ok=True)
 
         # Available skills in the marketplace (could be fetched from remote)

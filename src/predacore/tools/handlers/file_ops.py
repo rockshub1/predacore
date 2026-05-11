@@ -46,6 +46,19 @@ async def handle_read_file(args: dict[str, Any], ctx: ToolContext) -> str:
         raise resource_not_found("File", raw_path, tool="read_file")
     if path.is_dir():
         raise invalid_param("path", "is a directory, not a file", tool="read_file")
+    # L3 — path-jail: confine reads to home/cwd/tmp. Pattern blocklist
+    # below is defense-in-depth; the allowlist is the real boundary.
+    # `handle_list_directory` uses the same logic — kept consistent.
+    import tempfile
+    _home = Path.home().resolve()
+    _cwd = Path.cwd().resolve()
+    _tmpdir = str(Path(tempfile.gettempdir()).resolve())
+    _allowed = (str(_home), str(_cwd), "/tmp", "/private/tmp", _tmpdir)
+    if not any(str(path).startswith(p) for p in _allowed):
+        raise blocked(
+            "path must be under home directory, current working directory, or /tmp",
+            tool="read_file",
+        )
     path_str = str(path).lower()
     for pattern in SENSITIVE_READ_PATTERNS:
         if pattern in path_str:

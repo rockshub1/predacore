@@ -32,12 +32,12 @@ class MemoryRetriever:
     """
     Builds rich memory context for each LLM call.
 
-    Token budgets (default max_tokens=3000):
+    Token budgets (default max_tokens=3600):
         Preferences:      500 tokens  — always included first
         Entity context:    800 tokens  — entities found in the query
-        Semantic results: 1800 tokens  — embedding similarity search (fetch_k=25)
+        Semantic results: 2400 tokens  — embedding similarity search (fetch_k=100, reranker-graded)
         Fuzzy matches:     400 tokens  — typo-tolerant trigram (Rust)
-        Episode summaries: 500 tokens  — recent session summaries
+        Episode summaries: ~500 tokens — recent session summaries (remaining)
 
     Note: the per-section budgets are caps; if max_tokens is tight the
     later sections shrink first. Benchmarks call ``store.recall`` directly
@@ -49,9 +49,14 @@ class MemoryRetriever:
         self,
         store: Any,  # UnifiedMemoryStore
         embedding_client: Any = None,
+        llm: Any = None,  # for HyDE expansion (G2). None disables HyDE silently.
     ) -> None:
         self._store = store
         self._embed = embedding_client
+        # HyDE LLM — forwarded to store.recall() as `hyde_llm`. When None,
+        # HyDE is a no-op even when PREDACORE_MEMORY_HYDE=1 (intentional —
+        # HyDE is useless without a model to generate hypothetical answers).
+        self._llm = llm
         # Caches to reduce per-message latency
         self._semantic_cache = TTLCache()       # hash(query+user_id) -> results, 60s
         self._entity_cache = TTLCache()         # "all_entities" -> list, 5min
@@ -61,7 +66,7 @@ class MemoryRetriever:
         self,
         query: str,
         user_id: str = "default",
-        max_tokens: int = 3000,
+        max_tokens: int = 3600,
         session_id: str | None = None,
         scopes: list[str] | None = None,
         team_id: str | None = None,
@@ -93,11 +98,15 @@ class MemoryRetriever:
             chars_used += len(entity_section)
 
         # ── 3. Semantic search results ───────────────────────────────
-        # Bumped 1200→1800 tokens. With fetch_k=25 below, more candidates
-        # survive the trim and reach the LLM — the auto-context per turn
-        # carries strictly more relevant memories without inflating any
-        # benchmark (benchmarks call store.recall directly, bypassing this).
-        semantic_budget = min(1800 * _CHARS_PER_TOKEN, (max_chars - chars_used) // 2)
+        # Bumped 1200 → 1800 → 2400 tokens. The 2400 cap (Wave 12 G+rerank)
+        # pairs with `top_k=100` from store.recall + cross-encoder reranker:
+        # the reranker-graded pool was getting trimmed at ~24 displayed rows
+        # under the 1800 budget; 2400 surfaces ~32 reranker-graded rows.
+        # Past ~32, displayed memories carry lower reranker scores
+        # (diminishing returns); past that point the cost-of-tokens
+        # outweighs the marginal recall gain. Benchmarks call store.recall
+        # directly and are unaffected.
+        semantic_budget = min(2400 * _CHARS_PER_TOKEN, (max_chars - chars_used) // 2)
         semantic_section = await self._build_semantic_section(
             query,
             user_id,
@@ -235,18 +244,25 @@ class MemoryRetriever:
         results = self._semantic_cache.get(cache_key)
         if results is None:
             try:
-                # fetch_k=25 (was 15). The token budget below trims the final
-                # output, so a larger fetch gives the budget more candidates
-                # to pick from — improves diversity across files when many
-                # chunks come from the same source. Cost: a few extra cosine
-                # comparisons in Rust (~negligible).
+                # fetch_k=100 (was 25, then 50). Code memories chunk dense at
+                # MAX_CHUNK_CHARS=4000 — one file can yield many similar
+                # chunks. With the cross-encoder reranker active
+                # (PREDACORE_MEMORY_RERANKER=1), a wider candidate window
+                # gives the reranker more diversity to surface the best
+                # chunk per file rather than N chunks from the same file.
+                # The 1800-token semantic-section budget trims to ~24
+                # displayed regardless, so the bump just feeds the budget
+                # filter a higher-quality reranker-graded pool.
+                # Cost with reranker: ~+50ms/query (reranker scores 50 more
+                # pairs). Without reranker: negligible (extra Rust cosines).
                 results = await self._store.recall(
                     query=query,
                     user_id=user_id,
-                    top_k=25,
+                    top_k=100,
                     min_importance=1,
                     scopes=scopes,
                     team_id=team_id,
+                    hyde_llm=self._llm,  # G2 — None disables HyDE silently
                 )
                 self._semantic_cache.set(cache_key, results, ttl_seconds=60)
             except (RuntimeError, OSError, ValueError, ConnectionError):

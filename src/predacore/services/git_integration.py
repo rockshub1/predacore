@@ -107,14 +107,23 @@ class DiffSummary:
 # ---------------------------------------------------------------------------
 
 
-def _validate_cwd(cwd: str | None) -> str | None:
-    """Resolve *cwd* to a real path and reject traversal outside the repo."""
+def _resolve_cwd(cwd: str | None) -> str | None:
+    """Resolve ``cwd`` to a real directory path. Raises ``ValueError`` if
+    the path doesn't exist or isn't a directory. Renamed from
+    ``_validate_cwd`` (L17 fix): the function does NOT constrain the
+    path to a project root — the previous name implied validation it
+    didn't perform. The caller is responsible for any sandboxing.
+    """
     if cwd is None:
         return None
     resolved = Path(cwd).resolve()
     if not resolved.is_dir():
         raise ValueError(f"cwd is not a directory: {cwd}")
     return str(resolved)
+
+
+# Back-compat alias — keep until external callers migrate.
+_validate_cwd = _resolve_cwd
 
 
 async def _run_git(

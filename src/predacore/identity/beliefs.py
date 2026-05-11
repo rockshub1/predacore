@@ -48,6 +48,22 @@ _PROMOTE_TO_WORKING_THEORY = 2
 _PROMOTE_TO_TESTED = 5
 _PROMOTE_TO_COMMITTED = 8
 
+# Bloat caps (Wave 12, 2026-05-11 — see "BELIEFS.md prompt bloat" note in
+# the audit follow-ups). BELIEFS.md ships into the system prompt every
+# turn, so unbounded growth burns tokens linearly. Strategy:
+#   - JSON keeps the full audit history (state machine + evidence)
+#   - MD renders only the load-bearing subset:
+#       * skip Demoted entirely (overturned beliefs are EVOLUTION.md material)
+#       * cap Observations at top-N most recent (one-off noticings flood)
+#   - Auto-decay: observations >30d old with no follow-up evidence get
+#     demoted with reason "stale_no_evidence"
+#   - Auto-prune: demoted beliefs >90d old leave the JSON entirely
+#     (EVOLUTION.md still has the transition record)
+_MD_RENDER_DROP_DEMOTED = True
+_MD_RENDER_OBSERVATION_CAP = 20
+_STALE_OBSERVATION_DAYS = 30
+_DEMOTED_PRUNE_DAYS = 90
+
 
 class BeliefState(str, Enum):
     OBSERVATION = "observation"
@@ -124,6 +140,10 @@ class BeliefStore:
         self.md_path = self.workspace / "BELIEFS.md"
         self._beliefs: dict[str, Belief] = {}
         self._load()
+        # Decay/prune once at load. Idempotent and cheap (proportional to
+        # belief count, typically small). Saves at most once if anything
+        # changed; no-op for fresh stores.
+        self.compact()
 
     # ── Load / save ───────────────────────────────────────────────────
 
@@ -386,6 +406,84 @@ class BeliefStore:
         counts["total"] = len(self._beliefs)
         return counts
 
+    # ── Maintenance (decay + prune) ───────────────────────────────────
+
+    def compact(self) -> dict[str, int]:
+        """Idempotent periodic maintenance.
+
+        Decays stale single-evidence observations and prunes long-demoted
+        beliefs. Saves once if anything changed. Returns counters so the
+        caller (healer, daily cron) can log telemetry.
+        """
+        decayed = self._decay_stale_observations()
+        pruned = self._prune_old_demoted()
+        if decayed or pruned:
+            self._save()
+        return {"decayed": decayed, "pruned": pruned}
+
+    @staticmethod
+    def _parse_iso(ts: str) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _decay_stale_observations(self) -> int:
+        """Demote observations older than _STALE_OBSERVATION_DAYS with
+        evidence_count < 2. Mutates state directly; caller saves."""
+        now = datetime.now(timezone.utc)
+        cutoff_secs = _STALE_OBSERVATION_DAYS * 86400
+        decayed = 0
+        for belief in self._beliefs.values():
+            if belief.state != BeliefState.OBSERVATION.value:
+                continue
+            if belief.evidence_count >= 2:
+                continue
+            updated = self._parse_iso(belief.last_updated)
+            if updated is None:
+                continue
+            age_secs = (now - updated).total_seconds()
+            if age_secs < cutoff_secs:
+                continue
+            belief.state = BeliefState.DEMOTED.value
+            belief.last_updated = _now_iso()
+            belief.notes.append(
+                f"{_now_iso()}: auto-demoted from observation — "
+                f"stale_no_evidence (age={int(age_secs // 86400)}d, "
+                f"evidence={belief.evidence_count})"
+            )
+            decayed += 1
+            logger.info(
+                "Belief %s auto-demoted (stale_no_evidence, age=%dd)",
+                belief.id, int(age_secs // 86400),
+            )
+        return decayed
+
+    def _prune_old_demoted(self) -> int:
+        """Remove demoted beliefs older than _DEMOTED_PRUNE_DAYS from JSON.
+
+        The transition is still in EVOLUTION.md's append-only log, so the
+        audit trail survives the prune.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff_secs = _DEMOTED_PRUNE_DAYS * 86400
+        to_remove: list[str] = []
+        for bid, belief in self._beliefs.items():
+            if belief.state != BeliefState.DEMOTED.value:
+                continue
+            updated = self._parse_iso(belief.last_updated)
+            if updated is None:
+                continue
+            if (now - updated).total_seconds() >= cutoff_secs:
+                to_remove.append(bid)
+        for bid in to_remove:
+            logger.info("Belief %s pruned (demoted >%dd)", bid, _DEMOTED_PRUNE_DAYS)
+            del self._beliefs[bid]
+        return len(to_remove)
+
     # ── Rendering ─────────────────────────────────────────────────────
 
     def render_markdown(self) -> str:
@@ -407,6 +505,11 @@ class BeliefStore:
             (BeliefState.OBSERVATION, "Observations", "One-off noticings, not yet patterns."),
             (BeliefState.DEMOTED, "Demoted", "Beliefs I used to hold but had to update."),
         ]
+        # BELIEFS.md ships into the system prompt every turn. Drop Demoted
+        # from the rendered view (JSON still keeps them for audit; EVOLUTION.md
+        # captures the transition).
+        if _MD_RENDER_DROP_DEMOTED:
+            state_order = [row for row in state_order if row[0] != BeliefState.DEMOTED]
 
         for state, title, tagline in state_order:
             beliefs = self.get_by_state(state)
@@ -417,6 +520,12 @@ class BeliefStore:
                 key=lambda b: (-b.evidence_count, b.last_updated),
                 reverse=False,
             )
+            # Cap Observations to the most-recent N. Observations are
+            # mostly evidence_count=1 so the existing sort doesn't help
+            # bound them — flooding here is the main bloat vector.
+            if state == BeliefState.OBSERVATION and len(beliefs) > _MD_RENDER_OBSERVATION_CAP:
+                beliefs.sort(key=lambda b: b.last_updated, reverse=True)
+                beliefs = beliefs[:_MD_RENDER_OBSERVATION_CAP]
             sections.append(f"## {title}")
             sections.append(f"_{tagline}_")
             sections.append("")

@@ -123,6 +123,54 @@ def build_full_text_prompt(
     return "\n".join(parts)
 
 
+def _convert_python_quotes_to_json(s: str) -> str:
+    """Convert Python-style single-quoted strings to JSON double-quoted.
+
+    L38 (Wave 12): walks character by character tracking string state, so
+    apostrophes inside string literals (`"don't"`) are preserved verbatim.
+    Backslash escapes are honored. Only outermost-quote characters get
+    flipped.
+    """
+    out: list[str] = []
+    in_string = False
+    string_quote = ""
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                # Preserve escape sequences verbatim — but if the escape
+                # targets the OUTER quote (e.g. `\'` inside a single-quoted
+                # string), drop the backslash since the output is double-quoted.
+                nxt = s[i + 1]
+                if nxt == string_quote == "'":
+                    out.append("'")
+                else:
+                    out.append(ch)
+                    out.append(nxt)
+                i += 2
+                continue
+            if ch == string_quote:
+                in_string = False
+                out.append('"')  # always emit double-quoted output
+            elif ch == '"' and string_quote == "'":
+                # An unescaped `"` inside a single-quoted string must be
+                # escaped in the JSON output.
+                out.append('\\"')
+            else:
+                out.append(ch)
+        else:
+            if ch in ('"', "'"):
+                in_string = True
+                string_quote = ch
+                out.append('"')
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
     """Parse <tool_call> JSON blocks from LLM text output.
 
@@ -139,13 +187,15 @@ def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
             try:
                 call = json.loads(json_str)
             except json.JSONDecodeError:
-                # Last resort: fix single-quoted JSON keys/string delimiters
-                # Only replace quotes that appear to be JSON delimiters, not those in values
+                # L38 (Wave 12): state-machine quote conversion that respects
+                # string boundaries — the old `re.sub` matched `'` adjacent
+                # to `[{,:` or `}\],:`, which would corrupt legitimate values
+                # like `"I don't, like it"` (the apostrophe is followed by
+                # `,` so the regex flipped it). The walker below only
+                # converts `'` characters that are OUTSIDE any string
+                # literal, leaving in-string apostrophes alone.
                 try:
-                    import re as _re
-                    # Replace single quotes that are JSON structural delimiters
-                    fixed = _re.sub(r"(?<=[\[{,:])\s*'|'\s*(?=[}\],:])", '"', json_str)
-                    call = json.loads(fixed)
+                    call = json.loads(_convert_python_quotes_to_json(json_str))
                 except json.JSONDecodeError:
                     logger.warning("Skipping unparseable tool_call block: %s", json_str[:200])
                     continue

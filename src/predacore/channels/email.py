@@ -328,10 +328,22 @@ class EmailAdapter(ChannelAdapter):
         return text
 
 
+_MAX_HTML_BODY_BYTES = 1_000_000  # L31 — 1MB cap on inbound HTML body
+
+
 def _strip_html(html: str) -> str:
-    """Dumb-but-good-enough HTML → text fallback. Drops tags, decodes entities."""
+    """Dumb-but-good-enough HTML → text fallback. Drops tags, decodes entities.
+
+    L31 — caps body at 1MB before regex. The `<script>.*?</script>`
+    pattern is lazy + DOTALL, so on adversarial input with deeply nested
+    or unclosed tags it can backtrack badly. We truncate first, then
+    parse; full body is preserved on disk via the IMAP fetcher's raw log.
+    """
     import html as htmllib
     import re
+
+    if len(html) > _MAX_HTML_BODY_BYTES:
+        html = html[:_MAX_HTML_BODY_BYTES]
 
     no_scripts = re.sub(r"<(script|style).*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
     no_tags = re.sub(r"<[^>]+>", " ", no_scripts)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predacore"
-version = "1.5.7"
+version = "1.6.0"
 description = "PredaCore — the apex autonomous agent. Hybrid Rust memory kernel, topped LongMemEval R@5 = 0.9574."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -74,6 +74,15 @@ dependencies = [
     "docker>=7.0",                   # Python client for Docker sandbox
     # ── Metrics (core: the vendored logging system imports this unconditionally) ──
     "prometheus-client>=0.20",       # Counters/Histograms/trace_id for observability
+    # ── Cross-encoder reranker (Wave 12, v1.6.0+): default-on for recall quality ──
+    # Qwen3-Reranker-0.6B via sentence-transformers; pushes conversation
+    # recall@10 from ~93% (BGE alone) to ~98%. Model weights (~1.2GB) lazy-
+    # downloaded on first use to ~/.cache/huggingface/. Disable globally
+    # with PREDACORE_MEMORY_RERANKER=0 if you don't want the dep loaded.
+    # Adds ~1.5GB to the base install (torch wheel ~700MB).
+    "sentence-transformers>=3.0",
+    "torch>=2.0",
+    "transformers>=4.51",
     # ── All LLM providers use PredaCore's in-house httpx SDK — no vendor SDKs needed ──
 ]
 
@@ -129,14 +138,24 @@ email = [
     "aiosmtplib>=3.0",
 ]
 
+# ── Cross-encoder reranker — back-compat alias ──
+# Wave 12 (v1.6.0): sentence-transformers + torch + transformers moved
+# into core `dependencies` so reranker works out of the box on a fresh
+# `pip install predacore`. This empty extra kept so existing install
+# commands like `pip install 'predacore[reranker]'` keep working
+# without error after the move.
+reranker = []
+
 # ── "I want it all" — every extra that pip can install, cross-platform ──
 # Only leaves out `server` (deployment concern) and `dev` (not user-facing).
+# `reranker` deps are in core now; the empty alias is included for symmetry.
 full = [
     "predacore[ml]",
     "predacore[desktop]",
     "predacore[android]",
     "predacore[slack]",
     "predacore[email]",
+    "predacore[reranker]",
 ]
 
 # ── Legacy aliases (kept so existing install commands keep working) ──

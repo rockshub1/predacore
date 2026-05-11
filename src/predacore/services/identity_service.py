@@ -218,8 +218,21 @@ class IdentityService:
         """Generate a short code that another channel can use to link to this user.
 
         The code expires after ``_LINK_CODE_TTL`` seconds (default 15 min).
+
+        L15 (Wave 12) — verifies the user exists before inserting; the
+        old code silently created orphan rows for unknown canonical_ids
+        which then accumulated in `channel_links` with no foreign user.
         """
         conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE canonical_id = ?",
+            (canonical_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"generate_link_code: no user with canonical_id={canonical_id!r}; "
+                "register the user (via channel handshake) before issuing a link code"
+            )
         code = uuid.uuid4().hex[:8]
         now = time.time()
         metadata = json.dumps({"expires_at": now + _LINK_CODE_TTL})

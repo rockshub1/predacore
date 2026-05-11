@@ -523,7 +523,7 @@ def _write_env_secret(home: Path, var: str, value: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         os.replace(tmp, str(env_path))
-    except BaseException:
+    except Exception:  # noqa: BLE001 — tempfile cleanup on any failure
         try:
             os.unlink(tmp)
         except OSError:
@@ -561,7 +561,7 @@ def _update_config_enabled_channels(home: Path, enabled: list[str]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
         os.replace(tmp, str(cfg_path))
-    except BaseException:
+    except Exception:  # noqa: BLE001 — tempfile cleanup on any failure
         try:
             os.unlink(tmp)
         except OSError:

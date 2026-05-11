@@ -9,19 +9,39 @@ Setup
 -----
 1. Register an Official Account at https://oa.zalo.me (requires
    Vietnamese phone or business documents).
-2. Get the OA Access Token (1-year expiry; refresh via OAuth flow).
+2. Get the OA Access Token (1-year expiry; refresh via OAuth flow) and
+   the Secret Key (Settings → App information → Secret Key).
 3. Set env (or ``~/.predacore/.env``)::
 
        ZALO_OA_ACCESS_TOKEN=...
+       ZALO_OA_APP_ID=...           # numeric app id from Zalo dashboard
+       ZALO_OA_SECRET_KEY=...       # used to verify X-ZEvent-Signature
 
 4. In Zalo OA dashboard, set the webhook to
    ``https://your-host:PORT/zalo/webhook``.
 
 5. Add ``zalo`` to ``channels.enabled``.
+
+Inbound webhook signature verification
+--------------------------------------
+Zalo signs every inbound webhook with the ``X-ZEvent-Signature`` header
+in the form ``mac=<hex>``. The hash is computed as:
+
+    sha256(app_id + raw_body + timestamp + secret_key)
+
+where ``timestamp`` comes from the body's top-level ``timestamp`` field.
+This is documented by Zalo (raw SHA-256 of a concatenated string, not
+HMAC).
+
+If ``ZALO_OA_SECRET_KEY`` or ``ZALO_OA_APP_ID`` is unset, the adapter
+refuses to start unless ``PREDACORE_ZALO_INSECURE=1`` is set explicitly.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 
@@ -49,6 +69,8 @@ class ZaloAdapter(ChannelAdapter):
         self.config = config
         cfg = getattr(config.channels, "__dict__", {}).get("zalo", {}) or {}
         self._access_token = cfg.get("access_token") or os.environ.get("ZALO_OA_ACCESS_TOKEN", "")
+        self._app_id = cfg.get("app_id") or os.environ.get("ZALO_OA_APP_ID", "")
+        self._secret_key = cfg.get("secret_key") or os.environ.get("ZALO_OA_SECRET_KEY", "")
         self._port = int(os.environ.get("PREDACORE_ZALO_PORT", "") or cfg.get("webhook_port", 8773))
         self._http: httpx.AsyncClient | None = None
         self._app: web.Application | None = None
@@ -59,6 +81,16 @@ class ZaloAdapter(ChannelAdapter):
         if not self._access_token:
             logger.error("Zalo: missing ZALO_OA_ACCESS_TOKEN")
             return
+        insecure = os.environ.get("PREDACORE_ZALO_INSECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not (self._app_id and self._secret_key) and not insecure:
+            logger.critical(
+                "Zalo: refusing to start — ZALO_OA_APP_ID or ZALO_OA_SECRET_KEY is "
+                "unset. Inbound webhooks would be unauthenticated and any caller "
+                "able to POST could spoof events and trigger LLM tool calls. Get "
+                "the secret key from Zalo OA dashboard (Settings → App information "
+                "→ Secret Key) or set PREDACORE_ZALO_INSECURE=1 to opt out."
+            )
+            return
         self._http = httpx.AsyncClient(timeout=30)
         self._app = web.Application()
         self._app.router.add_post("/zalo/webhook", self._handle_webhook)
@@ -66,15 +98,17 @@ class ZaloAdapter(ChannelAdapter):
         await self._runner.setup()
         bind_host = os.environ.get("PREDACORE_ZALO_BIND_HOST", "127.0.0.1")
         await web.TCPSite(self._runner, bind_host, self._port).start()
-        # Zalo signs inbound webhooks with `X-ZEvent-Signature` header (HMAC).
-        # We currently DON'T verify it — any caller able to POST can spoof
-        # events and trigger LLM tool calls. Default bind is loopback.
-        logger.critical(
-            "Zalo: webhook signature verification NOT implemented — accepting "
-            "all inbound POSTs. Listener bound to %s; do not tunnel publicly "
-            "without a verifying proxy.", bind_host,
-        )
-        logger.info("Zalo adapter started — port %d", self._port)
+        if self._app_id and self._secret_key:
+            logger.info(
+                "Zalo adapter started — port %d (X-ZEvent-Signature SHA-256 verification active)",
+                self._port,
+            )
+        else:
+            logger.warning(
+                "Zalo adapter started — port %d (PREDACORE_ZALO_INSECURE=1; "
+                "signature verification disabled, accepting all inbound POSTs)",
+                self._port,
+            )
 
     async def stop(self) -> None:
         if self._runner is not None:
@@ -106,11 +140,47 @@ class ZaloAdapter(ChannelAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.error("Zalo send failed: %s", exc)
 
+    def _verify_signature(
+        self, body_bytes: bytes, sig_header: str, timestamp: str
+    ) -> bool:
+        """Verify Zalo ``X-ZEvent-Signature: mac=<hex>``.
+
+        Hash is ``sha256(app_id + raw_body + timestamp + secret_key)`` per
+        Zalo's documented signing scheme. Timing-safe compare via
+        ``hmac.compare_digest`` even though it's a raw hash (the timing-
+        safe compare does not require an HMAC input).
+        """
+        if not (self._app_id and self._secret_key):
+            return False
+        if not sig_header or not sig_header.startswith("mac="):
+            return False
+        if not timestamp:
+            return False
+        received = sig_header[4:].strip()
+        if not received:
+            return False
+        # Concatenate as raw bytes; body bytes preserved verbatim.
+        signing_input = (
+            self._app_id.encode("utf-8")
+            + body_bytes
+            + str(timestamp).encode("utf-8")
+            + self._secret_key.encode("utf-8")
+        )
+        expected = hashlib.sha256(signing_input).hexdigest()
+        return hmac.compare_digest(expected.lower(), received.lower())
+
     async def _handle_webhook(self, request: web.Request) -> web.Response:
+        body_bytes = await request.read()
         try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
+            body = json.loads(body_bytes.decode("utf-8", errors="replace"))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return web.Response(status=400)
+        if self._app_id and self._secret_key:
+            sig_header = request.headers.get("X-ZEvent-Signature", "")
+            timestamp = str(body.get("timestamp") or "")
+            if not self._verify_signature(body_bytes, sig_header, timestamp):
+                logger.warning("Zalo webhook signature verification failed")
+                return web.Response(status=401, text="invalid signature")
         # Zalo events: ``event_name`` in {user_send_text, user_send_image, ...}
         event = body.get("event_name", "")
         if event != "user_send_text":

@@ -236,6 +236,12 @@ class RedisBackend:
         self._fallback = InMemoryBackend()
         self._using_fallback = False
 
+    @property
+    def using_fallback(self) -> bool:
+        """Public read of backend state. Use this instead of `_using_fallback`
+        from other modules — the underscore name is private to RedisBackend."""
+        return self._using_fallback
+
     def _connect(self) -> bool:
         """Try to connect to Redis."""
         try:
@@ -409,7 +415,7 @@ class RateLimiter:
                 }
                 for r in self._rules
             ],
-            "backend": "redis" if not self._backend._using_fallback else "memory",
+            "backend": "redis" if not getattr(self._backend, "using_fallback", False) else "memory",
         }
 
 

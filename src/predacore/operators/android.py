@@ -818,8 +818,33 @@ class AndroidOperator(BaseOperator):
         apk_path = str(params.get("path", "")).strip()
         if not apk_path:
             raise ADBError("install_apk requires path")
-        out = self._adb("install", "-r", apk_path, timeout=120)
-        return {"path": apk_path, "output": out.strip()}
+        # L10 — validate before handing to adb:
+        #   1. File must exist
+        #   2. Must be readable (not a directory, not a symlink to outside)
+        #   3. Must be under home or /tmp (allowlist — same shape as read_file)
+        #   4. Must end with .apk (defense against handing adb random files)
+        import os as _os
+        import tempfile as _tempfile
+        resolved = Path(apk_path).expanduser().resolve()
+        if not resolved.exists():
+            raise ADBError(f"install_apk: APK not found at {apk_path}")
+        if not resolved.is_file():
+            raise ADBError(f"install_apk: not a file: {apk_path}")
+        if resolved.suffix.lower() != ".apk":
+            raise ADBError(
+                f"install_apk: refusing non-APK file (suffix={resolved.suffix!r}); "
+                "rename or convert before install"
+            )
+        _home = str(Path.home().resolve())
+        _tmpdir = str(Path(_tempfile.gettempdir()).resolve())
+        _allowed = (_home, "/tmp", "/private/tmp", _tmpdir)
+        if not any(str(resolved).startswith(p) for p in _allowed):
+            raise ADBError(
+                "install_apk: APK must be under home directory or /tmp "
+                f"(got {resolved}); move it before install"
+            )
+        out = self._adb("install", "-r", str(resolved), timeout=120)
+        return {"path": str(resolved), "output": out.strip()}
 
     _DANGEROUS_TOKENS = frozenset({
         "reboot", "factory_reset", "wipe", "flash", "format",
@@ -1827,7 +1852,15 @@ class AndroidOperator(BaseOperator):
             raise OperatorError("UI dump too large", action="ui_dump")
 
         try:
-            root = ET.fromstring(xml_content)
+            # L13 — explicit defusing via defusedxml. Stdlib already
+            # disables external entities by default for fromstring, but
+            # routing through defusedxml is the explicit-is-safer path
+            # and guards against future stdlib changes.
+            try:
+                from defusedxml import ElementTree as _DET
+                root = _DET.fromstring(xml_content)
+            except ImportError:
+                root = ET.fromstring(xml_content)  # noqa: S314 — stdlib default is safe
         except ET.ParseError as exc:
             self._last_parse_error = f"UI XML parse error: {exc}"
             self._log.warning("Failed to parse UI XML dump: %s", exc)

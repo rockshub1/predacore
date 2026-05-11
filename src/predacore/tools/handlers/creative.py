@@ -167,8 +167,19 @@ async def handle_image_gen(args: dict[str, Any], ctx: ToolContext) -> str:
             tool_name="image_gen",
         ) from e
     except Exception as e:
-        # Catch httpx and other network errors
-        if "httpx" in type(e).__module__ or "HTTP" in type(e).__name__:
+        # L2 (Wave 12): network-error detection via isinstance — the old
+        # `"httpx" in type(e).__module__` string match would silently
+        # break if we switched to httpcore or any other client. Cover
+        # the standard suspects explicitly and fall back to OSError for
+        # truly unknown shapes.
+        import httpx as _httpx
+        _network_classes: tuple[type[BaseException], ...] = (
+            _httpx.HTTPError,
+            ConnectionError,
+            TimeoutError,
+            OSError,
+        )
+        if isinstance(e, _network_classes):
             raise ToolError(
                 f"Image generation network error: {e}",
                 kind=ToolErrorKind.EXECUTION,

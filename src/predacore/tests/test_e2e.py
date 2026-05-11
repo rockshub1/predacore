@@ -1164,8 +1164,15 @@ class TestPersonaDriftGuard:
     """E2E: persona drift detection and regeneration."""
 
     @pytest.mark.asyncio
-    async def test_drift_detected_for_chatgpt_claim(self, tmp_path):
-        """LLM claiming to be ChatGPT triggers drift detection."""
+    async def test_drift_detected_for_chatgpt_claim(self, tmp_path, monkeypatch):
+        """LLM claiming to be ChatGPT triggers drift detection.
+
+        Wave 12: persona drift guard lives in the legacy `_finalize_turn`
+        path. The orchestrator default-flip would route around it, so
+        this test explicitly disables the orchestrator. Orchestrator-side
+        drift handling has its own test in TestOrchestratorRouting.
+        """
+        monkeypatch.setenv("PREDACORE_USE_ORCHESTRATOR", "0")
         cfg = _make_config(tmp_path)
 
         with patch("predacore.core.LLMInterface") as MockLLM:
@@ -1467,8 +1474,19 @@ class TestConfigCoreIntegration:
     """E2E: config values propagate correctly through to core behavior."""
 
     @pytest.mark.asyncio
-    async def test_max_tool_iterations_respected(self, tmp_path):
-        """Core respects max_tool_iterations from config."""
+    async def test_max_tool_iterations_respected(self, tmp_path, monkeypatch):
+        """Core respects max_tool_iterations from config.
+
+        Wave 12: this test pins the LEGACY agent loop's iteration cap.
+        The orchestrator path (default-on after Wave 12) bounds work via
+        ``OrchestrationBudget`` instead (token / dollar / wall / subagent
+        counts), not via ``max_tool_iterations``. Both kinds of bounding
+        coexist — this test explicitly disables the orchestrator so it
+        verifies the legacy contract that has lived in core for years.
+        Orchestrator budget bounding has its own coverage in the
+        agents/budget tests.
+        """
+        monkeypatch.setenv("PREDACORE_USE_ORCHESTRATOR", "0")
         cfg = _make_config(tmp_path)
         cfg.launch.max_tool_iterations = 3
 

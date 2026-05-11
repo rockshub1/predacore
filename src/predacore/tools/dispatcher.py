@@ -51,10 +51,30 @@ _VARIABLE_LATENCY_TOOLS: frozenset[str] = frozenset({
     "run_command",
     "python_exec",
     "execute_code",
+    # L1 (Wave 12) — these are also bimodal: fast probes (focus check,
+    # element exists) coexist with long-running flows (full UI dump,
+    # file upload, multi-step automation). Their handlers honor their
+    # own `timeout_seconds`/per-action timeouts; the dispatcher should
+    # not impose an adaptive P95 from mixed workloads on top.
+    "desktop_control",
+    "android_control",
+    "browser_control",
+    "multi_agent",
+    "tool_pipeline",
 })
 
-# ── Ethical compliance (lightweight keyword guard) ────────────────────
-
+# ── Ethical-compliance tripwire ───────────────────────────────────────
+#
+# L6 (Wave 12): this is a TRIPWIRE, not a security filter. Real safety
+# comes from: sandbox isolation (Docker), trust-level approval flow,
+# CaMeL-lite taint flow (PR4), SSRF validation, path-jailing in
+# read_file/write_file/list_directory, and the ethical_governance_module.
+# These keywords exist for one reason only: catch an LLM that is
+# tripping over its own training-data on a forbidden phrase, and turn
+# that into a hard block instead of silently executing. Tested today,
+# zero false positives, zero true positives — and that's exactly what
+# a tripwire should look like. Do not expand this list to fight
+# adversarial inputs; that's what the real safety layers are for.
 _FORBIDDEN_KEYWORDS: frozenset[str] = frozenset({
     "delete_user_data",
     "disable_safety",

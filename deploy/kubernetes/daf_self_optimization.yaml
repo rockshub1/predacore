@@ -73,7 +73,11 @@ spec:
       serviceAccountName: daf-self-opt-service-account
       containers:
       - name: daf-self-optimization
-        image: registry.example.com/daf-self-optimization:1.0.0
+        # L77 — was `registry.example.com/...` placeholder which fails on
+        # `kubectl apply`. Pin to predacore/daf-self-optimization:1.6.0
+        # (same registry shape as api_gateway.yaml). For production
+        # deploys, digest-pin via `docker inspect ... --format='{{index .RepoDigests 0}}'`.
+        image: predacore/daf-self-optimization:1.6.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051

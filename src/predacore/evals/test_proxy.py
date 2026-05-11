@@ -25,4 +25,5 @@ async def test():
     except Exception as e:
         print("Error:", e)
 
-asyncio.run(test())
+if __name__ == "__main__":  # L65 fix: don't fire HTTP on import
+    asyncio.run(test())

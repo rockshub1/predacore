@@ -727,3 +727,220 @@ class TestDownloadPath:
             result = await bridge.set_download_path(path=tmpdir)
             assert result.get("ok")
             assert result.get("download_path") == tmpdir
+
+
+# ══════════════════════════════════════════════════════════════════════
+# M8 + M12 (Wave 12, 2026-05-11): central receive task — no real Chrome
+# ══════════════════════════════════════════════════════════════════════
+#
+# These tests exercise the dispatcher in isolation: a fake aiohttp
+# WebSocketResponse emits scripted messages, the rewritten _ChromeCDP
+# routes them to the right Futures, and we verify concurrent send() /
+# wait_for_event() don't steal each other's messages (M8) and that
+# dialog-event reentrancy is impossible (M12).
+
+
+import asyncio as _asyncio_dispatch
+import json as _json_dispatch
+
+import aiohttp as _aiohttp_dispatch
+import pytest as _pytest_dispatch
+
+
+class _FakeWSMsg:
+    """Minimal aiohttp.WSMessage stand-in."""
+    __slots__ = ("type", "data")
+
+    def __init__(self, type_, data=""):
+        self.type = type_
+        self.data = data
+
+
+class _FakeWS:
+    """Scripted aiohttp.ClientWebSocketResponse stand-in.
+
+    Tests push raw text frames via ``inject_text``. The dispatcher
+    consumes them via ``receive()`` in FIFO order. ``send_json`` records
+    outgoing requests so a test can react (e.g. respond to an id).
+    """
+    def __init__(self):
+        self.closed = False
+        self._inbox: _asyncio_dispatch.Queue = _asyncio_dispatch.Queue()
+        self.outbox: list[dict] = []
+
+    async def receive(self):
+        return await self._inbox.get()
+
+    async def send_json(self, obj):
+        self.outbox.append(obj)
+
+    async def close(self):
+        self.closed = True
+        await self._inbox.put(_FakeWSMsg(_aiohttp_dispatch.WSMsgType.CLOSED))
+
+    def inject_text(self, payload):
+        self._inbox.put_nowait(
+            _FakeWSMsg(_aiohttp_dispatch.WSMsgType.TEXT, _json_dispatch.dumps(payload))
+        )
+
+
+class TestChromeCDPDispatcher:
+    """Central-receive-task dispatcher tests (M8 + M12 Wave 12)."""
+
+    def _make_cdp(self):
+        from predacore.operators.browser_bridge import _ChromeCDP
+        cdp = _ChromeCDP()
+        cdp._ws = _FakeWS()  # type: ignore[assignment]
+        cdp._recv_done = _asyncio_dispatch.Event()
+        cdp._recv_task = _asyncio_dispatch.create_task(cdp._recv_loop())
+        return cdp
+
+    @_pytest_dispatch.mark.asyncio
+    async def test_send_routes_response_by_id(self):
+        cdp = self._make_cdp()
+        try:
+            ws: _FakeWS = cdp._ws  # type: ignore[assignment]
+            # Schedule a response after a short delay so send() can register
+            # its pending future first.
+            async def emit():
+                await _asyncio_dispatch.sleep(0.01)
+                req = ws.outbox[0]
+                ws.inject_text({"id": req["id"], "result": {"hello": "world"}})
+            _asyncio_dispatch.create_task(emit())
+            res = await cdp.send("Test.method", timeout=2.0)
+            assert res == {"hello": "world"}
+        finally:
+            await cdp.close()
+
+    @_pytest_dispatch.mark.asyncio
+    async def test_concurrent_sends_get_their_own_responses(self):
+        """M8 regression: two concurrent send() calls must NOT steal each
+        other's responses. Before the central dispatcher each send had
+        its own receive loop and they raced for messages."""
+        cdp = self._make_cdp()
+        try:
+            ws: _FakeWS = cdp._ws  # type: ignore[assignment]
+
+            async def respond_in_reverse():
+                # Wait for both requests to be on the wire, then respond
+                # to id=2 FIRST, then id=1. The dispatcher must route
+                # each to the correct caller.
+                while len(ws.outbox) < 2:
+                    await _asyncio_dispatch.sleep(0.001)
+                req_a, req_b = ws.outbox[0], ws.outbox[1]
+                ws.inject_text({"id": req_b["id"], "result": {"who": "B"}})
+                ws.inject_text({"id": req_a["id"], "result": {"who": "A"}})
+
+            _asyncio_dispatch.create_task(respond_in_reverse())
+            res_a, res_b = await _asyncio_dispatch.gather(
+                cdp.send("Test.a", timeout=2.0),
+                cdp.send("Test.b", timeout=2.0),
+            )
+            assert res_a == {"who": "A"}, f"send A got the wrong response: {res_a}"
+            assert res_b == {"who": "B"}, f"send B got the wrong response: {res_b}"
+        finally:
+            await cdp.close()
+
+    @_pytest_dispatch.mark.asyncio
+    async def test_wait_for_event_and_send_can_run_concurrently(self):
+        """M8 regression: wait_for_event running concurrently with send
+        must not steal the send's response (and vice versa)."""
+        cdp = self._make_cdp()
+        try:
+            ws: _FakeWS = cdp._ws  # type: ignore[assignment]
+
+            async def driver():
+                while not ws.outbox:
+                    await _asyncio_dispatch.sleep(0.001)
+                req = ws.outbox[0]
+                # Emit the event first — wait_for_event should pick it up
+                ws.inject_text({"method": "Page.loadEventFired", "params": {"timestamp": 12345}})
+                # Then the response to send()
+                ws.inject_text({"id": req["id"], "result": {"ok": True}})
+
+            _asyncio_dispatch.create_task(driver())
+            ev_task = _asyncio_dispatch.create_task(
+                cdp.wait_for_event("Page.loadEventFired", timeout=2.0)
+            )
+            send_res = await cdp.send("Test.x", timeout=2.0)
+            ev = await ev_task
+            assert send_res == {"ok": True}
+            assert ev == {"timestamp": 12345}
+        finally:
+            await cdp.close()
+
+    @_pytest_dispatch.mark.asyncio
+    async def test_dialog_event_handler_can_call_send_no_reentrancy(self):
+        """M12 regression: the dialog event handler runs as its own task
+        and calls back into send(). The dispatcher must route the dialog
+        handler's send() request to its own Future without re-entering
+        the receive loop."""
+        cdp = self._make_cdp()
+        try:
+            ws: _FakeWS = cdp._ws  # type: ignore[assignment]
+
+            handler_completed = _asyncio_dispatch.Event()
+            sent_methods: list[str] = []
+
+            class FakeBridge:
+                def __init__(self, cdp_ref):
+                    self._cdp = cdp_ref
+                async def _handle_dialog_event(self, params):
+                    # Handler calls back into send() — this would have
+                    # deadlocked under the old receive-per-send model.
+                    res = await self._cdp.send(
+                        "Page.handleJavaScriptDialog",
+                        {"accept": True},
+                        timeout=2.0,
+                    )
+                    sent_methods.append("Page.handleJavaScriptDialog")
+                    handler_completed.set()
+                    assert "error" not in res, f"handler send() failed: {res}"
+
+            cdp._bridge_ref = FakeBridge(cdp)
+
+            async def driver():
+                # Fire the dialog event first; the receive task will
+                # spawn _handle_dialog_event as its own task. The
+                # handler will issue send() — that registers a Future
+                # and the dispatcher routes the response to it.
+                ws.inject_text({
+                    "method": "Page.javascriptDialogOpening",
+                    "params": {"message": "hi", "type": "alert"},
+                })
+                # Wait for the handler's send() to hit the wire
+                while not ws.outbox:
+                    await _asyncio_dispatch.sleep(0.001)
+                req = ws.outbox[0]
+                ws.inject_text({"id": req["id"], "result": {}})
+
+            _asyncio_dispatch.create_task(driver())
+            await _asyncio_dispatch.wait_for(handler_completed.wait(), timeout=3.0)
+            assert sent_methods == ["Page.handleJavaScriptDialog"]
+        finally:
+            await cdp.close()
+
+    @_pytest_dispatch.mark.asyncio
+    async def test_pending_futures_fail_on_ws_close(self):
+        """When the websocket closes, any in-flight send() must fail
+        rather than hang forever."""
+        cdp = self._make_cdp()
+        ws: _FakeWS = cdp._ws  # type: ignore[assignment]
+
+        async def kill_ws_after_send():
+            while not ws.outbox:
+                await _asyncio_dispatch.sleep(0.001)
+            # Don't respond — just close the ws.
+            ws.closed = True
+            ws._inbox.put_nowait(_FakeWSMsg(_aiohttp_dispatch.WSMsgType.CLOSED))
+
+        _asyncio_dispatch.create_task(kill_ws_after_send())
+        res = await cdp.send("Test.never_responds", timeout=2.0)
+        assert "error" in res, "send() should error when ws closes mid-flight"
+        # Cleanup recv task
+        if cdp._recv_task and not cdp._recv_task.done():
+            cdp._recv_task.cancel()
+            try:
+                await cdp._recv_task
+            except (_asyncio_dispatch.CancelledError, Exception):
+                pass

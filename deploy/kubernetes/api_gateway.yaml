@@ -47,11 +47,17 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api-gateway
-          # H30: image tag is ':latest' — non-reproducible builds. Pin to a
-          # specific semver / digest before any production deploy. Kept here
-          # for now because the build pipeline that produces this image is
-          # outside this repo; pinning needs coordination with that pipeline.
-          image: predacore/api-gateway:latest  # TODO(H30): pin to digest @sha256:...
+          # H30 (Wave 12, 2026-05-11): pinned to a specific minor-version
+          # tag instead of `:latest`. The build pipeline that publishes
+          # this image lives outside this repo; production deploys should
+          # additionally digest-pin via:
+          #   docker pull predacore/api-gateway:1.6.0
+          #   docker inspect predacore/api-gateway:1.6.0 \
+          #     --format='{{index .RepoDigests 0}}'
+          # then replace the image line with `predacore/api-gateway@sha256:...`.
+          # `imagePullPolicy: IfNotPresent` ensures pods don't silently
+          # re-pull on every restart even when the tag pointer moves.
+          image: predacore/api-gateway:1.6.0
           imagePullPolicy: IfNotPresent
           # H29: container-level hardening — drop all caps, read-only root fs.
           # /tmp is mounted writable below for processes that need scratch space.

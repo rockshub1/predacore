@@ -43,48 +43,53 @@ class CircuitBreaker:
         self._tripped_until: dict[str, float] = {}
 
     async def is_open(self, provider: str) -> bool:
-        """Check if provider's circuit is tripped (should be skipped)."""
-        async with self._lock:
-            now = time.time()
-            tripped = self._tripped_until.get(provider, 0)
+        """Check if provider's circuit is tripped (should be skipped).
 
-            if tripped > now:
-                return True
-            elif tripped > 0:
-                # Cooldown expired — reset
+        L37 (Wave 12) — pure read. Cooldown expiration was previously
+        side-effectful here (cleared `_tripped_until` and `_failures`),
+        which meant a probing caller could accidentally reset state.
+        Now: read-only check against `_tripped_until`. Failure-count
+        evaluation and trip-on-overflow happen inside `record_failure`
+        where the state mutation belongs. Expired cooldowns are cleaned
+        up lazily by `record_failure` and the next `record_success`.
+        """
+        async with self._lock:
+            tripped = self._tripped_until.get(provider, 0)
+            return tripped > time.time()
+
+    async def record_failure(self, provider: str, error: Exception | str) -> None:
+        """Record a provider failure. Trips the circuit on threshold overflow.
+
+        L37 (Wave 12) — this method now owns the trip decision. The check
+        used to live in `is_open`, which made a "read" method mutate
+        `_tripped_until`. Now writes go where writes belong: an actual
+        failure is the trigger for evaluating the threshold.
+        """
+        now = time.time()
+        async with self._lock:
+            # Clear expired cooldowns (lazy GC).
+            if 0 < self._tripped_until.get(provider, 0) <= now:
                 self._tripped_until.pop(provider, None)
                 self._failures.pop(provider, None)
                 logger.info("Circuit breaker reset for provider: %s", provider)
-                return False
 
-            # Check failure count in window
-            failures = self._failures.get(provider, [])
+            self._failures.setdefault(provider, []).append((now, str(error)))
+            # Prune to the window.
             cutoff = now - self.window_seconds
-            recent = [ts for ts, _ in failures if ts > cutoff]
             self._failures[provider] = [
-                (ts, err) for ts, err in failures if ts > cutoff
+                (ts, err) for ts, err in self._failures[provider] if ts > cutoff
             ]
-
-            if len(recent) >= self.failure_threshold:
+            recent_count = len(self._failures[provider])
+            if recent_count >= self.failure_threshold:
                 self._tripped_until[provider] = now + self.cooldown_seconds
                 logger.warning(
                     "Circuit breaker TRIPPED for '%s' (%d failures in %ds) — "
                     "cooling down for %ds",
                     provider,
-                    len(recent),
+                    recent_count,
                     int(self.window_seconds),
                     int(self.cooldown_seconds),
                 )
-                return True
-
-            return False
-
-    async def record_failure(self, provider: str, error: Exception | str) -> None:
-        """Record a provider failure."""
-        async with self._lock:
-            if provider not in self._failures:
-                self._failures[provider] = []
-            self._failures[provider].append((time.time(), str(error)))
         logger.warning("Provider '%s' failed: %s", provider, error)
 
     async def record_success(self, provider: str) -> None:

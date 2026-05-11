@@ -217,7 +217,15 @@ async def handle_tool_pipeline(args: dict[str, Any], ctx: ToolContext) -> str:
         if not name:
             raise missing_param("name", tool="tool_pipeline")
         workflow = _load_workflow(name)
-        steps = workflow.get("steps", [])
+        # L5 (Wave 12) — deep-copy steps before applying overrides. The old
+        # code mutated workflow["steps"][i]["args"] in place, which is a
+        # latent bug: today `_load_workflow` re-reads from disk every call
+        # so overrides don't survive, but adding any caching layer
+        # (lru_cache, in-process map) would make overrides bleed into
+        # subsequent runs. Copy-on-modify makes the run path safe by
+        # construction regardless of future caching.
+        import copy as _copy
+        steps = _copy.deepcopy(workflow.get("steps", []))
         mode = workflow.get("mode", "sequential")
 
         # Apply arg overrides if provided

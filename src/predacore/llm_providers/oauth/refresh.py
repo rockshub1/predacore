@@ -27,7 +27,7 @@ from typing import AsyncIterator
 import httpx
 
 from .. import predacore_sdk as psdk
-from .store import OAuthGrant, OAuthGrantStore, load_grant, save_grant
+from .store import DEFAULT_OAUTH_DIR, OAuthGrant, OAuthGrantStore, load_grant, save_grant
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,11 @@ REFRESH_SAFETY_WINDOW_SECONDS = 5 * 60     # match Codex CLI's behavior
 
 
 # Per-process locks keyed by provider so two concurrent calls in the same
-# event loop don't both hit the refresh endpoint. For multi-process safety
-# we'd add a file-lock; a single daemon process plus the fact that calls
-# always go through the LLMInterface mean asyncio.Lock is sufficient today.
+# event loop don't both hit the refresh endpoint. Paired with a sibling
+# `fcntl.flock` file lock (L41 fix, Wave 12) for multi-process safety: when
+# two daemons share the same OAuth grant directory, a provider that rotates
+# refresh tokens on use will invalidate one daemon's grant if both refresh
+# concurrently. The file lock serializes the refresh window across processes.
 _provider_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -48,6 +50,54 @@ def _lock_for(provider: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _provider_locks[provider] = lock
     return lock
+
+
+def _grant_lock_path(provider: str, store: OAuthGrantStore | None) -> Path:
+    """Path for the cross-process lockfile sibling to the grant file."""
+    base = store.base_dir if store is not None else DEFAULT_OAUTH_DIR
+    return base / f"{provider}.refresh.lock"
+
+
+@asynccontextmanager
+async def _cross_process_refresh_lock(
+    provider: str,
+    store: OAuthGrantStore | None,
+) -> AsyncIterator[None]:
+    """Serialize refresh across daemons on the same machine via fcntl.flock.
+
+    fcntl is POSIX-only. On Windows or when fcntl is unavailable the
+    asyncio.Lock alone protects within-process; cross-process safety
+    degrades silently (logged at debug). One refresh per daemon is still
+    rare enough that the provider rate-limiter usually absorbs it.
+    """
+    lock_path = _grant_lock_path(provider, store)
+    lock_fd: int | None = None
+    try:
+        try:
+            import fcntl
+            import os as _os
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            # Open + flock on a background thread — flock is blocking and
+            # we don't want to stall the event loop while another daemon
+            # holds the lock.
+            def _acquire() -> int:
+                fd = _os.open(str(lock_path), _os.O_WRONLY | _os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                return fd
+            lock_fd = await asyncio.to_thread(_acquire)
+        except (ImportError, OSError) as exc:
+            logger.debug("OAuth cross-process lock unavailable (%s)", exc)
+            lock_fd = None
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                import fcntl
+                import os as _os
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                _os.close(lock_fd)
+            except (ImportError, OSError) as exc:
+                logger.debug("OAuth lock release failed (%s)", exc)
 
 
 async def refresh_access_token(
@@ -148,9 +198,9 @@ async def with_auto_refresh(
         and (grant.expires_at - time.time()) < safety_window_seconds
     )
     if needs_refresh:
-        async with _lock_for(provider):
-            # Re-check after acquiring the lock — another waiter may have
-            # already refreshed while we queued.
+        async with _lock_for(provider), _cross_process_refresh_lock(provider, store):
+            # Re-check after acquiring BOTH locks — within-process and
+            # cross-process waiters may have already refreshed while we queued.
             grant = load_grant(provider) if store is None else store.load(provider)
             if grant is None:
                 raise psdk.AuthenticationError(

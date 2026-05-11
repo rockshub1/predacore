@@ -9,22 +9,43 @@ Setup
 -----
 1. Sign up at https://dashboard.vonage.com (free trial credit).
 2. Create an Application + buy a number.
-3. Set env (or ``~/.predacore/.env``)::
+3. Copy the **signature secret** from your Vonage account settings (it's
+   a separate token from the application private key).
+4. Set env (or ``~/.predacore/.env``)::
 
        VONAGE_APPLICATION_ID=xxxxxx
        VONAGE_PRIVATE_KEY_PATH=/path/to/private.key   # OR raw PEM in VONAGE_PRIVATE_KEY
        VONAGE_FROM_NUMBER=12055551234   # E.164 without +
+       VONAGE_SIGNATURE_SECRET=...      # HS256 secret for inbound JWT verification
 
-4. In Vonage dashboard, point the inbound URL at
+5. In Vonage dashboard, point the inbound URL at
    ``https://your-host:PORT/vonage/inbound``.
 
-5. Add ``vonage`` to ``channels.enabled``.
+6. Add ``vonage`` to ``channels.enabled``.
+
+Inbound webhook signature verification
+--------------------------------------
+Vonage Messages API signs every inbound webhook with HS256 JWT in the
+``Authorization: Bearer <jwt>`` header. We verify:
+
+  * HS256 signature against ``VONAGE_SIGNATURE_SECRET``
+  * ``nbf`` / ``exp`` claims (5 min clock-skew tolerance)
+  * ``payload_hash`` claim equals ``sha256(body)`` hex digest
+
+If ``VONAGE_SIGNATURE_SECRET`` is unset, the adapter refuses to start
+unless ``PREDACORE_VONAGE_INSECURE=1`` is set explicitly. This mirrors
+the Twilio default-deny posture.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+import time
 
 from aiohttp import web
 
@@ -33,6 +54,12 @@ from ..gateway import ChannelAdapter, IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
 VONAGE_MAX_LENGTH = 1500
+_JWT_CLOCK_SKEW_SECONDS = 300
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
 
 
 class VonageAdapter(ChannelAdapter):
@@ -51,6 +78,7 @@ class VonageAdapter(ChannelAdapter):
         self._private_key_path = cfg.get("private_key_path") or os.environ.get("VONAGE_PRIVATE_KEY_PATH", "")
         self._private_key_inline = os.environ.get("VONAGE_PRIVATE_KEY", "")
         self._from_number = cfg.get("from_number") or os.environ.get("VONAGE_FROM_NUMBER", "")
+        self._signature_secret = cfg.get("signature_secret") or os.environ.get("VONAGE_SIGNATURE_SECRET", "")
         self._port = int(os.environ.get("PREDACORE_VONAGE_PORT", "") or cfg.get("webhook_port", 8768))
         self._client = None
         self._app: web.Application | None = None
@@ -60,6 +88,17 @@ class VonageAdapter(ChannelAdapter):
     async def start(self) -> None:
         if not (self._app_id and self._from_number and (self._private_key_path or self._private_key_inline)):
             logger.error("Vonage: missing VONAGE_APPLICATION_ID / VONAGE_PRIVATE_KEY[_PATH] / VONAGE_FROM_NUMBER")
+            return
+        insecure = os.environ.get("PREDACORE_VONAGE_INSECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not self._signature_secret and not insecure:
+            logger.critical(
+                "Vonage: refusing to start — VONAGE_SIGNATURE_SECRET is unset. "
+                "Inbound webhooks would be unauthenticated and any caller able to "
+                "POST to the listener could spoof user messages and trigger LLM "
+                "tool calls. Copy the signature secret from your Vonage account "
+                "settings and set VONAGE_SIGNATURE_SECRET, or set "
+                "PREDACORE_VONAGE_INSECURE=1 to opt out of verification."
+            )
             return
         try:
             from vonage import Auth, Vonage  # type: ignore[import-not-found]
@@ -83,16 +122,17 @@ class VonageAdapter(ChannelAdapter):
         bind_host = os.environ.get("PREDACORE_VONAGE_BIND_HOST", "127.0.0.1")
         site = web.TCPSite(self._runner, bind_host, self._port)
         await site.start()
-        # Vonage signs inbound webhooks with HS256 JWT in `Authorization: Bearer ...`
-        # signed by the application's signing-secret. We currently DON'T verify it —
-        # any caller able to POST can spoof inbound messages and trigger LLM tool
-        # calls. Bind to 127.0.0.1 (default); do not expose publicly without verification.
-        logger.critical(
-            "Vonage: webhook signature verification NOT implemented — accepting "
-            "all inbound POSTs. Listener bound to %s; do not tunnel publicly without "
-            "a verifying proxy.", bind_host,
-        )
-        logger.info("Vonage adapter started — listening on %s:%d/vonage/inbound", bind_host, self._port)
+        if self._signature_secret:
+            logger.info(
+                "Vonage adapter started — listening on %s:%d/vonage/inbound (HS256 JWT verification active)",
+                bind_host, self._port,
+            )
+        else:
+            logger.warning(
+                "Vonage adapter started — listening on %s:%d/vonage/inbound (PREDACORE_VONAGE_INSECURE=1; "
+                "signature verification disabled, accepting all inbound POSTs)",
+                bind_host, self._port,
+            )
 
     async def stop(self) -> None:
         if self._runner is not None:
@@ -120,14 +160,70 @@ class VonageAdapter(ChannelAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.error("Vonage send failed: %s", exc)
 
+    def _verify_signature(self, body_bytes: bytes, auth_header: str) -> bool:
+        """Verify Vonage Messages API ``Authorization: Bearer <jwt>`` HS256 JWT.
+
+        Returns True iff:
+        - Header has ``Bearer`` prefix and a 3-part JWT
+        - HS256 signature matches signature_secret (timing-safe compare)
+        - ``nbf`` ≤ now ≤ ``exp`` (5 min clock-skew tolerance)
+        - ``payload_hash`` (hex) equals ``sha256(body_bytes)``
+        """
+        if not self._signature_secret:
+            return False
+        if not auth_header:
+            return False
+        token = auth_header.strip()
+        if not token.lower().startswith("bearer "):
+            return False
+        token = token[7:].strip()
+        parts = token.split(".")
+        if len(parts) != 3:
+            return False
+        header_b64, payload_b64, sig_b64 = parts
+        try:
+            header = json.loads(_b64url_decode(header_b64))
+            payload = json.loads(_b64url_decode(payload_b64))
+            received_sig = _b64url_decode(sig_b64)
+        except (ValueError, json.JSONDecodeError, base64.binascii.Error):
+            return False
+        if header.get("alg") != "HS256" or header.get("typ", "JWT") != "JWT":
+            return False
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        expected_sig = hmac.new(
+            self._signature_secret.encode("utf-8"), signing_input, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(expected_sig, received_sig):
+            return False
+        now = int(time.time())
+        nbf = payload.get("nbf")
+        exp = payload.get("exp")
+        if isinstance(nbf, (int, float)) and now + _JWT_CLOCK_SKEW_SECONDS < int(nbf):
+            return False
+        if isinstance(exp, (int, float)) and now - _JWT_CLOCK_SKEW_SECONDS > int(exp):
+            return False
+        body_hash = hashlib.sha256(body_bytes).hexdigest()
+        claim_hash = payload.get("payload_hash")
+        if not isinstance(claim_hash, str):
+            return False
+        if not hmac.compare_digest(body_hash.lower(), claim_hash.lower()):
+            return False
+        return True
+
     async def _handle_status(self, _request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
 
     async def _handle_inbound(self, request: web.Request) -> web.Response:
         """Inbound SMS webhook — Vonage POSTs JSON for Messages API."""
+        body_bytes = await request.read()
+        if self._signature_secret:
+            auth_header = request.headers.get("Authorization", "")
+            if not self._verify_signature(body_bytes, auth_header):
+                logger.warning("Vonage webhook signature verification failed")
+                return web.Response(status=401, text="invalid signature")
         try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
+            body = json.loads(body_bytes.decode("utf-8", errors="replace"))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return web.Response(status=400, text="bad request")
         if body.get("channel") != "sms":
             return web.Response(status=200, text="ignored")
