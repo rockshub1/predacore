@@ -32,8 +32,15 @@ self-moa / evaluator-optimizer / parallelize / routing / prompt-chain)
 based on task class + prior-run hints from memory. Runner choice
 (in-process vs DAF) is workload-class-based, not agent-count-based.
 
-Activation: `PREDACORE_USE_ORCHESTRATOR=1` to flip the new path on.
-Default: legacy `core.process()` path remains until callers migrate.
+Activation (2026-05-12): the main agent always handles the conversation
+(identity files + full ~63 tools loaded). When it decides a task warrants
+sub-agent decomposition, it invokes the `multi_agent` tool — that handler
+routes into this Orchestrator (gated by `PREDACORE_USE_ORCHESTRATOR`,
+default on inside the tool).
+
+The deprecated "orchestrator hijacks every turn" entry path is gated
+behind `PREDACORE_ORCHESTRATOR_AS_ENTRY=1` (off by default) — it
+bypasses identity and restricts tools to AutonomousPattern's spec.
 
 ## Other modules
 

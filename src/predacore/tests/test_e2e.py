@@ -274,8 +274,13 @@ class TestFullConversationFlow:
             assert len(messages[0]["content"]) > 50  # non-trivial system prompt
 
     @pytest.mark.asyncio
-    async def test_multiple_turns_in_session(self, tmp_path):
+    async def test_multiple_turns_in_session(self, tmp_path, monkeypatch):
         """Send two messages, verify both are processed."""
+        # Cognitive layers (improver + lay-plan) each add an LLM call.
+        # This test pins per-turn response identity, so disable them.
+        monkeypatch.setenv("PREDACORE_PROMPT_IMPROVER", "0")
+        monkeypatch.setenv("PREDACORE_LAYPLAN", "0")
+        monkeypatch.setenv("PREDACORE_TEST_CRITIQUE", "0")
         cfg = _make_config(tmp_path)
 
         with patch("predacore.core.LLMInterface") as MockLLM:
@@ -364,8 +369,14 @@ class TestToolExecutionFlow:
             assert "file content" in response.lower() or "e2e test" in response.lower()
 
     @pytest.mark.asyncio
-    async def test_tool_result_included_in_second_llm_call(self, tmp_path):
+    async def test_tool_result_included_in_second_llm_call(self, tmp_path, monkeypatch):
         """Verify the tool result is passed in messages to the second LLM call."""
+        # Cognitive layers inject extra LLM calls that come before the tool
+        # round-trip. This test asserts on the *2nd* call's message shape —
+        # disable layers so "2nd call" means the tool-result follow-up.
+        monkeypatch.setenv("PREDACORE_PROMPT_IMPROVER", "0")
+        monkeypatch.setenv("PREDACORE_LAYPLAN", "0")
+        monkeypatch.setenv("PREDACORE_TEST_CRITIQUE", "0")
         cfg = _make_config(tmp_path)
 
         test_file = tmp_path / "data.txt"
@@ -1213,8 +1224,14 @@ class TestPersonaDriftGuard:
             assert "chatgpt" not in response.lower() or "PredaCore" in response
 
     @pytest.mark.asyncio
-    async def test_no_drift_for_normal_response(self, tmp_path):
+    async def test_no_drift_for_normal_response(self, tmp_path, monkeypatch):
         """Normal PredaCore response does not trigger drift guard."""
+        # Drift guard test pins exactly 1 LLM call (no regeneration). The
+        # cognitive layers (improver + lay-plan) would add their own calls
+        # and break the count — disable them.
+        monkeypatch.setenv("PREDACORE_PROMPT_IMPROVER", "0")
+        monkeypatch.setenv("PREDACORE_LAYPLAN", "0")
+        monkeypatch.setenv("PREDACORE_TEST_CRITIQUE", "0")
         cfg = _make_config(tmp_path)
 
         with patch("predacore.core.LLMInterface") as MockLLM:
@@ -1276,8 +1293,13 @@ class TestPersonaDriftGuard:
             assert assessment_good.score < 0.3
 
     @pytest.mark.asyncio
-    async def test_drift_guard_disabled_skips_check(self, tmp_path):
+    async def test_drift_guard_disabled_skips_check(self, tmp_path, monkeypatch):
         """When drift guard is disabled, no regeneration occurs."""
+        # Same as test_no_drift_for_normal_response — count pins to 1, so
+        # the cognitive layers must be silent.
+        monkeypatch.setenv("PREDACORE_PROMPT_IMPROVER", "0")
+        monkeypatch.setenv("PREDACORE_LAYPLAN", "0")
+        monkeypatch.setenv("PREDACORE_TEST_CRITIQUE", "0")
         cfg = _make_config(tmp_path)
         cfg.launch.enable_persona_drift_guard = False
 
