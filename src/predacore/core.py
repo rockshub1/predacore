@@ -1667,14 +1667,16 @@ class PredaCoreCore:
         except OSError:
             logger.debug("Transcript write failed (non-fatal)", exc_info=True)
 
-        # Phase 15 (2026-05-08): PREDACORE_USE_ORCHESTRATOR now defaults
-        # to "1" — the new Orchestrator path (auto-classifies pattern,
-        # picks runner, runs PRELUDE loop) is canonical.
-        # Set PREDACORE_USE_ORCHESTRATOR=0 to opt back into the legacy
-        # `_agent_loop` path during the deprecation window. Both paths
-        # work; the orchestrator path has automatic legacy fallback on
-        # any error so callers never break.
-        if os.getenv("PREDACORE_USE_ORCHESTRATOR", "1") == "1":
+        # Architecture (2026-05-12): main agent owns the conversation.
+        # IDENTITY.md, the full ~63-tool registry, and session history are
+        # all loaded into the legacy `_agent_loop` below. When the agent
+        # decides a task warrants sub-agent decomposition, it calls the
+        # `multi_agent` tool — that handler routes into the Orchestrator
+        # internally (gated by PREDACORE_USE_ORCHESTRATOR inside the tool).
+        # Set PREDACORE_ORCHESTRATOR_AS_ENTRY=1 to restore the deprecated
+        # "orchestrator hijacks every turn" path — note this BYPASSES the
+        # identity prompt and restricts tools to AutonomousPattern's spec.
+        if os.getenv("PREDACORE_ORCHESTRATOR_AS_ENTRY", "0") == "1":
             try:
                 response = await self._process_via_orchestrator(
                     user_id=user_id,
@@ -1687,10 +1689,9 @@ class PredaCoreCore:
                 )
                 if response is not None:
                     return response
-                # Fall through if orchestrator declined to handle this turn
             except Exception as exc:  # noqa: BLE001 — orchestrator boundary
                 logger.warning(
-                    "Orchestrator path failed (%s) — falling back to legacy",
+                    "Orchestrator-as-entry path failed (%s) — falling back",
                     exc, exc_info=True,
                 )
 
