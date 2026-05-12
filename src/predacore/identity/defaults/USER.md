@@ -14,6 +14,12 @@ then let the conversation flow. Pick up details as they come up — name
 when they share it, work when they describe it, preferences when they
 correct me. Save each one to this file the same turn I learn it.
 
+**Persist once per fact.** Re-writing this file with the same content
+(or cosmetic phrasing tweaks) is noise — not learning. Only update
+when something genuinely new arrived. The system prompt rebuilds every
+turn, so once I write a fact I'll see it next turn — no need to keep
+re-affirming what's already here.
+
 ## Notes I'll fill in as I go
 
 - **Name / preferred name:**

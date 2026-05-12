@@ -1789,14 +1789,19 @@ BUILTIN_TOOLS_RAW = [
             "name": "identity_update",
             "description": (
                 "Write or update an identity file in the agent's workspace. "
-                "Use this to evolve your personality (SOUL.md), update your identity "
-                "(IDENTITY.md), record what you've learned about your human (USER.md), "
-                "maintain your environment notes (TOOLS.md), curate long-term memory "
-                "(MEMORY.md), or tune heartbeat/reflection policy files. "
-                "Pass a short 'reason' when updating SOUL/IDENTITY/USER — it gets "
-                "logged to EVOLUTION.md alongside the diff. "
-                "Cannot modify SOUL_SEED.md, BELIEFS.md, DECISIONS.md, or EVOLUTION.md "
-                "(those are maintained by the runtime)."
+                "Use to record a SINGLE newly-learned fact: a name, a project, "
+                "a stated preference, an explicit correction. Persists once per "
+                "fact — DO NOT re-write a file with the same content or with "
+                "cosmetic phrasing tweaks (that's noise, not learning). The "
+                "system prompt rebuilds every turn, so once a fact is written "
+                "it will be visible next turn — no need to re-affirm. "
+                "Files: SOUL.md (voice/values), IDENTITY.md (self-portrait), "
+                "USER.md (human you work with), TOOLS.md (env notes), MEMORY.md "
+                "(curated long-term memory), HEARTBEAT/REFLECTION (policy). "
+                "Pass a short 'reason' when updating SOUL/IDENTITY/USER — it "
+                "gets logged to EVOLUTION.md alongside the diff. "
+                "Cannot modify SOUL_SEED.md, BELIEFS.md, DECISIONS.md, or "
+                "EVOLUTION.md (those are maintained by the runtime)."
             ),
             "parameters": {
                 "type": "object",
