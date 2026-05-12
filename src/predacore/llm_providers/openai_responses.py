@@ -126,26 +126,49 @@ class OpenAIResponsesProvider(LLMProvider):
                     )
                 continue
 
-            # Tool result turn → function_call_output items
-            if role == "tool" and m.get("tool_results"):
-                for tr in m["tool_results"]:
+            # Tool result turn → function_call_output items.
+            # v1.6.3 fix: support BOTH the predacore-custom shape
+            # (``tool_results: [{call_id, result}, ...]``) AND the
+            # standard OpenAI Chat-Completions shape
+            # (``{role: "tool", content: "...", tool_call_id: "..."}``).
+            # Without the second branch, the standard shape fell through
+            # to the generic message append below, which emitted
+            # ``role: "tool"`` — Codex's Responses API rejects that with
+            # "Invalid value: 'tool'. Supported values are: 'assistant',
+            # 'system', 'developer', and 'user'."
+            if role == "tool":
+                if m.get("tool_results"):
+                    for tr in m["tool_results"]:
+                        out.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": tr.get("call_id", "") or "",
+                                "output": tr.get("result", ""),
+                            }
+                        )
+                else:
+                    # Standard OpenAI shape — single tool result inline.
                     out.append(
                         {
                             "type": "function_call_output",
-                            "call_id": tr.get("call_id", "") or "",
-                            "output": tr.get("result", ""),
+                            "call_id": m.get("tool_call_id", "") or m.get("call_id", "") or "",
+                            "output": str(m.get("content", "") or ""),
                         }
                     )
                 continue
 
-            # Plain user / assistant / system message
+            # Plain user / assistant / system message.
+            # Coerce any other unsupported role (e.g. "tool_use",
+            # "function") into "user" so Codex doesn't 400. Standard
+            # roles pass through unchanged.
             content = m.get("content")
             if content is None:
                 continue
+            wire_role = role if role in {"assistant", "system", "developer", "user"} else "user"
             out.append(
                 {
                     "type": "message",
-                    "role": role,
+                    "role": wire_role,
                     "content": content if isinstance(content, str) else str(content),
                 }
             )
