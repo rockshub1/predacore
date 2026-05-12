@@ -1181,7 +1181,16 @@ class PredaCoreCore:
         Returns a fresh list of dict-shaped messages — the agent loop
         mutates it as tool round-trips are appended.
         """
-        system_prompt = self._system_prompt
+        # 2026-05-12 fix: rebuild every turn so writes to IDENTITY/USER/SOUL
+        # via the `identity_update` tool propagate into the next turn's
+        # system prompt. The bug it fixes: `self._system_prompt` was set
+        # once in __init__ and never refreshed, so the model never saw
+        # its own identity writes — it kept re-bootstrapping with a
+        # name-less seed and re-writing the same facts every turn.
+        # The identity files are mtime-cached at the engine layer
+        # (identity/engine.py `_read_cached`), so this is cheap when
+        # nothing changed.
+        system_prompt = _get_system_prompt(self.config)
 
         memory_context = ""
         if self._memory_retriever:
@@ -1481,7 +1490,13 @@ class PredaCoreCore:
         verdict is PASS or the layer is disabled — caller continues
         with the original draft.
         """
-        if os.getenv("PREDACORE_TEST_CRITIQUE", "1") == "0":
+        # 2026-05-12: default flipped OFF. The critique LLM only sees
+        # `user_message + draft_answer` — NOT the agent's tools array
+        # — so it routinely flags legitimate "I have X tool" answers as
+        # hallucinations and forces a hedged regen. Set
+        # PREDACORE_TEST_CRITIQUE=1 to opt back in once the critique
+        # prompt is fixed to know the agent has a registered tool set.
+        if os.getenv("PREDACORE_TEST_CRITIQUE", "0") != "1":
             return None
         if not draft_content or not draft_content.strip():
             return None

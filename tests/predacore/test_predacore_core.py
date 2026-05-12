@@ -355,7 +355,10 @@ class TestConfigSystem:
         assert lp.max_tool_iterations == 1000
         assert lp.enable_persona_drift_guard is True
         assert lp.persona_drift_threshold == 0.32
-        assert lp.persona_drift_max_regens == 5
+        # 2026-05-12: default flipped 5 → 0 — assessment still runs,
+        # LLM regen on drift is off by default to keep the per-turn
+        # cost stack predictable. Set >0 to re-enable.
+        assert lp.persona_drift_max_regens == 0
 
     def test_load_config_beast_profile_from_env(self, tmp_path, monkeypatch):
         """Beast profile should apply preset defaults and sync runtime env."""
