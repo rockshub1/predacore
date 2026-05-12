@@ -142,7 +142,12 @@ class LaunchProfileConfig:
     max_tool_iterations: int = 1000  # Tool loop cap — meta_cognition detects runaway earlier
     enable_persona_drift_guard: bool = True
     persona_drift_threshold: float = 0.32
-    persona_drift_max_regens: int = 5
+    # 2026-05-12: default flipped 5 → 0. The heuristic assessment still
+    # runs for telemetry, but the LLM regen on drift is off by default —
+    # it was adding an extra LLM call per drifty turn and the regen
+    # sometimes itself drifted in the opposite direction (over-hedge).
+    # Set >0 to re-enable LLM regeneration on drift detection.
+    persona_drift_max_regens: int = 0
 
 
 @dataclass
@@ -179,7 +184,8 @@ _MAXED_RESOURCES_LAUNCH = {
     "max_spawn_fanout": 64,
     "max_tool_iterations": 1000,
     "enable_persona_drift_guard": True,
-    "persona_drift_max_regens": 5,
+    # Matches LaunchConfig default (0) — assessment runs, LLM regen does not.
+    "persona_drift_max_regens": 0,
 }
 
 PROFILE_PRESETS: dict[str, dict[str, Any]] = {
