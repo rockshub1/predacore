@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predacore"
-version = "1.6.2"
-description = "PredaCore — the apex autonomous agent. Hybrid Rust memory kernel, topped LongMemEval R@5 = 0.9574."
+version = "1.6.3"
+description = "PredaCore — your personal autonomous agent with an infinite context window and memory."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
