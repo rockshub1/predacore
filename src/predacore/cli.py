@@ -2032,6 +2032,14 @@ Commands:
         help="Re-run even if bootstrap already completed",
     )
 
+    # Prefetch — explicitly run the first-time model download (same flow
+    # that `predacore start` triggers on first run, but standalone so
+    # users can verify it works without spinning up the daemon).
+    subparsers.add_parser(
+        "prefetch",
+        help="Download memory + recall models (idempotent; skips already-cached)",
+    )
+
     # Status command
     status_parser = subparsers.add_parser("status", help="Show PredaCore status")
     status_parser.add_argument("--config", "-c", help="Path to config file")
@@ -2104,6 +2112,14 @@ Commands:
         asyncio.run(_run_setup())
     elif args.command == "bootstrap":
         _run_bootstrap(force=getattr(args, "force", False))
+    elif args.command == "prefetch":
+        from .bootstrap_prefetch import needs_first_time_setup, run_first_time_setup
+        if needs_first_time_setup():
+            ok = run_first_time_setup()
+            sys.exit(0 if ok else 1)
+        else:
+            console.print("[green]✓[/green] Memory + recall models already cached. Nothing to download.")
+            sys.exit(0)
     elif args.command == "start":
         _run_start(args)
     elif args.command == "stop":
@@ -2649,6 +2665,25 @@ def _run_start(args) -> None:
     # config loader already reads (PREDACORE_APPROVALS_REQUIRED).
     if getattr(args, "approvals", None) is not None:
         os.environ["PREDACORE_APPROVALS_REQUIRED"] = "1" if args.approvals else "0"
+
+    # First-time setup — game-style "Loading memory and browser..." single
+    # progress bar. Runs only when essential model weights aren't yet
+    # cached. Subsequent starts: no-op (returns False from `needs_*` check).
+    # Skip via PREDACORE_NO_PREFETCH=1 (CI / scripted installs).
+    if os.environ.get("PREDACORE_NO_PREFETCH", "0").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        try:
+            from .bootstrap_prefetch import needs_first_time_setup, run_first_time_setup
+            if needs_first_time_setup():
+                run_first_time_setup()
+        except Exception as exc:  # noqa: BLE001 — first-run setup must not block daemon boot
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "First-time setup encountered an error (%s) — "
+                "continuing; models will lazy-download on first use", exc,
+            )
+
     config = load_config(args.config, profile_override=args.profile)
     daemon = PredaCoreDaemon(config)
     pid_manager = PIDManager(str(Path(config.home_dir) / "predacore.pid"))

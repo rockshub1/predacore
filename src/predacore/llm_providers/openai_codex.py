@@ -256,6 +256,18 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
         # it on others 400s. Send only when the caller explicitly asked.
         if max_tokens is not None:
             body["max_output_tokens"] = max_tokens
+
+        # Reasoning effort — required on GPT-5.x models when calling the
+        # Codex /backend-api/codex/responses endpoint with tools. Without
+        # this, GPT-5.5+ returns 400 "rejected native tool calling".
+        # Normalize "minimal" → "low" per OpenAI guidance (May 2026):
+        # Codex backend rejects "minimal" but accepts "low|medium|high|xhigh".
+        # v1.6.1 fix — was previously missing entirely; gpt-5.5 broke.
+        effort_raw = (getattr(self.config, "reasoning_effort", "medium") or "medium").strip().lower()
+        effort = "low" if effort_raw == "minimal" else effort_raw
+        if effort in {"low", "medium", "high", "xhigh"}:
+            body["reasoning"] = {"effort": effort}
+
         wire_tools = self._serialize_tools_for_responses(tools)
         if wire_tools:
             body["tools"] = wire_tools
@@ -320,13 +332,24 @@ class OpenAICodexProvider(OpenAIResponsesProvider):
                 ) from exc
             except psdk.BadRequestError as exc:
                 # v1.5.0: text-tool fallback removed. Surface a clear error
-                # instead of silently degrading.
+                # instead of silently degrading. v1.6.1: log full upstream
+                # response body at WARNING so users can diagnose specific
+                # model+param rejection reasons (e.g. gpt-5.5 needs a
+                # parameter the old codex pipeline didn't send).
                 err_msg = str(exc).lower()
+                logger.warning(
+                    "openai_codex BadRequest from upstream — model=%s "
+                    "tools_count=%d response_body=%r",
+                    model, len(tools) if tools else 0,
+                    getattr(exc, "response_body", "<no body>"),
+                )
                 if tools and ("tool" in err_msg or "function" in err_msg):
                     raise psdk.BadRequestError(
                         f"openai_codex: model '{model}' rejected native "
-                        "tool calling. Try a different model id (gpt-5-codex, "
-                        "gpt-5, gpt-4o).",
+                        "tool calling. Upstream said: "
+                        f"{getattr(exc, 'response_body', str(exc))[:300]}. "
+                        "If this is the latest GPT model, the Codex pipeline "
+                        "may need a parameter update.",
                         status_code=exc.status_code,
                         request_id=exc.request_id,
                         response_body=exc.response_body,

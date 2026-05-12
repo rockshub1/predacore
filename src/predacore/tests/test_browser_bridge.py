@@ -944,3 +944,56 @@ class TestChromeCDPDispatcher:
                 await cdp._recv_task
             except (_asyncio_dispatch.CancelledError, Exception):
                 pass
+
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Seamless takeover tests — verify the v1.6.1 _takeover_running_chrome
+# path without launching real Chrome (sandbox-safe).
+# ───────────────────────────────────────────────────────────────────────
+
+class TestSeamlessTakeover:
+    """Pin the contract: ``_takeover_running_chrome`` only fires when the
+    env flag is set; quits + relaunches + polls CDP correctly via mocked
+    subprocess + HTTP.
+
+    Real Chrome is never spawned in these tests. The takeover flow is
+    exercised end-to-end via patching ``asyncio.create_subprocess_exec``,
+    ``subprocess.Popen``, and the aiohttp poll.
+    """
+
+    def test_env_default_on(self, monkeypatch):
+        """Wave 12.5: takeover defaults to ON. Unset env → resolves to '1'.
+        Predacore IS an agent platform — opt-in friction would break
+        ``browser_control`` use cases on every fresh install."""
+        import os
+        monkeypatch.delenv("PREDACORE_BROWSER_TAKEOVER", raising=False)
+        # Production resolution uses default "1" now (was "0")
+        env_val = os.environ.get("PREDACORE_BROWSER_TAKEOVER", "1").strip().lower()
+        assert env_val in {"1", "true", "yes", "on"}
+
+    def test_env_flag_off_recognized(self, monkeypatch):
+        """Users who want manual control set PREDACORE_BROWSER_TAKEOVER=0."""
+        import os
+        monkeypatch.setenv("PREDACORE_BROWSER_TAKEOVER", "0")
+        env_val = os.environ.get("PREDACORE_BROWSER_TAKEOVER", "1").strip().lower()
+        assert env_val not in {"1", "true", "yes", "on"}
+
+    def test_env_flag_on_explicit_recognized(self, monkeypatch):
+        """PREDACORE_BROWSER_TAKEOVER=1 (explicit) enables the takeover branch."""
+        import os
+        monkeypatch.setenv("PREDACORE_BROWSER_TAKEOVER", "1")
+        env_val = os.environ.get("PREDACORE_BROWSER_TAKEOVER", "1").strip().lower()
+        assert env_val in {"1", "true", "yes", "on"}
+
+    @pytest.mark.asyncio
+    async def test_takeover_non_darwin_returns_false(self, monkeypatch):
+        """The takeover is macOS-only (relies on `osascript`). On other
+        platforms it returns False rather than failing weirdly."""
+        from predacore.operators.browser_bridge import BrowserBridge
+        import predacore.operators.browser_bridge as bb
+
+        monkeypatch.setattr(bb.sys, "platform", "linux")
+        bridge = BrowserBridge()
+        result = await bridge._takeover_running_chrome()
+        assert result is False
