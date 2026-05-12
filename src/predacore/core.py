@@ -1270,7 +1270,13 @@ class PredaCoreCore:
     ) -> dict[str, Any] | None:
         """Run the prompt-engineer pass and produce an internal context
         block. Returns ``None`` when disabled or the improver no-op'd."""
-        if os.getenv("PREDACORE_PROMPT_IMPROVER", "1") == "0":
+        # 2026-05-12: default flipped 1 → 0. The improver added an LLM
+        # round-trip on every non-trivial message (~$0.001–0.01 each)
+        # while the base model is already strong enough to read the
+        # user's intent directly. v1.5.7 (the last "clean" release)
+        # didn't have it. Re-enable with PREDACORE_PROMPT_IMPROVER=1
+        # when sharpening vague briefs into specs is genuinely needed.
+        if os.getenv("PREDACORE_PROMPT_IMPROVER", "0") != "1":
             return None
         # Skip on extremely short messages — pure overhead.
         if len(ctx.message.strip()) < 8:
@@ -1312,7 +1318,13 @@ class PredaCoreCore:
         """Generate a short execution plan when the improver flagged
         ``requires_planning``. Returns the plan-as-system-block or
         ``None`` when disabled / failed."""
-        if os.getenv("PREDACORE_LAYPLAN", "1") == "0":
+        # 2026-05-12: default flipped 1 → 0. Lay plan was gated on the
+        # prompt improver (now off by default), so this is mostly a
+        # safety net — but defaulting off also means LLM agents-as-tools
+        # callers can't accidentally trigger a plan call by setting
+        # `requires_planning=true` upstream. Re-enable with
+        # PREDACORE_LAYPLAN=1.
+        if os.getenv("PREDACORE_LAYPLAN", "0") != "1":
             return None
         try:
             from .agents.cognitive_layers import lay_plan
@@ -1557,7 +1569,13 @@ class PredaCoreCore:
         0 disables). Non-fatal — any failure is logged at debug.
         """
         try:
-            every_n = int(os.getenv("PREDACORE_META_REFLECT_EVERY_N", "20"))
+            # 2026-05-12: default flipped 20 → 0 (disabled). The meta
+            # reflect layer wrote a "pattern" memory every 20 turns
+            # (e.g. "for X asks, do Y") that future turns would recall.
+            # Garbage-in patterns silently shaped future behavior with
+            # no way to debug. v1.5.7 didn't have this. Re-enable with
+            # PREDACORE_META_REFLECT_EVERY_N=20 when patterns are vetted.
+            every_n = int(os.getenv("PREDACORE_META_REFLECT_EVERY_N", "0"))
         except (ValueError, TypeError):
             every_n = 20
         if every_n <= 0:
