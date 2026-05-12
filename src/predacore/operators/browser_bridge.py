@@ -28,6 +28,7 @@ import math
 import os
 import random
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -2167,7 +2168,9 @@ class BrowserBridge:
             chrome_already_running = False
 
         if chrome_already_running:
-            # Try macOS `open` with --args (sends to running app)
+            # Try macOS `open` with --args (sends to running app — opens a
+            # new window with these args, but DOESN'T toggle CDP on the
+            # already-running process; Chrome's CDP must be on at start).
             try:
                 subprocess.Popen(
                     ["open", "-a", "Google Chrome", "--args", f"--remote-debugging-port={self._cdp_port}"],
@@ -2184,10 +2187,35 @@ class BrowserBridge:
                                     return True
                 except Exception:  # noqa: BLE001 — broad catch on Chrome auto-launch fallback
                     pass
-                # --args didn't work on running Chrome — need a restart
-                logger.warning(
+
+                # --args didn't enable CDP — seamless takeover path.
+                # When PREDACORE_BROWSER_TAKEOVER=1 (default), we save+quit
+                # user's Chrome and relaunch it with the debug port enabled
+                # against their real profile. Chrome's session restore
+                # brings back every tab. ~5 second user-visible blip but
+                # zero data loss.
+                #
+                # Default ON (v1.6.1+) because predacore IS an agent
+                # platform for browser control — opt-in friction would
+                # break "predacore browser_control X" use cases. Users
+                # who don't want auto-takeover set
+                # PREDACORE_BROWSER_TAKEOVER=0 to keep the manual flow.
+                # The takeover only fires when a browser action was
+                # actually invoked AND user's Chrome lacks CDP — not on
+                # arbitrary daemon boot.
+                takeover_enabled = os.environ.get(
+                    "PREDACORE_BROWSER_TAKEOVER", "1",
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if takeover_enabled and await self._takeover_running_chrome():
+                    return True
+
+                # Takeover disabled or failed — surface the manual path.
+                logger.error(
                     "Chrome is running but CDP port not available. "
-                    "Quit Chrome and let PredaCore relaunch it, or restart Chrome with: %s",
+                    "Options: (a) quit Chrome and let PredaCore relaunch it; "
+                    "(b) restart Chrome with: %s ; "
+                    "(c) set PREDACORE_BROWSER_TAKEOVER=1 for seamless save+restart "
+                    "(preserves all tabs via Chrome's session-restore).",
                     self.chrome_debug_command(self._cdp_port),
                 )
                 return False
@@ -2241,6 +2269,145 @@ class BrowserBridge:
             # L14 — terminal failure (no fallback available). Error level.
             logger.error("Failed to launch Chrome: %s", exc)
             return False
+
+    async def _takeover_running_chrome(self) -> bool:
+        """Seamless takeover of the user's currently-running Chrome.
+
+        Chrome's CDP must be on at process start — there's no way to enable
+        it on a live process. So if the user is browsing and we need control,
+        we have to restart Chrome. Done right this is invisible: Chrome
+        auto-saves the open-tab state on graceful quit and restores
+        everything on the next launch.
+
+        Sequence:
+          1. AppleScript `quit app "Google Chrome"` — Chrome handles save
+             prompts internally (unsaved forms → user confirms, then quit).
+          2. Wait up to 15s for the Chrome process to fully exit.
+          3. Relaunch Chrome with --remote-debugging-port + the user's
+             REAL profile (~/Library/Application Support/Google/Chrome on
+             macOS) so session-restore picks up every tab.
+          4. Poll CDP endpoint until it answers (up to 15s).
+
+        Gated by ``PREDACORE_BROWSER_TAKEOVER=1`` — off by default because
+        controlling someone's main browser process is too aggressive for
+        an implicit default.
+
+        Returns True on successful takeover, False if any step fails.
+        """
+        if sys.platform != "darwin":
+            logger.warning(
+                "Chrome takeover only implemented on macOS; "
+                "manually restart Chrome with %s",
+                self.chrome_debug_command(self._cdp_port),
+            )
+            return False
+
+        # Step 1 — graceful quit via AppleScript.
+        # Brief 2-second warning before the quit fires so a user mid-task
+        # (form filling, video call, etc.) can ctrl-C and abort the takeover.
+        # Set PREDACORE_BROWSER_TAKEOVER_GRACE=0 to skip the wait.
+        logger.warning(
+            "Predacore is taking over Chrome to enable browser control. "
+            "All open tabs will be preserved via session restore. "
+            "Set PREDACORE_BROWSER_TAKEOVER=0 to disable this behavior. "
+            "Quitting Chrome in 2 seconds..."
+        )
+        try:
+            grace = float(os.environ.get("PREDACORE_BROWSER_TAKEOVER_GRACE", "2.0"))
+        except ValueError:
+            grace = 2.0
+        if grace > 0:
+            await asyncio.sleep(grace)
+        try:
+            quit_proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e", 'quit app "Google Chrome"',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(quit_proc.wait(), timeout=10.0)
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.error("Takeover step 1 (quit Chrome) failed: %s", exc)
+            return False
+
+        # Step 2 — wait for Chrome process to fully exit (up to 15s)
+        for _ in range(30):
+            try:
+                pgrep = await asyncio.create_subprocess_exec(
+                    "pgrep", "-f", "Google Chrome",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await asyncio.wait_for(pgrep.wait(), timeout=2.0)
+                if rc != 0:
+                    break  # No Chrome processes left
+            except (asyncio.TimeoutError, OSError):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            logger.error(
+                "Takeover step 2 — Chrome did not exit within 15s. "
+                "Aborting takeover to avoid partial-state restart."
+            )
+            return False
+
+        # Step 3 — relaunch with debug port + user's real profile
+        chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        # User's real Chrome profile on macOS (lets session-restore work)
+        real_profile = str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome")
+        try:
+            subprocess.Popen(
+                [
+                    chrome_bin,
+                    f"--remote-debugging-port={self._cdp_port}",
+                    # NOTE: deliberately using the user's REAL profile —
+                    # NOT predacore's isolated profile. That's what makes
+                    # this "seamless": all logins/tabs/extensions carry over.
+                    f"--user-data-dir={real_profile}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            logger.error("Takeover step 3 (relaunch) failed: %s", exc)
+            return False
+
+        # Step 4 — poll CDP endpoint until it answers
+        for _ in range(30):
+            await asyncio.sleep(0.5)
+            try:
+                if aiohttp is None:
+                    import urllib.request
+                    urllib.request.urlopen(
+                        f"http://localhost:{self._cdp_port}/json", timeout=1,
+                    )
+                    logger.info(
+                        "Seamless Chrome takeover complete — CDP ready on port %d",
+                        self._cdp_port,
+                    )
+                    return True
+                else:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(
+                            f"http://localhost:{self._cdp_port}/json",
+                            timeout=aiohttp.ClientTimeout(total=1),
+                        ) as r:
+                            if r.status == 200:
+                                logger.info(
+                                    "Seamless Chrome takeover complete — "
+                                    "CDP ready on port %d (tabs restored)",
+                                    self._cdp_port,
+                                )
+                                return True
+            except Exception:  # noqa: BLE001 — broad catch during readiness poll
+                continue
+
+        logger.error(
+            "Takeover step 4 — Chrome relaunched but CDP not responding "
+            "after 15s. User may need to manually accept session-restore."
+        )
+        return False
 
     async def _use_cdp(self, name: str = "Chrome") -> bool:
         if await self._cdp.connect(port=self._cdp_port):
