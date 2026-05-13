@@ -1131,3 +1131,40 @@ class TestT7Verifiers:
         os.utime(f, (f.stat().st_atime, f.stat().st_mtime + 1))
         sha2 = _cached_blob_sha_for_path(f)
         assert sha1 != sha2
+
+
+class TestMatchesProjectFilterSignature:
+    """Regression for the 2026-05-12 _matches_project_filter signature bug.
+
+    Background: `_fetch_rows_by_ids` at store.py:2706 was calling
+    `_matches_project_filter(mem, project_id, self._invariant_skips)`
+    with three arguments. The function only takes two — the four call
+    sites convention is "caller bumps skip counter at the call site
+    itself, not via the function". The mismatch raised TypeError during
+    HyDE/cached recall paths and dropped Telegram messages, pushing
+    channel error rate to 25%. Pin the contract so it can't regress.
+    """
+
+    def test_function_takes_exactly_two_positional_args(self):
+        """If somebody extends the signature again in-place, every
+        caller must be updated together. Force a deliberate review."""
+        import inspect
+        from predacore.memory.store import _matches_project_filter
+        params = list(inspect.signature(_matches_project_filter).parameters.values())
+        assert len(params) == 2, (
+            "_matches_project_filter must take exactly 2 positional args "
+            "(mem, project_id). Callers do skip-counter bookkeeping at the "
+            f"call site themselves. Got: {[p.name for p in params]}"
+        )
+
+    def test_two_arg_call_returns_bool(self):
+        """Sanity: confirm both happy and reject paths work with the
+        canonical 2-arg invocation pattern."""
+        from predacore.memory.store import _matches_project_filter
+        mem = {"project_id": "alpha"}
+        assert _matches_project_filter(mem, None) is True
+        assert _matches_project_filter(mem, "all") is True
+        assert _matches_project_filter(mem, "alpha") is True
+        assert _matches_project_filter(mem, "beta") is False
+        assert _matches_project_filter(mem, ["alpha", "gamma"]) is True
+        assert _matches_project_filter(mem, ["beta", "gamma"]) is False

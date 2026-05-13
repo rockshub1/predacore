@@ -100,8 +100,31 @@ class Qwen3Reranker:
             self._load_failed = True
             return False
         try:
-            logger.info("Loading reranker model %s (first call — downloads ~1.2GB on first run)",
-                        self._model_name)
+            # Detect HF cache hit before logging so the message is honest.
+            # Old wording said "downloads ~1.2GB on first run" on EVERY load,
+            # including warm-cache reloads — confused users into thinking the
+            # daemon was re-downloading on each restart. Now we check the
+            # HF hub cache for the model directory + snapshot before logging.
+            from pathlib import Path
+            try:
+                from huggingface_hub import constants as _hf_constants
+                _hf_cache_root = Path(_hf_constants.HF_HUB_CACHE)
+            except (ImportError, AttributeError):
+                _hf_cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+            _model_cache_dir = (
+                _hf_cache_root / ("models--" + self._model_name.replace("/", "--"))
+            )
+            _cached = (
+                _model_cache_dir.exists()
+                and (_model_cache_dir / "snapshots").exists()
+                and any((_model_cache_dir / "snapshots").iterdir())
+            )
+            if _cached:
+                logger.info("Loading reranker model %s (from local cache)",
+                            self._model_name)
+            else:
+                logger.info("Downloading reranker model %s (first install — ~1.2GB; cached at %s)",
+                            self._model_name, _hf_cache_root)
             self._model = CrossEncoder(
                 self._model_name,
                 max_length=self._max_length,
