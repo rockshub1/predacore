@@ -2703,7 +2703,11 @@ class UnifiedMemoryStore:
                 continue
             if not _memory_matches_scope(mem, scopes, team_id):
                 continue
-            if not _matches_project_filter(mem, project_id, self._invariant_skips):
+            if not _matches_project_filter(mem, project_id):
+                # Match the convention used by the other call sites (2413,
+                # 2433, 2779): the function takes 2 args; the caller
+                # bumps the skip counter on rejection.
+                self._invariant_skips["project_mismatch"] += 1
                 continue
             out.append(mem)
         return out

@@ -20,4 +20,4 @@ except Exception:  # noqa: BLE001 — source install or metadata stripped
     # Fallback for git checkouts or unusual install layouts. Bump this
     # in lockstep with pyproject.toml version so it stays roughly current
     # for source-install users (who are rare and tend to know git).
-    __version__ = "1.6.8"
+    __version__ = "1.6.9"
