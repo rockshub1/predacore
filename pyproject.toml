@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predacore"
-version = "1.6.10"
+version = "1.6.11"
 description = "PredaCore — your personal autonomous agent with an infinite context window and memory."
 readme = "README.md"
 requires-python = ">=3.10"
