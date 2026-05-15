@@ -172,18 +172,15 @@ llm = []                             # Providers use the in-house httpx SDK
 "Changelog" = "https://github.com/rockshub1/predacore/blob/main/CHANGELOG.md"
 "Security" = "https://github.com/rockshub1/predacore/security/policy"
 
-# uv source override: predacore_core is a local Rust crate built via maturin.
-# It isn't on PyPI, so resolvers must look at the workspace path instead.
-# After publishing the wheel to PyPI, remove this section.
-[tool.uv.sources]
-predacore_core = { path = "src/predacore_core_crate", editable = true }
+# predacore_core is the Rust kernel. It now lives in a separate private
+# repo (rockshub1/predacore-kernel-rust) and ships as compiled wheels
+# under the `predacore_core` name on PyPI — uv resolves it from there
+# automatically via the `dependencies = ["predacore_core>=1.2.0"]` line
+# above. No source override needed.
 
 [tool.setuptools.packages.find]
 where = ["src"]
-# Explicit allowlist — only ship `predacore` and its subpackages. The
-# `predacore_core_crate/` directory holds the Rust kernel's source (shipped
-# as its own separate wheel via maturin), so it must NEVER end up in the
-# main `predacore` wheel as a stray top-level package.
+# Explicit allowlist — only ship `predacore` and its subpackages.
 include = ["predacore", "predacore.*"]
 # Exclude test / eval / benchmark modules from the published wheel. Without this,
 # setuptools auto-discovers them and ships them to PyPI — including fixtures
