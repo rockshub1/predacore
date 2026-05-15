@@ -2,270 +2,124 @@
   <img src="https://raw.githubusercontent.com/rockshub1/predacore/main/assets/predacore-hero.png" alt="PredaCore" width="100%">
 </p>
 
-<p align="center"><strong>The hyper-autonomous AI agent with persistent memory and 55 powerful tools.</strong></p>
-
-<br>
-
-<h1 align="center"><code>0.9574</code></h1>
-
-<p align="center"><sub><strong>R @ 5 &nbsp; · &nbsp; LongMemEval</strong></sub></p>
-
-<br>
+<p align="center"><strong>An AI agent that actually remembers you.</strong></p>
 
 <p align="center">
-  Persistent memory. On your laptop. No cloud. No API keys. Yours forever.
+  Runs on your laptop. No cloud. No account. No subscription.<br>
+  Your data stays yours.
 </p>
 
-<br>
-
 <p align="center">
-  <img src="https://img.shields.io/badge/Kernel-Rust_BGE-orange?style=for-the-badge" alt="Rust BGE Kernel">
-  <img src="https://img.shields.io/badge/Memory-Persistent-blue?style=for-the-badge" alt="Persistent Memory">
-  <img src="https://img.shields.io/badge/55%20Powerful%20Tools-success?style=for-the-badge" alt="55 Powerful Tools">
-  <img src="https://img.shields.io/badge/Privacy-100%25_Local-red?style=for-the-badge" alt="100% Local">
-  <img src="https://img.shields.io/badge/License-Apache_2.0-green?style=for-the-badge" alt="Apache 2.0">
+  <img src="https://img.shields.io/badge/100%25_Local-red?style=for-the-badge" alt="100% Local">
+  <img src="https://img.shields.io/badge/Apache_2.0-green?style=for-the-badge" alt="Apache 2.0">
+  <img src="https://img.shields.io/badge/Mac_·_Linux_·_Windows-blue?style=for-the-badge" alt="Cross platform">
 </p>
 
 ---
 
+## What it does
+
+Most AI tools forget you the moment you close the tab. PredaCore doesn't. It remembers your projects, your style, your past decisions — and brings them back when they're useful.
+
 ```
-You:        hey atlas, remember that rate-limiter bug from last month?
+You:        hey atlas, remember that bug from last month?
 
-PredaCore:  yeah — api_client.py:142, headers dropped on retry. You
-            patched it. Similar pattern still lives in webhook_retry.py.
-            want me to fix it there too?
+PredaCore:  yeah — api_client.py line 142, headers got dropped
+            on retry. You patched it. The same pattern still
+            lives in webhook_retry.py — want me to fix it there too?
 ```
 
-Most AI forgets you the moment the tab closes. **PredaCore doesn't.** Rust kernel, 13 markdown identity files, 55 tools, nine channels, zero vendor SDKs. Every number on this page reproducible in one command.
+That's the whole pitch. An assistant that gets sharper with every conversation, because it actually remembers.
 
-- **Stop re-explaining yourself.** It knows your repo, your stack, your architecture — across weeks.
-- **Bugs don't bite twice.** Patterns you debugged last month get flagged when they reappear.
-- **Preferences stick.** Say *"use pytest"* once — never again.
-- **Work compounds.** Every session picks up where the last left off. Useful memories persist; dead weight fades automatically — preferences live for weeks, casual chats for days, all tuned by session reward.
-- **You own it.** Memory lives in `~/.predacore/`. No cloud, no account, no vendor.
+## Why people use it
 
-You can delete it anytime — `rm -rf ~/.predacore/agents/atlas/`.
+- **Stop re-explaining yourself.** It learns your codebase, your stack, your preferences — once.
+- **Bugs don't bite twice.** Patterns you fixed last month surface when they reappear.
+- **It does the work.** Not just chat — it can run commands, edit files, browse the web, automate your Mac or phone, and 50+ other things.
+- **You own it.** All your data lives in `~/.predacore/`. Delete the folder, it's gone. No vendor.
+- **Free.** Open source, Apache 2.0. Install once, use forever.
 
----
-
-## 🧰 55 powerful tools
-
-Not an LLM wrapper. A digital operator wired into your machine through a hardened dispatcher — Express-style middleware, per-tool circuit breakers, adaptive P95 timeouts, LRU cache, SHA-256-hashed persistent approvals.
-
-| | Tools |
-|---|---|
-| **Code & shell** | `execute_code` (13 langs · sandboxed Docker · [optional](docker/sandbox/Dockerfile)) · `python_exec` · `run_command` · `read_file` · `write_file` · `list_directory` |
-| **Web** | `browser_control` (hijacks Chrome via DOM — 100× faster than screenshots) · `deep_search` · `web_search` · `web_scrape` |
-| **Desktop / mobile** | `desktop_control` (PyObjC · 1–5ms per action) · `screen_vision` · `android_control` (ADB + uiautomator2) |
-| **Git** | `git_semantic_search` (*"where is the auth middleware?"*) · `git_context` · `git_diff_summary` · `git_commit_suggest` · `git_find_files` |
-| **Agents & planning** | `multi_agent` — fan-out · pipeline · consensus · supervisor, with optional **DAF gRPC process isolation** for true parallel agents · `strategic_plan` (HTN + MCTS, multi-objective) · `openclaw_delegate` |
-| **Memory** | `memory_store` · `memory_recall` · `semantic_search` (scoped global · team · scratch) |
-| **Identity** | `identity_read` · `identity_update` · `journal_append` — writes to the agent's 13-file soul |
-| **MCP client** | `mcp_add` · `mcp_list` · `mcp_remove` · `mcp_restart` — mount any MCP server mid-chat |
-| **REST APIs** | `api_add` · `api_call` · `api_list` · `api_remove` — bind any service in seconds |
-| **Pipelines** | `tool_pipeline` (sequential · parallel · conditionals · templates) · `tool_stats` |
-| **Collective intelligence** | `skill_evolve` · `skill_scan` · `skill_endorse` · `collective_intelligence_sync` · `collective_intelligence_status` · `marketplace_*` |
-| **Voice / creative / cron** | `speak` · `voice_note` · `image_gen` · `pdf_reader` · `diagram` (Mermaid) · `cron_task` |
-| **Infrastructure** | `secret_set` · `secret_list` · `channel_configure` · `channel_install` |
-
----
-
-## How the engine purrs
-
-**Rust compute kernel.** Candle BGE + BM25 + trigram fuzzy + entity extraction. SIMD cosine. Deterministic retrieval — no LLM sampling, no RNG. That's why benchmarks reproduce bit-identical.
-
-**Thirteen files. One soul.** Your agent's identity lives in `~/.predacore/agents/<name>/` as plain markdown. `cat` them. `git log` them. `rm` them. Beliefs graduate *observation → working_theory → tested → committed*. Every mutation auto-diffs to `EVOLUTION.md`. Tampered `SOUL_SEED` aborts startup. **Fail closed.**
-
-**Safety as a primitive.** Prompt-injection scan on every identity load. SSRF guard on web tools. Secret-shape allowlist — even `yolo` can't write arbitrary env vars. Persona-drift regex ladder auto-regenerates drifted turns. Memory scopes (`global · agent · team · scratch`) prevent cross-contamination.
-
-**Per-session lane queue.** Same session = serial FIFO. Different sessions = concurrent. Meta-cognition catches loops, oscillation, thrashing — with a diversity exception so real exploration isn't punished.
-
-**DAF — true parallel agents.** When in-process asyncio isn't enough, the Dynamic Agent Fabric (`[server]` extra) gives you gRPC multi-process isolation. Agents run in their own processes, crash-isolated, with self-optimization: >20% error rate → respawn · queue depth >10 → scale out · idle >300s → terminate · P95 latency >3× baseline → marked degraded. Wall-clock budgets clamped 10s..6h, hard-killed via `asyncio.wait_for`. Teams get private 72h-TTL scratchpads so findings don't leak to caller memory.
-
----
-
-## Quickstart
+## Try it
 
 ```bash
 pipx install "predacore[full]"
 predacore
 ```
 
-One command. First message in under two minutes. Rust ships as pre-built wheels — no toolchain required.
+That's it. First message in under two minutes. No API keys required to start — bring your own when you want a smarter brain (Claude, GPT, Gemini, or local).
 
-> **Don't have pipx?** `brew install pipx` (macOS) · `python -m pip install --user pipx` (Linux/Windows). Already inside a venv or using Conda? Plain `pip install "predacore[full]"` works too.
+> Don't have pipx? `brew install pipx` (Mac), `python -m pip install --user pipx` (Linux/Windows).
 
-**Zero-config. The agent configures itself mid-chat:**
+## What it can do
 
-```
-You: add Anthropic — key sk-ant-api03-XXXXXXXXXX
-You: enable telegram with token 123:abc
-You: install the GitHub MCP server
-```
+A non-exhaustive sample:
 
-Routed through `secret_set`, `channel_configure`, `mcp_add`. Writes land in `~/.predacore/.env` (chmod 600).
+| | |
+|---|---|
+| **Code** | Run code in many languages (sandboxed). Read/write files. Run shell commands. Semantic search across your repo. |
+| **Web** | Browse the web through Chrome. Search. Scrape. Read PDFs. |
+| **Memory** | Remember conversations, decisions, bugs, preferences. Search across everything you've ever told it. |
+| **Computer** | Control your Mac via accessibility APIs (click, type, take screenshots). Control your Android phone over ADB. |
+| **Voice & images** | Talk to it. Have it talk back. Generate images. |
+| **Integrations** | Telegram, Discord, Slack, WhatsApp, iMessage, email, and ~20 other channels. |
+| **MCP servers** | Plug in any MCP server mid-conversation. |
+| **Cron** | Schedule recurring tasks. |
+| **Agents** | Run multiple sub-agents in parallel for big tasks. |
 
-| Install | Adds | Δ Wheel |
-|---|---|---|
-| `predacore` | Engine · CLI · webchat · 8 channels · Playwright · PDF · voice · sandbox · Rust kernel | ~350 MB |
-| `predacore[full]` | + spaCy · desktop automation · Android ADB | +200 MB |
-| `predacore[server]` | + FastAPI · Redis · Prometheus · DAF gRPC | +150 MB |
+Full tool list is in the source under `src/predacore/tools/`. The agent itself can tell you what it has — just ask.
 
-### Upgrade
+## How it remembers
 
-```bash
-pipx upgrade predacore          # pipx
-pip install -U predacore         # pip
-uv pip install -U predacore      # uv
-```
+Memory is a real database on your laptop, not just chat history. Every conversation gets stored, scored for importance, and fades naturally if it's not useful. The important stuff sticks. The casual stuff drifts away.
 
-Then restart the daemon so it picks up the new code:
+When you ask something, it doesn't just look at the current chat — it searches everything it's learned about you and surfaces what's relevant. Bug from three weeks ago? It pulls it up. Preference you stated once? It honors it.
 
-```bash
-predacore stop && predacore start --daemon
-predacore status                 # verify
-```
+Behind the scenes there's a fast search engine doing the heavy lifting (semantic + keyword search + a re-ranker). You don't need to know how — it just works.
 
-Existing memory in `~/.predacore/` migrates automatically — config, identity files, memory DB all carry over. Configs written by a pre-v0.1.5 setup wizard may contain legacy keys (`mode: personal`, old profile names like `balanced` / `public_beast`); if `predacore doctor` shows unexpected values, back up and regenerate with `predacore setup`.
+## Benchmark
 
-<details><summary><b>First-time install — Linux</b></summary>
+**0.9574 R@5 on [LongMemEval](https://arxiv.org/abs/2410.10813)** — a 500-conversation memory-recall benchmark from ICLR 2025. That's the strongest public number on this benchmark as of April 2026. ~55 minutes to reproduce on a Mac, zero per-query API cost. Full artifacts in [`benchmarks/`](https://github.com/rockshub1/predacore/tree/main/benchmarks).
 
-```bash
-# Debian / Ubuntu
-sudo apt install pipx && pipx ensurepath
+## Honest weaknesses
 
-# Fedora
-sudo dnf install pipx && pipx ensurepath
+Not vaporware. Real limitations:
 
-# Arch
-sudo pacman -S python-pipx && pipx ensurepath
+- **Windows desktop control isn't built yet.** Mac and Linux only. (Telegram/Discord/web/files all work on Windows.)
+- **One memory recall serializes** if you fire many in parallel. Single-user is fine; heavy server use needs care.
+- **`beast` profile has no real spending cap** — the trust-it-fully mode trusts you to know what you're doing.
 
-pipx install "predacore[full]"
-```
-</details>
+## Bring your own AI
 
-<details><summary><b>First-time install — macOS</b></summary>
+PredaCore is the engine. The "brain" is whichever model you point it at:
 
-```bash
-brew install pipx && pipx ensurepath
-pipx install "predacore[full]"
-```
-</details>
+- Anthropic Claude (recommended)
+- OpenAI GPT
+- Google Gemini
+- Local models via Ollama or LM Studio
+- OpenRouter (one key, many providers)
 
-<details><summary><b>First-time install — Windows</b></summary>
+Add an API key in `~/.predacore/.env` or just tell the agent: *"add Anthropic, key is sk-ant-..."* — it sets it up.
 
-```powershell
-python -m pip install --user pipx
-python -m pipx ensurepath
-# Restart the terminal so `predacore` is on PATH
-pipx install "predacore[full]"
-```
-
-`desktop_control` and `screen_vision` are macOS + Linux only on Windows; webchat, channels, MCP, sandbox, and memory all work.
-</details>
-
----
-
-## Benchmarks
-
-**0.9574 R@5** on [LongMemEval](https://arxiv.org/abs/2410.10813) — the long-term-memory benchmark from ICLR 2025. 500 conversational histories · ~57M tokens · 470 scored.
-
-| Category | n | R@5 | R@10 | R@20 |
-|---|---|---|---|---|
-| knowledge-update | 72 | **0.9861** | 0.9861 | 1.000 |
-| multi-session | 121 | **0.9835** | 0.9917 | 1.000 |
-| single-session-assistant | 56 | 0.9643 | 0.9821 | 0.9821 |
-| single-session-user | 64 | 0.9531 | 0.9844 | 1.000 |
-| temporal-reasoning | 127 | 0.9370 | 0.9606 | 0.9843 |
-| single-session-preference | 30 | 0.8667 | 0.9333 | 1.000 |
-
-Four of six categories clear **0.95**. Bit-identical reproduction:
+## Daily commands
 
 ```bash
-wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
-python -m predacore.evals.longmemeval --dataset longmemeval_s_cleaned.json --json-out my_run.json
+predacore start --daemon     # run in the background
+predacore stop               # stop it
+predacore status             # check it's healthy
+predacore doctor             # full diagnostic
+predacore chat               # talk to it in the terminal
+predacore logs -f            # watch what it's doing
 ```
 
-~55 min on Apple Silicon. Zero per-query API cost. Full artifacts in [`benchmarks/`](https://github.com/rockshub1/predacore/tree/main/benchmarks).
+## Where to ask for help
 
-**Re-run instantly with response cache:** `PREDACORE_IDEMPOTENT=1` caches every deterministic LLM call locally (SQLite, 24h TTL). Subsequent benchmark runs skip the API entirely for prompts already seen — useful when quota caps kick in or you want iteration speed on eval tuning. Works with any provider (Anthropic/OpenAI + compat/Gemini).
-
----
-
-## Launch modes
-
-Two profiles. Every resource cap is identical — they differ only on governance posture.
-
-| | `enterprise` *(default)* | `beast` |
-|---|---|---|
-| Trust level | `normal` | `yolo` |
-| Approvals before risky actions | **required** | **off** |
-| EGM compliance mode | `strict` | `off` |
-| Code network access | off | on |
-| Self-evolution | off | on |
-| Plugin marketplace | off | on |
-| OpenClaw bridge | off | on |
-| Docker sandbox | on | on |
-| Max tool iterations | 1000 | 1000 |
-| Spawn depth · fanout | 16 · 64 | 16 · 64 |
-| Max concurrent tasks | 100 | 100 |
-
-```bash
-predacore start --daemon                                # enterprise (safe default)
-predacore start --profile beast --daemon                # beast (autonomous)
-predacore start --profile beast --approvals --daemon    # beast, keep approval prompts
-```
-
-Override any field in `~/.predacore/config.yaml` or via `PREDACORE_*` env vars. Run `predacore doctor` to see the resolved config for the active profile.
-
-### Daily commands
-
-```bash
-predacore setup              # guided first-time setup wizard
-predacore start --daemon     # start in background
-predacore stop               # stop the daemon
-predacore status             # live status of the running daemon
-predacore doctor             # full health check — mode, config, providers, etc.
-predacore logs -f            # tail daemon logs
-predacore chat               # interactive terminal chat
-```
-
-Config lives in `~/.predacore/config.yaml`. API keys in `~/.predacore/.env` (chmod 600). Logs in `~/.predacore/logs/daemon.log`.
-
-### Adding API keys later
-
-Edit `~/.predacore/.env` directly:
-
-```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.predacore/.env
-chmod 600 ~/.predacore/.env
-predacore stop && predacore start --daemon   # restart to reload
-```
-
-Supported keys: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`. v1.5.0 adds: `MOONSHOT_API_KEY` (Kimi K2), `DASHSCOPE_API_KEY` (Qwen 3), `HYPERBOLIC_API_KEY`, `PERPLEXITY_API_KEY`. Or run `predacore setup` to re-enter them with the wizard.
-
-> **OpenRouter fidelity caveat (v1.5.0)** — OpenRouter normalizes every underlying provider's response to OpenAI Chat Completions, which means picking `anthropic/claude-opus-4-7` via OpenRouter *loses* Anthropic's thinking signatures, and picking `google/gemini-3-pro` *loses* `thoughtSignature`. For maximum fidelity (thinking-block preservation, native tool-use validators), use direct providers (`--model anthropic`, `--model gemini`). For breadth + one API key, OpenRouter is great — predacore can't recover signatures the aggregator strips.
-
----
-
-## Honest weaknesses (no vaporware)
-
-- **Windows desktop operator unimplemented.** Networked surfaces work everywhere; `desktop_control` / `screen_vision` are macOS + Linux only. *Coming soon.*
-- **`single-session-preference` R@5 = 0.867.** Retrieval's weak spot — cross-encoder re-ranker is the planned fix.
-- **GIL not released in Rust kernel.** Concurrent `embed()` calls serialize. rayon helps within a call.
-- **`yolo` has no real cost cap.** Arg-regex catches `rm -rf`, not an obfuscated `curl | sh`.
-- **`_vendor` ships in wheels.** Five subpackages bloat the install.
-
----
-
-## Links
-
-**Issues:** [github.com/rockshub1/predacore/issues](https://github.com/rockshub1/predacore/issues) · **Security:** [SECURITY.md](https://github.com/rockshub1/predacore/blob/main/SECURITY.md) · **Contributing:** [CONTRIBUTING.md](https://github.com/rockshub1/predacore/blob/main/CONTRIBUTING.md)
-
-**Deep dives:** docs are being rewritten — coming soon. In the meantime: `predacore doctor` shows live config, `predacore --help` lists every CLI subcommand, and the source under `src/predacore/` is annotated.
+- **Bug or feature request:** [open an issue](https://github.com/rockshub1/predacore/issues)
+- **Security:** [SECURITY.md](https://github.com/rockshub1/predacore/blob/main/SECURITY.md)
+- **Contributing:** [CONTRIBUTING.md](https://github.com/rockshub1/predacore/blob/main/CONTRIBUTING.md)
+- **Docs:** being rewritten — for now, ask the agent itself (`predacore chat` and ask *"what can you do?"*)
 
 ---
 
 <p align="center">
-  <sub>Apache 2.0 · Every claim reproducible from the repo.</sub>
+  <sub>Apache 2.0 · Built by <a href="https://github.com/rockshub1">@rockshub1</a></sub>
 </p>
