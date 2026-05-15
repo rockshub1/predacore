@@ -2160,9 +2160,11 @@ class BrowserBridge:
         if not chrome_bin:
             return False
 
-        # Check if Chrome is already running (without CDP)
+        # Check if Chrome's main process is already running (without CDP).
+        # -x matches exact process name "Google Chrome" — avoids matching
+        # the helper/renderer processes that share the substring.
         try:
-            result = subprocess.run(["pgrep", "-f", "Google Chrome"], capture_output=True, timeout=3)
+            result = subprocess.run(["pgrep", "-x", "Google Chrome"], capture_output=True, timeout=3)
             chrome_already_running = result.returncode == 0
         except (OSError, subprocess.SubprocessError):
             chrome_already_running = False
@@ -2329,26 +2331,76 @@ class BrowserBridge:
             logger.error("Takeover step 1 (quit Chrome) failed: %s", exc)
             return False
 
-        # Step 2 — wait for Chrome process to fully exit (up to 15s)
-        for _ in range(30):
+        # Step 2 — wait for Chrome's main process to exit (up to 30s).
+        #
+        # We pgrep for the EXACT process name "Google Chrome" (-x) rather
+        # than a substring of the command line (-f). The helpers
+        # ("Google Chrome Helper", "...(Renderer)", "...(GPU)") are
+        # spawned by the main process and shut down only after it
+        # exits — using -f would match them all and we'd time out
+        # waiting for helper-process cleanup. -x matches the main only.
+        #
+        # Timeout 15s → 30s: multi-tab sessions on a busy Mac need
+        # more headroom to flush session state to disk.
+        main_gone = False
+        for _ in range(60):  # 60 * 0.5s = 30s
             try:
                 pgrep = await asyncio.create_subprocess_exec(
-                    "pgrep", "-f", "Google Chrome",
+                    "pgrep", "-x", "Google Chrome",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 rc = await asyncio.wait_for(pgrep.wait(), timeout=2.0)
                 if rc != 0:
-                    break  # No Chrome processes left
+                    main_gone = True
+                    break
             except (asyncio.TimeoutError, OSError):
+                main_gone = True
                 break
             await asyncio.sleep(0.5)
-        else:
-            logger.error(
-                "Takeover step 2 — Chrome did not exit within 15s. "
-                "Aborting takeover to avoid partial-state restart."
+
+        if not main_gone:
+            # Last-resort: ask kindly with SIGTERM. macOS Chrome
+            # respects this; session-restore still works on next launch.
+            # If even that doesn't take, abort — SIGKILL would skip the
+            # session save and leave the user with all tabs lost.
+            logger.warning(
+                "Takeover step 2 — Chrome did not exit within 30s, "
+                "sending SIGTERM to main process as last resort"
             )
-            return False
+            try:
+                pkill = await asyncio.create_subprocess_exec(
+                    "pkill", "-TERM", "-x", "Google Chrome",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(pkill.wait(), timeout=2.0)
+            except (asyncio.TimeoutError, OSError):
+                pass
+            # One more 5s window after SIGTERM
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                try:
+                    pgrep = await asyncio.create_subprocess_exec(
+                        "pgrep", "-x", "Google Chrome",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    rc = await asyncio.wait_for(pgrep.wait(), timeout=2.0)
+                    if rc != 0:
+                        main_gone = True
+                        break
+                except (asyncio.TimeoutError, OSError):
+                    main_gone = True
+                    break
+            if not main_gone:
+                logger.error(
+                    "Takeover step 2 — Chrome's main process is still "
+                    "alive after SIGTERM. Aborting takeover to preserve "
+                    "the user's session. Manually quit Chrome and retry, "
+                    "or run with PREDACORE_BROWSER_TAKEOVER=0."
+                )
+                return False
 
         # Step 3 — relaunch with debug port + user's real profile
         chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
