@@ -50,23 +50,64 @@ That's it. First message in under two minutes. No API keys required to start —
 
 > Don't have pipx? `brew install pipx` (Mac), `python -m pip install --user pipx` (Linux/Windows).
 
-## What it can do
+## What you can ask it to do
 
-A non-exhaustive sample:
+A taste (it can do more — just ask):
 
-| | |
-|---|---|
-| **Code** | Run code in many languages (sandboxed). Read/write files. Run shell commands. Semantic search across your repo. |
-| **Web** | Browse the web through Chrome. Search. Scrape. Read PDFs. |
-| **Memory** | Remember conversations, decisions, bugs, preferences. Search across everything you've ever told it. |
-| **Computer** | Control your Mac via accessibility APIs (click, type, take screenshots). Control your Android phone over ADB. |
-| **Voice & images** | Talk to it. Have it talk back. Generate images. |
-| **Integrations** | Telegram, Discord, Slack, WhatsApp, iMessage, email, and ~20 other channels. |
-| **MCP servers** | Plug in any MCP server mid-conversation. |
-| **Cron** | Schedule recurring tasks. |
-| **Agents** | Run multiple sub-agents in parallel for big tasks. |
+**Code & files**
+- *"find the rate-limiter bug from last week"*
+- *"read api_client.py and explain the retry logic"*
+- *"run this Python snippet and tell me what breaks"*
+- *"search the repo for anything that touches auth"*
+- *"what files have I changed since yesterday?"*
+- *"fix the lint issues in src/ and commit"*
 
-Full tool list is in the source under `src/predacore/tools/`. The agent itself can tell you what it has — just ask.
+**The web**
+- *"search the web for the latest on X"*
+- *"open this page in Chrome and tell me what's there"*
+- *"scrape the prices off this site"*
+- *"read this PDF and pull out the key dates"*
+
+**Your Mac & phone**
+- *"take a screenshot and tell me what's on screen"*
+- *"open Spotify and play my focus playlist"*
+- *"click the Send button"*
+- *"install this APK on my Android"*
+
+**Memory**
+- *"remember that I prefer pytest over unittest"*
+- *"what did we decide about the auth migration?"*
+- *"index my whole `~/Developer/myrepo` folder into memory"*
+- *"what's the most recent thing I told you about deployment?"*
+
+**Voice, images, docs**
+- *"listen — [voice note]"*
+- *"speak this out loud"*
+- *"generate a hero image for my landing page"*
+- *"draw me a system diagram of how X works"*
+
+**Schedules & background work**
+- *"check the deploy every 5 minutes and ping me when it finishes"*
+- *"every weekday at 9am, summarize my unread emails"*
+- *"keep running this until it succeeds, with backoff"*
+
+**Channels**
+- *"send the report to my Telegram"*
+- *"reply to the last Discord message in #engineering"*
+- *"email this summary to the team"*
+- Hooks into 24 channels: Telegram, Discord, Slack, WhatsApp, iMessage, email, Matrix, IRC, Signal, Bluesky, Mastodon, KakaoTalk, LINE, and more.
+
+**Plug in anything**
+- *"add an MCP server for my Notion workspace"*
+- *"connect to this REST API and call it like a tool"*
+- *"add my Anthropic key — sk-ant-..."*
+
+**Heavy lifting**
+- *"plan how to migrate this service in stages"*
+- *"spawn 5 agents to research these 5 things in parallel"*
+- *"keep working on this until done — I'm going to bed"*
+
+Full registry is under `src/predacore/tools/`. Or just ask the agent: *"what can you do?"*
 
 ## How it remembers
 
@@ -74,7 +115,7 @@ Memory is a real database on your laptop, not just chat history. Every conversat
 
 When you ask something, it doesn't just look at the current chat — it searches everything it's learned about you and surfaces what's relevant. Bug from three weeks ago? It pulls it up. Preference you stated once? It honors it.
 
-Behind the scenes there's a fast search engine doing the heavy lifting (semantic + keyword search + a re-ranker). You don't need to know how — it just works.
+PredaCore's super fast Rust kernel handles all of this in the background — semantic search, keyword search, and a re-ranker working together so the right memory surfaces at the right time.
 
 ## Benchmark
 
