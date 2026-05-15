@@ -120,10 +120,7 @@ def _check_rust_kernel() -> _StepResult:
             ok=False,
             severity="err",
             detail="not importable — required for embeddings + vector search",
-            hint=(
-                "maturin develop --release "
-                "--manifest-path src/predacore_core_crate/Cargo.toml"
-            ),
+            hint="pip install --upgrade predacore_core",
         )
     try:
         dim = int(predacore_core.embedding_dim())
