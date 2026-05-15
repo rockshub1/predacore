@@ -13,10 +13,10 @@ Covers the 16 pyo3 functions that were previously untested from Python:
 ``extract_entities`` is already covered by test_memory.py's
 TestRustEntityExtraction class.
 
-The Rust crate has 79 inline #[cfg(test)] tests that are run via
-``cargo test`` from ``src/predacore_core_crate/``. Those verify correctness
-in Rust. These Python tests verify the pyo3 bridge layer — arg coercion,
-return type marshalling, type safety — which cargo tests can't catch.
+The Rust crate has inline #[cfg(test)] tests that run in the private
+``predacore-kernel-rust`` repo's CI. Those verify correctness in Rust.
+These Python tests verify the pyo3 bridge layer — arg coercion, return
+type marshalling, type safety — which cargo tests can't catch.
 
 The full 500-question LongMemEval benchmark at ``benchmarks/`` exercises
 every one of these functions at scale (R@5 = 0.9574). These unit tests
@@ -31,10 +31,7 @@ import pytest
 # Skip the whole module if predacore_core isn't built (maturin develop wasn't run)
 predacore_core = pytest.importorskip(
     "predacore_core",
-    reason=(
-        "predacore_core extension not built. "
-        "Run `cd src/predacore_core_crate && maturin develop --release` first."
-    ),
+    reason="predacore_core not installed. Run `pip install --upgrade predacore_core`.",
 )
 
 
