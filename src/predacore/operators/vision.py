@@ -23,7 +23,7 @@ Architecture
     * ``RustOmniParser``  — predacore_core.parse_screen(png_bytes) via
       ``ort`` v2 (ONNX Runtime Rust bindings) + CoreML execution
       provider on Apple Silicon. ~30-50ms per screenshot. **Pending —
-      see ``predacore_core_crate/src/omniparser.rs`` skeleton.**
+      implementation lives in the private predacore-kernel-rust repo.**
     * ``CloudVisionFallback`` — calls Anthropic / Gemini / OpenAI vision
       with the screenshot + page tree request. Slow (~2s) but works
       out of the box without a model download. Ships today.

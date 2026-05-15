@@ -152,18 +152,14 @@ Three important caveats before anyone reads "0.9574" as "solved."
 ### Prerequisites
 
 ```bash
-# Python 3.11+, Rust toolchain, maturin
+# Python 3.10+ — Rust toolchain NOT required (predacore_core ships as
+# a pre-built wheel on PyPI; pip installs it transparently)
 git clone https://github.com/<org>/predacore.git
 cd predacore
 
-# Create venv and install the Python package
+# Create venv and install (Rust kernel comes from PyPI automatically)
 python3.11 -m venv .venv
 .venv/bin/pip install -e .
-
-# Build the Rust compute kernel (predacore_core)
-cd src/predacore_core_crate
-../../.venv/bin/python -m maturin develop --release
-cd ../..
 ```
 
 ### Download the LongMemEval dataset
@@ -264,9 +260,9 @@ retrieval itself.
 ## Reproducibility commit hash
 
 Results generated against predacore at the v0.1.0 tag with
-`predacore_core` built via `maturin develop --release`. Any downstream changes
-to `src/predacore/memory/`, `src/predacore/evals/longmemeval.py`, or
-`src/predacore_core_crate/` will affect the numbers.
+`predacore_core` installed from PyPI as a binary wheel. Any downstream
+changes to `src/predacore/memory/`, `src/predacore/evals/longmemeval.py`,
+or the Rust kernel (separate private repo) will affect the numbers.
 
 ---
 

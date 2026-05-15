@@ -23,8 +23,8 @@ Why TinyClick specifically (May 2026 research)
   exist for Florence-2; the Rust ``ort`` path can reuse them.
 
 This module ONLY downloads. Inference lives in the Rust ``ort``-based
-module (predacore_core_crate/src/omniparser.rs, to be repurposed) — see
-T4c task notes.
+module in the private predacore-kernel-rust repo (omniparser, pending
+implementation) — see T4c task notes.
 """
 from __future__ import annotations
 

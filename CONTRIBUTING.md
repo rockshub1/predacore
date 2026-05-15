@@ -23,16 +23,19 @@ python -m venv .venv
 source .venv/bin/activate
 
 # Install in development mode
+# (predacore_core, the Rust kernel, is fetched as a pre-built binary
+# from PyPI automatically — you don't need Rust toolchain locally.)
 pip install -e ".[dev]"
-
-# Build the Rust crate
-cd src/predacore_core_crate
-maturin develop --release
-cd ../..
 
 # Run tests
 pytest
 ```
+
+> **Note:** The Rust intelligence kernel (`predacore_core`) is closed
+> source and maintained in a separate private repository. It ships as
+> pre-compiled wheels on PyPI under the open-core model. Contributing
+> to this repo focuses on the Python orchestration layer — agent loop,
+> tools, memory pipeline, channel adapters, identity engine.
 
 ## How to Contribute
 

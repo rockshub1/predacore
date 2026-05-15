@@ -213,8 +213,9 @@ def _lazy_memory_types():
     """Return (MemoryType, ImportanceLevel) — local enums.
 
     The legacy `_vendor.common.memory_service` was deleted; the new memory
-    architecture (predacore_core_crate + predacore.memory) doesn't need these
-    enum types in its public API, so handlers carry their own definitions.
+    architecture (predacore_core Rust kernel + predacore.memory) doesn't
+    need these enum types in its public API, so handlers carry their
+    own definitions.
     """
     from enum import Enum, IntEnum
 
