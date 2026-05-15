@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/rockshub1/predacore/main/docs/logo/predacore-hero.png" alt="PredaCore" width="100%">
+  <img src="https://raw.githubusercontent.com/rockshub1/predacore/main/assets/predacore-hero.png" alt="PredaCore" width="100%">
 </p>
 
 <p align="center"><strong>The hyper-autonomous AI agent with persistent memory and 55 powerful tools.</strong></p>
@@ -216,7 +216,7 @@ predacore start --profile beast --daemon                # beast (autonomous)
 predacore start --profile beast --approvals --daemon    # beast, keep approval prompts
 ```
 
-Override any field in `~/.predacore/config.yaml` or via `PREDACORE_*` env vars. Full reference → [`docs/launch_profiles.md`](https://github.com/rockshub1/predacore/blob/main/docs/launch_profiles.md).
+Override any field in `~/.predacore/config.yaml` or via `PREDACORE_*` env vars. Run `predacore doctor` to see the resolved config for the active profile.
 
 ### Daily commands
 
@@ -260,9 +260,9 @@ Supported keys: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENRO
 
 ## Links
 
-**Deep dives:** [Memory](https://github.com/rockshub1/predacore/blob/main/docs/MEMORY.md) · [Identity](https://github.com/rockshub1/predacore/blob/main/docs/IDENTITY.md) · [Tools](https://github.com/rockshub1/predacore/blob/main/docs/TOOLS.md) · [Multi-agent](https://github.com/rockshub1/predacore/blob/main/docs/MULTI_AGENT.md) · [Safety](https://github.com/rockshub1/predacore/blob/main/docs/SAFETY.md) · [Autonomy](https://github.com/rockshub1/predacore/blob/main/docs/AUTONOMY.md) · [MCP](https://github.com/rockshub1/predacore/blob/main/docs/MCP.md) · [Channels](https://github.com/rockshub1/predacore/blob/main/docs/CHANNEL_ADAPTER.md) · [Launch profiles](https://github.com/rockshub1/predacore/blob/main/docs/launch_profiles.md)
-
 **Issues:** [github.com/rockshub1/predacore/issues](https://github.com/rockshub1/predacore/issues) · **Security:** [SECURITY.md](https://github.com/rockshub1/predacore/blob/main/SECURITY.md) · **Contributing:** [CONTRIBUTING.md](https://github.com/rockshub1/predacore/blob/main/CONTRIBUTING.md)
+
+**Deep dives:** docs are being rewritten — coming soon. In the meantime: `predacore doctor` shows live config, `predacore --help` lists every CLI subcommand, and the source under `src/predacore/` is annotated.
 
 ---
 
