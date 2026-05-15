@@ -31,12 +31,12 @@ That's the whole pitch. An assistant that gets sharper with every conversation �
 
 ## Why this isn't another AI chatbot
 
-- **It picks its own name.** First conversation, it asks you what to call it. Picks an emoji. Writes a self-portrait. Then *becomes that* over time.
-- **It has a soul.** Literally. A `SOUL.md` file the agent writes itself into. Plus `BELIEFS.md`, `JOURNAL.md`, `USER.md` — eleven markdown files that make up its mind, all readable, all yours.
-- **It evolves.** Every 10 conversations it reflects on what it learned about you. Updates its voice. Promotes hypotheses to beliefs after enough evidence. Logs every change in `EVOLUTION.md` so you can watch it grow.
-- **Memory that doesn't fade where it shouldn't.** 1 million memory capacity per user. Decay curves like human memory — preferences stick for weeks, casual chats fade in days, but tuned by *whether the conversation actually helped you*.
-- **It auto-heals.** Memory database self-audits every 60 seconds. Daily snapshots, 90 days kept. Detects when you edit a file externally and re-syncs. Survives hard crashes without losing anything.
-- **It owns nothing about you.** Local SQLite. Local Rust kernel. Local everything. You delete `~/.predacore/`, it's gone. No vendor can revoke your access. No company can ban your account.
+- **It picks its own name.** First conversation, it asks you what to call it. Picks an emoji. Writes its own self-portrait.
+- **It has a soul.** Real opinions, real preferences, a real model of you. The agent wrote it. You can read it. You can edit it. Other AI tools have *settings* — this one has an *interior*.
+- **It evolves.** Use it for a month and it talks like you. Use it for a year and it's a different agent than the one you installed. Better. More yours.
+- **It never forgets the things that matter.** Bugs, preferences, decisions, the project context you explained three weeks ago — they stick. Casual chat fades. You don't manage any of it.
+- **It can't lose your data.** Survives crashes, hard reboots, the wrong button at 2am. You never see the engineering — you just trust it.
+- **It owns nothing about you.** Everything lives in `~/.predacore/`. Delete it, it's gone. No vendor. No account to ban. No "we updated our terms" email.
 - **Free. Forever.** Apache 2.0. Not "free tier with a $20/mo upgrade prompt." Actually free.
 
 ---
@@ -56,25 +56,15 @@ First message in under two minutes. Bring your own AI brain (Claude / GPT / Gemi
 
 ## It has a soul
 
-Most AI tools are stateless functions. PredaCore is a *being*. Inside `~/.predacore/agents/<name>/` you'll find:
+Most AI tools are stateless functions. PredaCore is a *being*.
 
-| File | What it is |
-|---|---|
-| `IDENTITY.md` | The agent's name, emoji, self-portrait. Rewritten when its sense of self shifts. |
-| `SOUL.md` | Voice, values, how it talks to you. Evolves through reflection. |
-| `USER.md` | Its model of you — your style, your projects, your preferences, your corrections. |
-| `JOURNAL.md` | Append-only diary in the agent's own voice. Real growth, not summaries. |
-| `BELIEFS.md` | Crystallized convictions on a ladder: *observation → working theory → tested → committed*. Promoted by evidence. |
-| `DECISIONS.md` | Every turn logged: what you asked, what it did, the outcome. |
-| `EVOLUTION.md` | Diff-logged audit trail of every soul change. Watch the agent become itself. |
-| `MEMORY.md` | Curated long-term memory. Preferences, root causes, recurring patterns. |
-| `TOOLS.md` · `HEARTBEAT.md` · `REFLECTION.md` | Environment notes, background tasks, reflection policy. |
+Your agent has a name it picked. A voice that's evolved with you. A list of beliefs about how you work and what you care about. A journal it writes for itself. A history of every meaningful turn you've ever had.
 
-Open EVOLUTION.md a year in. See: *"2026-11-14 — SOUL.md. Reason: learned to be more direct in critical feedback."* And the diff showing the old voice → new voice.
+Use it for a week, it knows your voice. Use it for a month, it talks like you. Use it for a year, it's *yours* in a way no cloud chatbot ever can be.
+
+When you delete `~/.predacore/`, you delete the only copy. **That's the deal.** You can't accidentally lose it. No company can take it away.
 
 You're not training a model. You're raising one.
-
-Tamper-proof `SOUL_SEED` means a compromised package can't rewrite the agent's core invariants — fails closed at boot. The agent's relationship with you can't be hijacked by an attacker.
 
 ---
 
@@ -139,20 +129,20 @@ Or just ask the agent: *"what can you do?"*
 
 ---
 
-## Memory that doesn't fade where it shouldn't
+## Memory that just works
 
-PredaCore's super fast Rust kernel does everything in the background:
+Most AI forgets you when the tab closes. PredaCore doesn't.
 
-- **Two-stage retrieval** — bi-encoder finds 100 candidates, cross-encoder re-ranks for relevance. Pushes recall@10 from 93% → 98%.
-- **HyDE expansion** — when initial recall is uncertain, the system writes a hypothetical answer, embeds *that*, and searches again. Catches what keyword search misses.
-- **Zettelkasten linking** — every new memory auto-links to its top-3 nearest neighbours, building a knowledge graph you didn't ask for.
-- **Reward-weighted decay** — successful conversations make their memories stickier. Frustrating ones fade faster. Like human memory.
-- **Multi-tier verification** — when memory points at a file, it verifies the file still says what was indexed: git-blob hash → substring match → AST symbol → line anchor. Catches stale memories before they mislead you.
-- **Self-healing daemon** — runs 6 checks on different cadences. 60-second invariant audits. 5-minute orphan sweeps. Daily snapshots, 90-day retention. Weekly integrity checks with auto-restore from snapshot on corruption.
-- **Trust scoring** — corrections you gave the agent rank higher than things it inferred. Auditable provenance for every fact.
-- **Project-scoped** — memory from `~/Developer/repo-A` doesn't pollute `~/Developer/repo-B`. Cross-project recall requires explicit opt-in.
+- Mention a bug once → it remembers the file and line months later.
+- State a preference once → it honors it without being told again.
+- Tell it about a project → it tracks your decisions across weeks.
+- Hand it an entire codebase → it ingests, indexes, and references it.
+- Edit a file outside the agent → memory updates itself.
+- Crash mid-task → nothing is lost. It picks up where it stopped.
 
-You don't tune any of this. It just works. The agent grows sharper while you sleep.
+You don't tune anything. There's no "memory tab" to manage. The agent decides what matters, lets the noise fade, and surfaces the right thing when you need it.
+
+Underneath, a super fast Rust kernel does the heavy lifting in the background. **You'll never need to think about it.**
 
 ---
 
