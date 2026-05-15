@@ -52,7 +52,7 @@ def basic_genome():
         SkillStep,
     )
     genome = SkillGenome(
-        id="test_skill_001",
+        id="skill_abc123def456",
         name="test_search_summarize",
         description="Search then summarize",
         version="1.0.0",
@@ -101,7 +101,7 @@ class TestSkillGenome:
         assert g.invocation_count == 0
 
     def test_construction_with_values(self, basic_genome):
-        assert basic_genome.id == "test_skill_001"
+        assert basic_genome.id == "skill_abc123def456"
         assert basic_genome.name == "test_search_summarize"
         assert len(basic_genome.steps) == 2
         assert basic_genome.declared_tools == ["web_search", "write_file"]

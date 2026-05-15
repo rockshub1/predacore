@@ -248,7 +248,9 @@ class TestDataclassDefaults:
         assert cfg.max_tool_iterations == 1000
         assert cfg.enable_persona_drift_guard is True
         assert cfg.persona_drift_threshold == pytest.approx(0.32)
-        assert cfg.persona_drift_max_regens == 5
+        # v1.6.7 disabled drift regen by default (0 = telemetry-only;
+        # heuristic still assesses, but no LLM regen pass fires).
+        assert cfg.persona_drift_max_regens == 0
         assert cfg.max_spawn_depth == 16
         assert cfg.max_spawn_fanout == 64
 
@@ -367,7 +369,8 @@ class TestProfilePresets:
             assert p["launch"]["max_spawn_depth"] == 16
             assert p["launch"]["max_spawn_fanout"] == 64
             assert p["launch"]["max_tool_iterations"] == 1000
-            assert p["launch"]["persona_drift_max_regens"] == 5
+            # v1.6.7: drift regen off by default (was 5).
+            assert p["launch"]["persona_drift_max_regens"] == 0
 
     def test_get_profile_defaults_valid(self):
         result = _get_profile_defaults("enterprise")
