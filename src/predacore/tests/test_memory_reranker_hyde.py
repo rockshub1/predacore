@@ -99,6 +99,95 @@ class TestRerankerModule:
         assert instance.model_name == DEFAULT_RERANKER_MODEL
 
 
+class TestRerankerIdleUnload:
+    """v1.6.10 — the reranker holds ~1.2-1.5GB MPS once loaded.
+
+    A background watcher thread unloads it after N seconds of idle so
+    daemons doing code work / casual chat (not memory recall) reclaim
+    the RAM automatically. Next predict() reloads from HF cache (~14s).
+    These tests pin the env-var contract, constructor wiring, and the
+    unload path; we deliberately do NOT spin up a real watcher thread
+    so the suite stays fast and deterministic.
+    """
+
+    def test_idle_timeout_default_is_600_when_env_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC", raising=False)
+        assert Qwen3Reranker()._idle_timeout_sec == 600
+
+    def test_idle_timeout_env_var_overrides(self, monkeypatch) -> None:
+        monkeypatch.setenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC", "60")
+        assert Qwen3Reranker()._idle_timeout_sec == 60
+
+    def test_idle_timeout_zero_means_disabled(self, monkeypatch) -> None:
+        monkeypatch.setenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC", "0")
+        r = Qwen3Reranker()
+        assert r._idle_timeout_sec == 0
+        # Watcher must NOT start when timeout is 0 — invoke directly
+        # without going through model load (we'd need a real model).
+        r._maybe_start_unload_watcher()
+        assert r._unload_thread is None
+
+    def test_invalid_env_value_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC", "not-a-number")
+        # Must not crash construction. Falls back to DEFAULT_IDLE_TIMEOUT_SEC.
+        assert Qwen3Reranker()._idle_timeout_sec == 600
+
+    def test_constructor_arg_overrides_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC", "60")
+        assert Qwen3Reranker(idle_timeout_sec=30)._idle_timeout_sec == 30
+
+    def test_negative_timeout_clamped_to_zero(self) -> None:
+        """Negative timeout = disabled (mirrors zero semantics)."""
+        assert Qwen3Reranker(idle_timeout_sec=-10)._idle_timeout_sec == 0
+
+    def test_unload_drops_model_and_returns_true(self) -> None:
+        """Manually planting a fake model + invoking _unload should
+        release it and report success."""
+        from unittest.mock import MagicMock
+        r = Qwen3Reranker(idle_timeout_sec=0)
+        r._model = MagicMock(name="fake_cross_encoder")
+        assert r.is_loaded is True
+        assert r._unload() is True
+        assert r._model is None
+        assert r.is_loaded is False
+
+    def test_unload_noop_when_not_loaded(self) -> None:
+        """Fresh instance has no model — unload reports nothing-to-do."""
+        r = Qwen3Reranker(idle_timeout_sec=0)
+        assert r._unload() is False
+        assert r._model is None
+
+    def test_predict_refreshes_last_used_timestamp(self) -> None:
+        """Active predict() calls must keep the model loaded — the
+        watcher uses `_last_used_mono` as its idle reference."""
+        import time as _time
+        from unittest.mock import MagicMock
+        r = Qwen3Reranker(idle_timeout_sec=0)
+        # Plant a fake model that returns fixed scores
+        fake = MagicMock()
+        fake.predict.return_value = [0.0, 0.0]
+        r._model = fake
+        before = _time.monotonic()
+        # tiny sleep so monotonic delta is detectable
+        _time.sleep(0.001)
+        r.predict([("q", "d1"), ("q", "d2")])
+        assert r._last_used_mono >= before
+
+    def test_watcher_thread_is_daemon_when_started(self) -> None:
+        """Watcher thread must be a daemon so it dies with the daemon
+        process — no explicit shutdown hook required."""
+        r = Qwen3Reranker(idle_timeout_sec=600)
+        # Simulate "model just loaded" without an actual load:
+        r._last_used_mono = 0.0  # so first poll wouldn't think it's idle
+        r._maybe_start_unload_watcher()
+        assert r._unload_thread is not None
+        assert r._unload_thread.daemon is True
+        # Calling again must be idempotent — same thread
+        same = r._unload_thread
+        r._maybe_start_unload_watcher()
+        assert r._unload_thread is same
+
+
 class TestRerankerReorders:
     """The cross-encoder step must actually reorder by reranker score."""
 

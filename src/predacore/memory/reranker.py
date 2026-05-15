@@ -18,6 +18,13 @@ Default model: ``Qwen/Qwen3-Reranker-0.6B`` (Apache 2.0, 32k context,
 via ``sentence_transformers.CrossEncoder`` on first ``predict()`` call;
 subsequent calls reuse the loaded weights.
 
+Idle-unload: the loaded model holds ~1.2-1.5 GB in MPS / CUDA memory.
+After ``idle_timeout_sec`` seconds without a predict() call (default
+600 = 10 min via ``PREDACORE_RERANKER_IDLE_TIMEOUT_SEC``), a background
+watcher thread drops the model reference and calls ``mps.empty_cache``
+to release the GPU reservation. Next predict() reloads from the HF
+cache (~14s). Set the env var to 0 to disable (always-loaded mode).
+
 Wired in via:
   - ``UnifiedMemoryStore(reranker=Qwen3Reranker())`` at construction, OR
   - env flag ``PREDACORE_MEMORY_RERANKER=1`` + ``recall(rerank=True)``
@@ -35,6 +42,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -42,7 +51,9 @@ logger = logging.getLogger(__name__)
 
 # Default model — Qwen3-Reranker-0.6B is the current SOTA small-model
 # cross-encoder (MTEB-R 65.80, 32k context, 0.6B params, Apache 2.0).
-# Can be overridden via env or constructor for evaluation / A-B tests.
+# Confirmed latest in the Qwen reranker family as of 2026-05-15 — no
+# Qwen3.5 / Qwen4 reranker released yet. Can be overridden via env or
+# constructor for evaluation / A-B tests.
 DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 
 # How many candidates we ask the bi-encoder for when reranking is on.
@@ -50,6 +61,15 @@ DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 # reranker. 100 is the sweet spot for personal-use scale (~10-25k rows):
 # pushes recall@10 from BGE's ~93% to ~98% at ~200ms total per query.
 DEFAULT_RERANK_CANDIDATES = 100
+
+# Idle-unload default: free the ~1.2-1.5GB MPS weights after this many
+# seconds without a predict() call. Reload takes ~14s on warm cache.
+# Tuned for personal-use: most conversations don't hit memory recall on
+# every turn, so the reranker sits idle most of the time. 10 minutes
+# is long enough that an active session stays loaded, short enough
+# that overnight + during code work the RAM comes back. Set to 0 via
+# PREDACORE_RERANKER_IDLE_TIMEOUT_SEC=0 to disable (always-loaded).
+DEFAULT_IDLE_TIMEOUT_SEC = 600
 
 
 class Qwen3Reranker:
@@ -68,6 +88,7 @@ class Qwen3Reranker:
         self,
         model_name: str = DEFAULT_RERANKER_MODEL,
         max_length: int = 512,
+        idle_timeout_sec: int | None = None,
     ) -> None:
         # ``max_length`` is the per-pair token cap inside the cross-encoder.
         # Qwen3 supports 32k but most predacore memories are chunked at
@@ -78,10 +99,30 @@ class Qwen3Reranker:
         self._max_length = max_length
         self._model: Any = None  # CrossEncoder, lazy
         self._load_failed = False
+        # Lazy-unload bookkeeping. Reading the env var here makes per-test
+        # overrides cheap; pass an explicit int via constructor to bypass.
+        if idle_timeout_sec is None:
+            try:
+                idle_timeout_sec = int(
+                    os.getenv("PREDACORE_RERANKER_IDLE_TIMEOUT_SEC",
+                              str(DEFAULT_IDLE_TIMEOUT_SEC))
+                )
+            except ValueError:
+                idle_timeout_sec = DEFAULT_IDLE_TIMEOUT_SEC
+        self._idle_timeout_sec = max(0, int(idle_timeout_sec))
+        self._last_used_mono = 0.0
+        self._lock = threading.Lock()
+        self._unload_thread: threading.Thread | None = None
 
     def _ensure_loaded(self) -> bool:
-        """Load the model on first use. Returns False on import/load failure."""
+        """Load the model on first use. Returns False on import/load failure.
+
+        Also refreshes ``_last_used_mono`` (so the idle-unload watcher
+        knows we're active) and starts the watcher thread on first
+        successful load (one watcher per instance).
+        """
         if self._model is not None:
+            self._last_used_mono = time.monotonic()
             return True
         if self._load_failed:
             return False
@@ -131,6 +172,8 @@ class Qwen3Reranker:
                 trust_remote_code=False,
             )
             logger.info("Reranker %s loaded", self._model_name)
+            self._last_used_mono = time.monotonic()
+            self._maybe_start_unload_watcher()
             return True
         except (OSError, RuntimeError, ValueError) as exc:
             logger.warning(
@@ -161,6 +204,8 @@ class Qwen3Reranker:
             arr = _np.asarray(raw, dtype=_np.float32).reshape(-1)
             # Sigmoid: Qwen3-Reranker outputs raw logits by default.
             scores = 1.0 / (1.0 + _np.exp(-arr))
+            # Refresh idle timer — watcher uses monotonic delta from this.
+            self._last_used_mono = time.monotonic()
             return scores.tolist()
         except (RuntimeError, ValueError, OSError) as exc:
             logger.warning("Reranker predict failed: %s — preserving bi-encoder order", exc)
@@ -173,6 +218,91 @@ class Qwen3Reranker:
     @property
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    def _unload(self) -> bool:
+        """Drop the model + free GPU memory. Returns True if anything was freed.
+
+        Two-step free: drop the Python reference (so GC can reclaim CPU
+        objects + Torch tensors) AND call ``torch.mps.empty_cache()`` /
+        ``torch.cuda.empty_cache()`` (so the GPU driver releases the MPS
+        unified-memory / CUDA reservation). Without the explicit cache
+        flush, MPS holds onto the freed weights indefinitely on Apple
+        Silicon.
+        """
+        with self._lock:
+            if self._model is None:
+                return False
+            logger.info(
+                "Reranker %s unloading (idle > %ss) — freeing ~1.2-1.5GB MPS",
+                self._model_name, self._idle_timeout_sec,
+            )
+            self._model = None
+        # Force Python GC to drop the underlying torch tensors right now;
+        # otherwise the MPS allocator won't see the references go away
+        # until the next gen-2 collection (could be minutes).
+        import gc as _gc
+        _gc.collect()
+        # Best-effort GPU-cache flush. Failures here are silent —
+        # the unload still happened; the cache release is bonus.
+        try:
+            import torch as _torch
+            if hasattr(_torch, "mps") and _torch.backends.mps.is_available():
+                _torch.mps.empty_cache()
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+        return True
+
+    def _maybe_start_unload_watcher(self) -> None:
+        """Start the idle-unload watcher thread once per instance.
+
+        Skipped entirely when ``idle_timeout_sec <= 0`` (always-loaded
+        mode — set ``PREDACORE_RERANKER_IDLE_TIMEOUT_SEC=0`` to opt out).
+        The watcher is a daemon thread, dies with the process; no
+        explicit shutdown hook needed.
+        """
+        if self._unload_thread is not None:
+            return
+        if self._idle_timeout_sec <= 0:
+            return
+        # Poll every min(60s, timeout/4) — frequent enough to react
+        # close to the deadline, infrequent enough that the watcher
+        # itself is a no-op on RAM/CPU. For the default 600s timeout
+        # that's a 60s poll, which is fine.
+        poll_interval = max(15, min(60, self._idle_timeout_sec // 4))
+
+        def _watch() -> None:
+            while True:
+                time.sleep(poll_interval)
+                # Fast path: no model loaded means nothing to do; wait
+                # for next predict() to reload and restart the cycle.
+                if self._model is None:
+                    continue
+                idle = time.monotonic() - self._last_used_mono
+                if idle >= self._idle_timeout_sec:
+                    try:
+                        self._unload()
+                    except Exception as exc:  # noqa: BLE001 — watcher must never crash
+                        logger.warning(
+                            "Reranker unload failed: %s — keeping model loaded", exc,
+                        )
+
+        thread = threading.Thread(
+            target=_watch,
+            name=f"reranker-idle-unload-{self._model_name}",
+            daemon=True,
+        )
+        thread.start()
+        self._unload_thread = thread
+        logger.debug(
+            "Reranker idle-unload watcher started (timeout=%ss, poll=%ss)",
+            self._idle_timeout_sec, poll_interval,
+        )
 
 
 def maybe_default_reranker() -> Qwen3Reranker | None:
