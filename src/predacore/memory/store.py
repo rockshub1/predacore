@@ -214,6 +214,85 @@ _MISSING = object()
 
 
 # ---------------------------------------------------------------------------
+# v1.6.13 — MMR post-recall diversity stage
+# ---------------------------------------------------------------------------
+
+
+def _apply_mmr(
+    results: list[tuple[dict[str, Any], float]],
+    top_k: int,
+    lambda_: float = 0.7,
+) -> list[tuple[dict[str, Any], float]]:
+    """Maximal Marginal Relevance — greedy selection balancing relevance + novelty.
+
+    At each step picks the candidate that maximizes::
+
+        lambda * relevance - (1 - lambda) * max_cosine_to_already_selected
+
+    Requires each ``mem`` to carry an ``embedding`` BLOB (or ``_embedding``
+    list) so pairwise cosine can be computed. The N+1 batched fetch shipped
+    in v1.6.13 already does ``SELECT *``, so the blob is on every row.
+
+    Fails open: if any candidate is missing its embedding, returns the
+    original (relevance-ordered) list truncated to ``top_k``. Same when
+    ``lambda_ >= 1.0`` (no diversity weight) — that path matches caller's
+    pre-MMR expectation bit-exact.
+    """
+    if len(results) <= 1 or lambda_ >= 1.0:
+        return results[:top_k]
+
+    # Unpack embeddings; if any are missing, no MMR (return relevance order).
+    embeddings: list[list[float] | None] = []
+    for mem, _ in results:
+        emb = mem.get("_embedding")
+        if emb is None:
+            blob = mem.get("embedding")
+            if blob:
+                try:
+                    emb = _unpack_embedding(blob)
+                except (struct.error, TypeError):
+                    emb = None
+        embeddings.append(emb)
+    missing_count = sum(1 for e in embeddings if e is None)
+    if missing_count:
+        # Observability: when MMR is enabled but silently no-ops because
+        # candidates lack embeddings, the user can see why in the log
+        # instead of wondering why diversity isn't kicking in.
+        logger.debug(
+            "MMR skipped: %d/%d candidates missing embedding — preserving "
+            "relevance order",
+            missing_count, len(embeddings),
+        )
+        return results[:top_k]
+
+    # Greedy MMR. Always take the relevance-top first (index 0), then
+    # iteratively pick the candidate with highest mmr_score.
+    target = min(top_k, len(results))
+    selected: list[int] = [0]
+    remaining = list(range(1, len(results)))
+    while len(selected) < target and remaining:
+        best_score = -float("inf")
+        best_idx = -1
+        for c_idx in remaining:
+            relevance = results[c_idx][1]
+            # Max cosine to any already-selected. Rust kernel does this fast
+            # — we already depend on predacore_core for every recall.
+            max_sim = max(
+                predacore_core.cosine_similarity(embeddings[c_idx], embeddings[s_idx])
+                for s_idx in selected
+            )
+            mmr_score = lambda_ * relevance - (1 - lambda_) * max_sim
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = c_idx
+        if best_idx < 0:
+            break
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+    return [results[i] for i in selected]
+
+
+# ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
@@ -2283,6 +2362,8 @@ class UnifiedMemoryStore:
         rerank_candidates: int | None = None,
         use_hyde: bool | None = None,
         hyde_llm: Any = None,
+        multiquery_llm: Any = None,
+        multiquery_n: int | None = None,
     ) -> list[tuple[dict[str, Any], float]]:
         """
         Recall memories by semantic similarity (predacore_core SIMD cosine).
@@ -2356,6 +2437,40 @@ class UnifiedMemoryStore:
                 "1", "true", "yes", "on",
             }
 
+        # v1.6.13 — Multi-query rewriting (#11 #12 #15). When multiquery_llm
+        # is wired and PREDACORE_MEMORY_MULTIQUERY=1, ask the LLM for N
+        # alternative phrasings of the query, fan out parallel recalls,
+        # union results by id (max score per id), return top_k.
+        # Closes the bi-encoder phrasing-mismatch gap that HyDE only addresses
+        # on low-confidence queries. Default OFF; opt-in via env flag.
+        # multiquery_llm=None on inner recalls (via _recall_multiquery)
+        # prevents infinite recursion.
+        if (
+            multiquery_llm is not None
+            and query and query.strip()
+            and os.getenv("PREDACORE_MEMORY_MULTIQUERY", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ):
+            if multiquery_n is None:
+                try:
+                    multiquery_n = int(
+                        os.getenv("PREDACORE_MEMORY_MULTIQUERY_N", "3")
+                    )
+                except ValueError:
+                    multiquery_n = 3
+            return await self._recall_multiquery(
+                query=query,
+                multiquery_llm=multiquery_llm,
+                multiquery_n=multiquery_n,
+                user_id=user_id, top_k=top_k,
+                memory_types=memory_types, min_importance=min_importance,
+                scopes=scopes, team_id=team_id,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
+                rerank=rerank, rerank_candidates=rerank_candidates,
+                use_hyde=use_hyde, hyde_llm=hyde_llm,
+            )
+
         # Empty query → semantic has no meaning, use keyword path
         if not query or not query.strip():
             return await self._recall_keyword(
@@ -2396,10 +2511,40 @@ class UnifiedMemoryStore:
         # when we re-sort by weighted score below, we don't accidentally
         # drop a row that the vector index ranked low but the weights push
         # to the top (e.g. a high-confidence user_corrected row).
+        #
+        # Batched fetch (v1.6.13): replaced the previous per-id loop of
+        # _get_memory_via_adapter / _get_memory_sync calls with a single
+        # `WHERE id IN (...)` round-trip. At fetch_k=100 this collapses
+        # 100 SQL queries (+ 100 thread hops on the raw-conn path) into 1.
+        # Recall semantics preserved — strict user_id match (NOT the
+        # "default" wildcard that _fetch_rows_by_ids allows for HyDE).
         candidates: list[tuple[dict[str, Any], float]] = []
-        if self._db_adapter is not None:
+        if hits:
+            ids = [memory_id for memory_id, _ in hits]
+            placeholders = ",".join("?" * len(ids))
+            sql = f"SELECT * FROM memories WHERE id IN ({placeholders})"
+            if self._db_adapter is not None:
+                rows = await self._db_adapter.fetchall(self._DB_NAME, sql, ids)
+            else:
+                def _batch_fetch():
+                    cur = self._conn.execute(sql, tuple(ids))
+                    return cur.fetchall()
+                async with self._db_lock:
+                    rows = await self._in_thread(_batch_fetch)
+            # Build id→row map for ordered lookup driven by the hits list,
+            # which preserves the vector index's scoring order.
+            mems_by_id: dict[str, dict[str, Any]] = {}
+            for r in rows or []:
+                # sqlite3.Row supports keys()/[] but not dict() directly.
+                if hasattr(r, "keys"):
+                    mem = {k: r[k] for k in r.keys()}
+                else:
+                    mem = dict(r)
+                mems_by_id[mem["id"]] = mem
+            # Apply the same filter chain as the previous loop, in order,
+            # preserving the score from `hits` (pre-weight vector score).
             for memory_id, score in hits:
-                mem = await self._get_memory_via_adapter(memory_id)
+                mem = mems_by_id.get(memory_id)
                 if mem is None:
                     continue
                 if mem["user_id"] != user_id:
@@ -2416,26 +2561,6 @@ class UnifiedMemoryStore:
                 if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded, skips=self._invariant_skips):
                     continue
                 candidates.append((mem, _apply_ranking_weights(score, mem)))
-        else:
-            async with self._db_lock:
-                for memory_id, score in hits:
-                    mem = await self._in_thread(self._get_memory_sync, memory_id)
-                    if mem is None:
-                        continue
-                    if mem["user_id"] != user_id:
-                        continue
-                    if memory_types and mem["memory_type"] not in memory_types:
-                        continue
-                    if mem["importance"] < min_importance:
-                        continue
-                    if not _memory_matches_scope(mem, scopes, team_id=team_id):
-                        continue
-                    if not _matches_project_filter(mem, project_id):
-                        self._invariant_skips["project_mismatch"] += 1
-                        continue
-                    if not _memory_is_visible_in_recall(mem, show_superseded=show_superseded, skips=self._invariant_skips):
-                        continue
-                    candidates.append((mem, _apply_ranking_weights(score, mem)))
 
         # Sort by weighted score (trust × confidence × decay × similarity),
         # descending. Then truncate to top_k.
@@ -2497,7 +2622,145 @@ class UnifiedMemoryStore:
         if rerank and self._reranker is not None and len(results) > 1:
             results = await self._apply_reranker(query, results, top_k)
 
+        # v1.6.13 — MMR diversity (#13). Greedy reorder of the top-k that
+        # balances relevance with novelty (no near-duplicates from the same
+        # source file dominating the top). Doesn't change recall — only the
+        # order of what's already in the result pool. Off by default; opt-in
+        # via PREDACORE_MEMORY_MMR=1. lambda=0.7 is the published default
+        # (Carbonell & Goldstein 1998); higher = more relevance, lower = more
+        # diversity. lambda=1.0 reproduces current behavior exactly.
+        if (
+            len(results) > 1
+            and os.getenv("PREDACORE_MEMORY_MMR", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ):
+            try:
+                _mmr_lambda = float(os.getenv("PREDACORE_MEMORY_MMR_LAMBDA", "0.7"))
+            except ValueError:
+                _mmr_lambda = 0.7
+            results = _apply_mmr(results, top_k=top_k, lambda_=_mmr_lambda)
+
         return results
+
+    async def _recall_multiquery(
+        self,
+        *,
+        query: str,
+        multiquery_llm: Any,
+        multiquery_n: int,
+        user_id: str,
+        top_k: int,
+        memory_types: list[str] | None,
+        min_importance: int,
+        scopes: list[str] | None,
+        team_id: str | None,
+        show_superseded: bool,
+        project_id: str | list[str] | None,
+        verify: bool,
+        verify_drop: bool,
+        rerank: bool,
+        rerank_candidates: int,
+        use_hyde: bool,
+        hyde_llm: Any,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """Multi-query expansion: rewrite via LLM, fan out parallel recalls,
+        union results by id with max score per id.
+
+        Closes #11 (temporal queries phrased differently), #12 (short
+        preferences with single-phrasing matching), and #15 (HyDE only fires
+        on low-confidence — multi-query is always-on for relevant queries).
+
+        Inner ``recall()`` calls pass ``multiquery_llm=None`` to prevent
+        infinite recursion. If the rewriter returns no rewrites (LLM
+        unavailable, timeout, parse failure), falls through to a normal
+        single-query recall — no degradation versus the multiquery_llm=None
+        path.
+        """
+        # Local import to avoid circular dependency at module load.
+        from .query_rewriter import QueryRewriter
+        rewriter = QueryRewriter(multiquery_llm)
+        rewrites = await rewriter.rewrite(query, n=multiquery_n)
+        if not rewrites:
+            # Rewriter failed or returned nothing — fall back to single-query
+            # recall on the original. Same outcome as if multi-query was off.
+            return await self.recall(
+                query=query, user_id=user_id, top_k=top_k,
+                memory_types=memory_types, min_importance=min_importance,
+                scopes=scopes, team_id=team_id,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
+                rerank=rerank, rerank_candidates=rerank_candidates,
+                use_hyde=use_hyde, hyde_llm=hyde_llm,
+                multiquery_llm=None,  # prevent re-entry
+            )
+
+        # Original query + rewrites, dedup by lowercase strip.
+        seen: set[str] = set()
+        queries: list[str] = []
+        for q in [query, *rewrites]:
+            key = q.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                queries.append(q.strip())
+
+        # Fan-out: parallel recalls, all with multiquery_llm=None to break
+        # recursion. Each goes through the normal recall pipeline (BGE +
+        # weights + optional rerank + MMR).
+        tasks = [
+            self.recall(
+                query=q, user_id=user_id, top_k=top_k,
+                memory_types=memory_types, min_importance=min_importance,
+                scopes=scopes, team_id=team_id,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
+                rerank=rerank, rerank_candidates=rerank_candidates,
+                use_hyde=use_hyde, hyde_llm=hyde_llm,
+                multiquery_llm=None,
+            )
+            for q in queries
+        ]
+        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Union by id, take MAX score per id (best evidence wins).
+        merged: dict[str, tuple[dict[str, Any], float]] = {}
+        all_failed = True
+        for variant_results in all_results:
+            if isinstance(variant_results, BaseException):
+                logger.debug("Multi-query variant failed: %s", variant_results)
+                continue
+            all_failed = False
+            for mem, score in variant_results:
+                mid = mem.get("id")
+                if not mid:
+                    continue
+                existing = merged.get(mid)
+                if existing is None or score > existing[1]:
+                    merged[mid] = (mem, float(score))
+
+        # Edge case: every parallel recall raised (systemic failure, not just
+        # an empty result). Fall back to a single-query recall on the original
+        # so the caller doesn't get [] when they would have gotten SOMETHING
+        # without multi-query enabled.
+        if all_failed:
+            logger.warning(
+                "Multi-query: all %d variant recalls failed — "
+                "falling back to single-query on original",
+                len(queries),
+            )
+            return await self.recall(
+                query=query, user_id=user_id, top_k=top_k,
+                memory_types=memory_types, min_importance=min_importance,
+                scopes=scopes, team_id=team_id,
+                show_superseded=show_superseded, project_id=project_id,
+                verify=verify, verify_drop=verify_drop,
+                rerank=rerank, rerank_candidates=rerank_candidates,
+                use_hyde=use_hyde, hyde_llm=hyde_llm,
+                multiquery_llm=None,  # prevent re-entry
+            )
+
+        # Sort by max-score descending, truncate to top_k.
+        out = sorted(merged.values(), key=lambda x: x[1], reverse=True)
+        return out[:top_k]
 
     async def _apply_reranker(
         self,

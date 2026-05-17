@@ -343,7 +343,7 @@ def maybe_default_reranker() -> Qwen3Reranker | None:
     Returns None when disabled so callers can pass it as ``reranker=``
     without branching at every site.
     """
-    if os.getenv("PREDACORE_MEMORY_RERANKER", "1").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.getenv("PREDACORE_MEMORY_RERANKER", "0").strip().lower() in {"1", "true", "yes", "on"}:
         model_override = os.getenv("PREDACORE_MEMORY_RERANKER_MODEL", "").strip()
         if model_override:
             return Qwen3Reranker(model_name=model_override)

@@ -78,6 +78,8 @@ def ndcg_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
 async def evaluate_instance(
     instance: dict,
     embedder: Any,
+    *,
+    llm: Any = None,
     fetch_k: int = 50,
     k_values: tuple[int, ...] = (5, 10, 20),
 ) -> dict | None:
@@ -139,11 +141,19 @@ async def evaluate_instance(
                     session_id=sid,
                 )
 
-            # Semantic recall for the question
+            # Semantic recall for the question. When ``llm`` is wired,
+            # forwards it as both hyde_llm (low-confidence expansion) and
+            # multiquery_llm (always-on rephrase fan-out). Both are gated by
+            # their respective env flags (PREDACORE_MEMORY_HYDE,
+            # PREDACORE_MEMORY_MULTIQUERY); the llm being non-None just makes
+            # the LLM-dependent paths POSSIBLE — the env flag is what
+            # actually activates them.
             results = await store.recall(
                 query=question,
                 user_id="lme",
                 top_k=fetch_k,
+                hyde_llm=llm,
+                multiquery_llm=llm,
             )
         finally:
             store.close()
@@ -177,6 +187,7 @@ async def run_benchmark(
     max_instances: int | None = None,
     fetch_k: int = 50,
     k_values: tuple[int, ...] = (5, 10, 20),
+    llm: Any = None,
 ) -> dict:
     """Run LongMemEval against PredaCore memory and return aggregated metrics."""
     print(f"Loading dataset: {dataset_path}")
@@ -198,7 +209,7 @@ async def run_benchmark(
 
     for i, instance in enumerate(instances):
         result = await evaluate_instance(
-            instance, embedder, fetch_k=fetch_k, k_values=k_values
+            instance, embedder, llm=llm, fetch_k=fetch_k, k_values=k_values
         )
         if result is None:
             skipped_abs += 1
@@ -312,6 +323,18 @@ def main() -> int:
         default=None,
         help="Write full metrics dict to this JSON path",
     )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default=None,
+        help=(
+            "If set, wire claude_dev provider with this Claude model name "
+            "(e.g. claude-sonnet-4-6, claude-opus-4-7). Forwarded to "
+            "store.recall as both hyde_llm and multiquery_llm so PREDACORE_"
+            "MEMORY_HYDE=1 / PREDACORE_MEMORY_MULTIQUERY=1 can fire. Default "
+            "None = bi-encoder-only (no LLM calls, matches the prior baseline)."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.dataset.exists():
@@ -323,12 +346,21 @@ def main() -> int:
         )
         return 2
 
+    # Build optional LLM provider for HyDE + multi-query paths.
+    llm = None
+    if args.llm_model:
+        from predacore.llm_providers.claude_dev import ClaudeDevProvider
+        from predacore.llm_providers.base import ProviderConfig
+        llm = ClaudeDevProvider(ProviderConfig(model=args.llm_model, max_tokens=300))
+        print(f"LLM wired: claude_dev / {args.llm_model}")
+
     metrics = asyncio.run(
         run_benchmark(
             dataset_path=args.dataset,
             max_instances=args.max_instances,
             fetch_k=args.fetch_k,
             k_values=tuple(args.k),
+            llm=llm,
         )
     )
 

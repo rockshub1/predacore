@@ -85,12 +85,14 @@ class TestRerankerModule:
         monkeypatch.setenv("PREDACORE_MEMORY_RERANKER", "0")
         assert maybe_default_reranker() is None
 
-    def test_maybe_default_reranker_returns_instance_when_env_unset(self, monkeypatch) -> None:
-        # Wave 12: default is "1" (ON). Unset env should also enable.
+    def test_maybe_default_reranker_returns_none_when_env_unset(self, monkeypatch) -> None:
+        # v1.6.13: default flipped to "0" (OFF). After benchmark showed the
+        # per-instance reranker construction pattern leaks ~800MB per store
+        # (caught when ephemeral bench stores piled up 4.6GB swap), the
+        # default opted out until the singleton fix + smaller model land.
+        # Set PREDACORE_MEMORY_RERANKER=1 to explicitly enable.
         monkeypatch.delenv("PREDACORE_MEMORY_RERANKER", raising=False)
-        instance = maybe_default_reranker()
-        assert instance is not None
-        assert instance.model_name == DEFAULT_RERANKER_MODEL
+        assert maybe_default_reranker() is None
 
     def test_maybe_default_reranker_returns_instance_when_env_on(self, monkeypatch) -> None:
         monkeypatch.setenv("PREDACORE_MEMORY_RERANKER", "1")
@@ -352,8 +354,13 @@ class TestRecallBackwardCompat:
             assert results == []
 
     @pytest.mark.asyncio
-    async def test_recall_default_on_reranker_attached_when_env_unset(self, monkeypatch) -> None:
-        """Wave-12 default: env unset → reranker auto-attached (fail-open)."""
+    async def test_recall_default_off_reranker_not_attached_when_env_unset(self, monkeypatch) -> None:
+        """v1.6.13 default: env unset → reranker NOT attached.
+
+        See test_maybe_default_reranker_returns_none_when_env_unset for the
+        rationale on flipping from Wave-12's default-on. Opt-in via
+        PREDACORE_MEMORY_RERANKER=1.
+        """
         from predacore.memory.store import UnifiedMemoryStore
         import tempfile
         from pathlib import Path
@@ -361,7 +368,7 @@ class TestRecallBackwardCompat:
         monkeypatch.delenv("PREDACORE_MEMORY_RERANKER", raising=False)
         with tempfile.TemporaryDirectory() as td:
             store = UnifiedMemoryStore(db_path=str(Path(td) / "test.db"))
-            assert store._reranker is not None  # auto-picked from env default
+            assert store._reranker is None  # default-off
             # Empty store still returns empty
             results = await store.recall(query="anything")
             assert results == []
